@@ -48,6 +48,10 @@ Kept intentionally small so `sync.sh` re-syncs cleanly:
 - `cmd/o/main.go` — new runner, mirrors `launchInteractiveModel` without
   the `cmd` package plumbing
 - `cmd/o/headless.go` — o-only headless mode
+- `patches/17295-syntax-highlighting.diff` — sniped unmerged PR
+  ollama/ollama#17295 (syntax-highlighted fenced code blocks in the TUI);
+  sync.sh re-applies it after each sync — delete the patch once it merges
+  upstream
 - `cmd/o/model_helpers.go` — simplified copies of `showOrPullModel`,
   `ensureCloudStub`, `inferThinkingOption` from `cmd/cmd.go` (drops the
   `:cloud` suggestion flow; thinking inference takes capabilities directly)

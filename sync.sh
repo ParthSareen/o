@@ -28,6 +28,13 @@ sed -i '' 's|inferThinkingOption(&info.Capabilities, &runOptions{Model: opts.Mod
 grep -rl '"github.com/ollama/ollama' --include='*.go' . \
   | xargs sed -i '' 's|"github.com/ollama/ollama|"github.com/ParthSareen/o|g'
 
+# Re-apply sniped unmerged upstream work. When ollama/ollama#17295 merges and
+# the files already contain these changes, git apply will fail — delete the
+# patch at that point.
+if ! git apply --include='cmd/tui/chat/*' patches/17295-syntax-highlighting.diff 2>/dev/null; then
+  echo "note: syntax-highlighting patch not applied (already merged upstream? remove patches/17295-syntax-highlighting.diff)"
+fi
+
 go mod tidy
 go build ./...
 go test ./...

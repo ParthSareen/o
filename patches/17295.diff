@@ -1,0 +1,484 @@
+diff --git a/cmd/tui/chat/markdown.go b/cmd/tui/chat/markdown.go
+index 49dec98d64b..6cd964f36cc 100644
+--- a/cmd/tui/chat/markdown.go
++++ b/cmd/tui/chat/markdown.go
+@@ -5,11 +5,25 @@ import (
+ 	"unicode"
+ 	"unicode/utf8"
+ 
++	"github.com/alecthomas/chroma/v2/quick"
+ 	"github.com/charmbracelet/lipgloss"
++	"github.com/charmbracelet/x/ansi"
+ 	"github.com/mattn/go-runewidth"
++	"github.com/muesli/termenv"
+ )
+ 
+ func renderMarkdownForView(markdown string, width int) string {
++	return renderMarkdownForViewWithCodeCache(markdown, width, nil)
++}
++
++type markdownCodeBlockCacheKey struct {
++	language  string
++	source    string
++	formatter string
++	style     string
++}
++
++func renderMarkdownForViewWithCodeCache(markdown string, width int, codeCache *map[markdownCodeBlockCacheKey]string) string {
+ 	if width < 20 {
+ 		width = 20
+ 	}
+@@ -17,16 +31,26 @@ func renderMarkdownForView(markdown string, width int) string {
+ 	source := strings.Split(strings.TrimRight(markdown, "\n"), "\n")
+ 	var rendered []string
+ 	inCodeBlock := false
++	codeLanguage := ""
++	var codeLines []string
+ 	for i := 0; i < len(source); i++ {
+ 		line := strings.TrimRight(source[i], "\r")
+ 		trimmed := strings.TrimSpace(line)
+ 
+ 		if strings.HasPrefix(trimmed, "```") {
+-			inCodeBlock = !inCodeBlock
++			if inCodeBlock {
++				rendered = append(rendered, renderMarkdownCodeBlock(codeLines, codeLanguage, width, codeCache, true)...)
++				codeLines = nil
++				inCodeBlock = false
++				codeLanguage = ""
++			} else {
++				inCodeBlock = true
++				codeLanguage = markdownCodeFenceLanguage(trimmed)
++			}
+ 			continue
+ 		}
+ 		if inCodeBlock {
+-			rendered = append(rendered, renderMarkdownCodeLine(line, width)...)
++			codeLines = append(codeLines, line)
+ 			continue
+ 		}
+ 
+@@ -47,6 +71,9 @@ func renderMarkdownForView(markdown string, width int) string {
+ 		}
+ 		rendered = append(rendered, wrapMarkdownInline(line, width)...)
+ 	}
++	if inCodeBlock {
++		rendered = append(rendered, renderMarkdownCodeBlock(codeLines, codeLanguage, width, codeCache, false)...)
++	}
+ 	return strings.Join(rendered, "\n")
+ }
+ 
+@@ -218,15 +245,122 @@ func renderMarkdownRunes(runes []markdownInlineRune) string {
+ 	return b.String()
+ }
+ 
+-func renderMarkdownCodeLine(line string, width int) []string {
++func renderMarkdownCodeBlock(source []string, language string, width int, codeCache *map[markdownCodeBlockCacheKey]string, complete bool) []string {
+ 	codeWidth := max(1, width-2)
+-	lines := wrapChatText(line, codeWidth)
++	code := strings.Join(source, "\n")
++	lines := wrapChatText(code, codeWidth)
++	if highlighted, ok := highlightMarkdownCodeBlock(language, code, codeCache, complete); ok {
++		lines = wrapHighlightedMarkdownCode(highlighted, codeWidth)
++	}
+ 	for i, wrapped := range lines {
+ 		lines[i] = "  " + chatCodeBlockStyle.Render(wrapped)
+ 	}
+ 	return lines
+ }
+ 
++func markdownCodeFenceLanguage(fence string) string {
++	info := strings.TrimSpace(strings.TrimPrefix(fence, "```"))
++	if info == "" {
++		return ""
++	}
++	return strings.Fields(info)[0]
++}
++
++func highlightMarkdownCodeBlock(language, source string, codeCache *map[markdownCodeBlockCacheKey]string, complete bool) (string, bool) {
++	if language == "" || source == "" || lipgloss.ColorProfile() == termenv.Ascii {
++		return source, false
++	}
++
++	key := markdownCodeBlockCacheKey{
++		language:  language,
++		source:    source,
++		formatter: markdownCodeFormatter(),
++		style:     markdownCodeStyle(),
++	}
++	if complete && codeCache != nil && *codeCache != nil {
++		if highlighted, ok := (*codeCache)[key]; ok {
++			return highlighted, true
++		}
++	}
++
++	var rendered strings.Builder
++	if err := quick.Highlight(&rendered, source, language, key.formatter, key.style); err != nil {
++		return source, false
++	}
++	highlighted := strings.TrimSuffix(rendered.String(), "\n")
++	if complete && codeCache != nil {
++		if *codeCache == nil {
++			*codeCache = make(map[markdownCodeBlockCacheKey]string)
++		}
++		(*codeCache)[key] = highlighted
++	}
++	return highlighted, true
++}
++
++func wrapHighlightedMarkdownCode(highlighted string, width int) []string {
++	lines := strings.Split(ansi.Hardwrap(highlighted, width, true), "\n")
++	activeStyle := ""
++	for i, line := range lines {
++		lines[i] = activeStyle + line
++		activeStyle = markdownCodeANSIStyle(activeStyle, line)
++		if activeStyle != "" && i < len(lines)-1 {
++			lines[i] += "\x1b[0m"
++		}
++	}
++	return lines
++}
++
++func markdownCodeANSIStyle(activeStyle, line string) string {
++	for {
++		start := strings.Index(line, "\x1b[")
++		if start < 0 {
++			return activeStyle
++		}
++		line = line[start+2:]
++		end := strings.IndexByte(line, 'm')
++		if end < 0 {
++			return activeStyle
++		}
++		sequence := line[:end]
++		if markdownCodeANSIReset(sequence) {
++			activeStyle = ""
++		} else {
++			activeStyle += "\x1b[" + sequence + "m"
++		}
++		line = line[end+1:]
++	}
++}
++
++func markdownCodeANSIReset(sequence string) bool {
++	if sequence == "" {
++		return true
++	}
++	for _, parameter := range strings.Split(sequence, ";") {
++		if parameter == "0" {
++			return true
++		}
++	}
++	return false
++}
++
++func markdownCodeFormatter() string {
++	switch lipgloss.ColorProfile() {
++	case termenv.TrueColor:
++		return "terminal16m"
++	case termenv.ANSI256:
++		return "terminal256"
++	default:
++		return "terminal16"
++	}
++}
++
++func markdownCodeStyle() string {
++	if lipgloss.HasDarkBackground() {
++		return "github-dark"
++	}
++	return "github"
++}
++
+ func renderMarkdownTable(lines []string, width int) ([]string, int) {
+ 	if len(lines) < 2 || !looksLikeMarkdownTableRow(lines[0]) || !isMarkdownTableSeparator(lines[1]) {
+ 		return nil, 0
+diff --git a/cmd/tui/chat/render.go b/cmd/tui/chat/render.go
+index 6cb21bced8d..8a666228855 100644
+--- a/cmd/tui/chat/render.go
++++ b/cmd/tui/chat/render.go
+@@ -37,6 +37,7 @@ type chatEntry struct {
+ 	version     int
+ 	renderKey   chatEntryRenderKey
+ 	renderLines []string
++	codeBlocks  map[markdownCodeBlockCacheKey]string
+ }
+ 
+ const (
+@@ -202,7 +203,11 @@ func (m chatModel) renderEntryLinesCached(index int, entry chatEntry, body strin
+ 		}
+ 	}
+ 
+-	lines := m.renderEntryLines(entry, body, width)
++	var codeCache *map[markdownCodeBlockCacheKey]string
++	if index >= 0 && index < len(m.entries) {
++		codeCache = &m.entries[index].codeBlocks
++	}
++	lines := m.renderEntryLines(entry, body, width, codeCache)
+ 	if index >= 0 && index < len(m.entries) {
+ 		m.entries[index].renderKey = key
+ 		m.entries[index].renderLines = slices.Clone(lines)
+@@ -493,20 +498,20 @@ func (m chatModel) renderEntry(entry chatEntry) (string, string) {
+ 	}
+ }
+ 
+-func (m chatModel) renderEntryLines(entry chatEntry, body string, width int) []string {
++func (m chatModel) renderEntryLines(entry chatEntry, body string, width int, codeCache *map[markdownCodeBlockCacheKey]string) []string {
+ 	if width < 20 {
+ 		width = 20
+ 	}
+ 	switch entry.role {
+ 	case "assistant":
+ 		innerWidth := max(1, width-lipgloss.Width(chatMessageIndent))
+-		lines := indentLines(splitRenderedBody(renderMarkdownForView(body, innerWidth)), chatMessageIndent)
++		lines := indentLines(splitRenderedBody(renderMarkdownForViewWithCodeCache(body, innerWidth, codeCache)), chatMessageIndent)
+ 		lines = append(lines, indentLines(renderMetricsLines(entry.metrics, innerWidth), chatMessageIndent)...)
+ 		return lines
+ 	case "thinking":
+ 		return renderThinkingLines(entry, width)
+ 	case "system", "slash":
+-		return splitRenderedBody(renderMarkdownForView(body, width))
++		return splitRenderedBody(renderMarkdownForViewWithCodeCache(body, width, codeCache))
+ 	case "user":
+ 		return renderUserMessageLines(body, width)
+ 	case "compaction_summary":
+diff --git a/cmd/tui/chat/render_test.go b/cmd/tui/chat/render_test.go
+index d6a1037377d..9fd1e719c80 100644
+--- a/cmd/tui/chat/render_test.go
++++ b/cmd/tui/chat/render_test.go
+@@ -11,6 +11,7 @@ import (
+ 
+ 	tea "github.com/charmbracelet/bubbletea"
+ 	"github.com/charmbracelet/lipgloss"
++	"github.com/muesli/termenv"
+ 
+ 	coreagent "github.com/ollama/ollama/agent"
+ 	"github.com/ollama/ollama/api"
+@@ -839,6 +840,25 @@ func TestRenderMarkdownStrongAfterPunctuation(t *testing.T) {
+ 	}
+ }
+ 
++func TestChatStreamingAssistantOutputRendersCodeFences(t *testing.T) {
++	m := chatModel{
++		width:   80,
++		height:  12,
++		running: true,
++	}
++
++	m.applyAgentEvent(coreagent.Event{Type: coreagent.EventMessageDelta, Content: "```go\npackage"})
++	m.applyAgentEvent(coreagent.Event{Type: coreagent.EventMessageDelta, Content: " main\n```"})
++
++	view := stripANSI(m.View())
++	if strings.Contains(view, "```") {
++		t.Fatalf("streamed fence markers should not render:\n%s", view)
++	}
++	if !strings.Contains(view, "package main") {
++		t.Fatalf("streamed code should remain visible:\n%s", view)
++	}
++}
++
+ func TestChatMouseWheelScrollsTranscriptWhileRunning(t *testing.T) {
+ 	m := chatModel{
+ 		width:         80,
+@@ -2111,3 +2131,139 @@ func TestRenderMarkdownTablePreservesValidSeparator(t *testing.T) {
+ 		t.Fatalf("valid Markdown table was not rendered:\n%s", plain)
+ 	}
+ }
++
++func TestRenderMarkdownCodeFencesHighlightLanguageTaggedCode(t *testing.T) {
++	profile := lipgloss.ColorProfile()
++	lipgloss.SetColorProfile(termenv.TrueColor)
++	defer lipgloss.SetColorProfile(profile)
++
++	markdown := strings.Join([]string{
++		"Use **greet** before running this code.",
++		"```go",
++		"package main",
++		"func greet(name string) string {",
++		"\treturn \"hello \" + name // greeting",
++		"}",
++		"```",
++		"",
++		"```",
++		"plain code stays plain",
++		"```",
++	}, "\n")
++
++	rendered := renderMarkdownForView(markdown, 72)
++	plain := stripANSI(rendered)
++	if strings.Contains(plain, "```") {
++		t.Fatalf("fence markers should not render:\n%s", plain)
++	}
++	for _, want := range []string{"package main", "func greet(name string) string {", "plain code stays plain"} {
++		if !strings.Contains(plain, want) {
++			t.Fatalf("rendered code is missing %q:\n%s", want, plain)
++		}
++	}
++	if !strings.Contains(rendered, chatStrongStyle.Render("greet")) {
++		t.Fatalf("inline Markdown should remain styled alongside code fences: %q", rendered)
++	}
++	for _, line := range strings.Split(rendered, "\n") {
++		if got := lipgloss.Width(line); got > 72 {
++			t.Fatalf("rendered code line width = %d, want <= 72: %q", got, stripANSI(line))
++		}
++	}
++	if got, ok := highlightMarkdownCodeBlock("go", "package main", nil, false); !ok || !strings.Contains(got, "\x1b[") {
++		t.Fatalf("language-tagged code should use Chroma highlighting: %q", got)
++	}
++	if got, ok := highlightMarkdownCodeBlock("", "plain code stays plain", nil, false); ok || got != "plain code stays plain" {
++		t.Fatalf("untagged code = %q, want plain code", got)
++	}
++}
++
++func TestRenderMarkdownCodeFencesRespectNoColorTerminals(t *testing.T) {
++	profile := lipgloss.ColorProfile()
++	lipgloss.SetColorProfile(termenv.Ascii)
++	defer lipgloss.SetColorProfile(profile)
++
++	if got, ok := highlightMarkdownCodeBlock("go", "package main", nil, false); ok || got != "package main" {
++		t.Fatalf("no-color output = %q, highlighted = %t", got, ok)
++	}
++}
++
++func TestRenderMarkdownCodeFencesHighlightMultilineConstructs(t *testing.T) {
++	profile := lipgloss.ColorProfile()
++	lipgloss.SetColorProfile(termenv.TrueColor)
++	defer lipgloss.SetColorProfile(profile)
++
++	rendered := renderMarkdownForView(strings.Join([]string{
++		"```go",
++		"/*",
++		" * This is a multi-line comment.",
++		" */",
++		"```",
++	}, "\n"), 72)
++
++	for _, line := range strings.Split(rendered, "\n") {
++		if strings.Contains(stripANSI(line), "multi-line comment") && !strings.Contains(line, "\x1b[") {
++			t.Fatalf("multiline comment should remain highlighted: %q", line)
++		}
++	}
++}
++
++func TestWrapHighlightedMarkdownCodePreservesANSIStyle(t *testing.T) {
++	lines := wrapHighlightedMarkdownCode("\x1b[31mabcdef\x1b[0m", 3)
++	if got, want := len(lines), 2; got != want {
++		t.Fatalf("wrapped lines = %d, want %d: %#v", got, want, lines)
++	}
++	if got, want := stripANSI(lines[0]), "abc"; got != want {
++		t.Fatalf("first line = %q, want %q", got, want)
++	}
++	if got, want := stripANSI(lines[1]), "def"; got != want {
++		t.Fatalf("continuation = %q, want %q", got, want)
++	}
++	if !strings.HasSuffix(lines[0], "\x1b[0m") || !strings.HasPrefix(lines[1], "\x1b[31m") {
++		t.Fatalf("ANSI style should reset and resume at the wrap boundary: %#v", lines)
++	}
++}
++
++func TestHighlightMarkdownCodeBlockCachesCompletedBlocks(t *testing.T) {
++	profile := lipgloss.ColorProfile()
++	lipgloss.SetColorProfile(termenv.TrueColor)
++	defer lipgloss.SetColorProfile(profile)
++
++	cache := map[markdownCodeBlockCacheKey]string{}
++	if _, ok := highlightMarkdownCodeBlock("go", "package main", &cache, true); !ok || len(cache) != 1 {
++		t.Fatalf("completed code block should be highlighted and cached: %#v", cache)
++	}
++	for key := range cache {
++		cache[key] = "cached highlighting"
++	}
++	if got, ok := highlightMarkdownCodeBlock("go", "package main", &cache, true); !ok || got != "cached highlighting" {
++		t.Fatalf("completed code block should use cached highlighting: %q", got)
++	}
++}
++
++func TestChatCompletedCodeBlockSurvivesLaterStreamingRender(t *testing.T) {
++	profile := lipgloss.ColorProfile()
++	lipgloss.SetColorProfile(termenv.TrueColor)
++	defer lipgloss.SetColorProfile(profile)
++
++	m := chatModel{entries: []chatEntry{newChatEntry(chatEntry{
++		role: "assistant",
++		content: strings.Join([]string{
++			"```go",
++			"package main",
++			"```",
++		}, "\n"),
++	})}}
++	m.renderTranscript(80)
++	if got := len(m.entries[0].codeBlocks); got != 1 {
++		t.Fatalf("completed block cache entries = %d, want 1", got)
++	}
++	for key := range m.entries[0].codeBlocks {
++		m.entries[0].codeBlocks[key] = "\x1b[31mcached code\x1b[0m"
++	}
++
++	m.entries[0].content += "\ncontinued response"
++	m.markEntryDirty(0)
++	if got := stripANSI(m.renderTranscript(80)); !strings.Contains(got, "cached code") {
++		t.Fatalf("later streamed content should reuse completed block highlighting: %q", got)
++	}
++}
+diff --git a/go.mod b/go.mod
+index cd57291b760..217b7ea3d74 100644
+--- a/go.mod
++++ b/go.mod
+@@ -21,13 +21,16 @@ require (
+ 
+ require (
+ 	github.com/agnivade/levenshtein v1.1.1
++	github.com/alecthomas/chroma/v2 v2.20.0
+ 	github.com/charmbracelet/bubbletea v1.3.10
+ 	github.com/charmbracelet/lipgloss v1.1.0
++	github.com/charmbracelet/x/ansi v0.10.1
+ 	github.com/d4l3k/go-bfloat16 v0.0.0-20211005043715-690c3bdd05f1
+ 	github.com/dlclark/regexp2 v1.11.5
+ 	github.com/emirpasic/gods/v2 v2.0.0-alpha
+ 	github.com/klauspost/compress v1.18.3
+ 	github.com/mattn/go-runewidth v0.0.16
++	github.com/muesli/termenv v0.16.0
+ 	github.com/nlpodyssey/gopickle v0.3.0
+ 	github.com/pdevine/tensor v0.0.0-20240510204454-f88f4562727c
+ 	github.com/pelletier/go-toml/v2 v2.2.2
+@@ -48,7 +51,6 @@ require (
+ 	github.com/buger/jsonparser v1.1.1 // indirect
+ 	github.com/bytedance/sonic/loader v0.1.1 // indirect
+ 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
+-	github.com/charmbracelet/x/ansi v0.10.1 // indirect
+ 	github.com/charmbracelet/x/cellbuf v0.0.13-0.20250311204145-2c3ea96c31dd // indirect
+ 	github.com/charmbracelet/x/term v0.2.1 // indirect
+ 	github.com/chewxy/hm v1.0.0 // indirect
+@@ -66,7 +68,6 @@ require (
+ 	github.com/mattn/go-pointer v0.0.1 // indirect
+ 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
+ 	github.com/muesli/cancelreader v0.2.2 // indirect
+-	github.com/muesli/termenv v0.16.0 // indirect
+ 	github.com/pkg/errors v0.9.1 // indirect
+ 	github.com/pmezard/go-difflib v1.0.0 // indirect
+ 	github.com/rivo/uniseg v0.4.7 // indirect
+diff --git a/go.sum b/go.sum
+index 5c57a64b23f..b8d390d9265 100644
+--- a/go.sum
++++ b/go.sum
+@@ -9,6 +9,12 @@ github.com/TheTitanrain/w32 v0.0.0-20180517000239-4f5cfb03fabf/go.mod h1:peYoMnc
+ github.com/agnivade/levenshtein v1.1.1 h1:QY8M92nrzkmr798gCo3kmMyqXFzdQVpxLlGPRBij0P8=
+ github.com/agnivade/levenshtein v1.1.1/go.mod h1:veldBMzWxcCG2ZvUTKD2kJNRdCk5hVbJomOvKkmgYbo=
+ github.com/ajstarks/svgo v0.0.0-20180226025133-644b8db467af/go.mod h1:K08gAheRH3/J6wwsYMMT4xOr94bZjxIelGM0+d/wbFw=
++github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
++github.com/alecthomas/assert/v2 v2.11.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
++github.com/alecthomas/chroma/v2 v2.20.0 h1:sfIHpxPyR07/Oylvmcai3X/exDlE8+FA820NTz+9sGw=
++github.com/alecthomas/chroma/v2 v2.20.0/go.mod h1:e7tViK0xh/Nf4BYHl00ycY6rV7b8iXBksI9E359yNmA=
++github.com/alecthomas/repr v0.5.1 h1:E3G4t2QbHTSNpPKBgMTln5KLkZHLOcU7r37J4pXBuIg=
++github.com/alecthomas/repr v0.5.1/go.mod h1:Fr0507jx4eOXV7AlPV6AVZLYrLIuIeSOWtW57eE/O/4=
+ github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
+ github.com/apache/arrow/go/arrow v0.0.0-20211112161151-bc219186db40 h1:q4dksr6ICHXqG5hm0ZW5IHyeEJXoIJSOZeBLmWPNeIQ=
+ github.com/apache/arrow/go/arrow v0.0.0-20211112161151-bc219186db40/go.mod h1:Q7yQnSMnLvcXlZ8RV+jwz/6y1rQTqbX6C82SndT52Zs=
+@@ -140,6 +146,8 @@ github.com/google/uuid v1.1.2/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+
+ github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+ github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+ github.com/grpc-ecosystem/grpc-gateway v1.16.0/go.mod h1:BDjrQk3hbvj6Nolgz8mAMFbcEtjT1g+wF4CSlocrBnw=
++github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
++github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
+ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
+ github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
+ github.com/josharian/intern v1.0.0/go.mod h1:5DoeVV0s6jJacbCEi61lwdGj/aVlrQvzHFFd8Hwg//Y=
