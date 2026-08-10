@@ -13,7 +13,7 @@ Copied from the ollama repo (see `sync.sh`), imports rewritten to
 | --- | --- |
 | `agent/` | harness core: session, events, tool registry, approvals, compactor, skills |
 | `agent/tools/` | bash, file, web, skill tools |
-| `cmd/agent/` | the agent TUI entry point (`ollama`'s `cmd/agent_tui.go` as `package main`) |
+| `cmd/o/` | the agent TUI entry point (`ollama`'s `cmd/o_tui.go` as `package main`) |
 | `cmd/tui/`, `cmd/tui/chat/` | interactive chat UI (bubbletea) |
 | `cmd/launch/` | **trimmed shim** — spinner + the ~10 types the TUI references; the integration runners (claude/codex/…) are intentionally excluded |
 | `cmd/config/`, `cmd/internal/filedata/`, `cmd/internal/fileutil/` | small support packages used by the TUI |
@@ -25,7 +25,7 @@ Copied from the ollama repo (see `sync.sh`), imports rewritten to
 
 ```sh
 go build ./... && go test ./...
-go run ./cmd/agent [model] [--system ...] [--allow-all-tools] [--no-tools]
+go run ./cmd/o [model] [--system ...] [--allow-all-tools] [--no-tools]
 ```
 
 Requires a local Ollama server (`ollama serve`) like the normal CLI.
@@ -34,9 +34,9 @@ Requires a local Ollama server (`ollama serve`) like the normal CLI.
 
 Kept intentionally small so `sync.sh` re-syncs cleanly:
 
-- `cmd/agent/main.go` — new runner, mirrors `launchInteractiveModel` without
+- `cmd/o/main.go` — new runner, mirrors `launchInteractiveModel` without
   the `cmd` package plumbing
-- `cmd/agent/model_helpers.go` — simplified copies of `showOrPullModel`,
+- `cmd/o/model_helpers.go` — simplified copies of `showOrPullModel`,
   `ensureCloudStub`, `inferThinkingOption` from `cmd/cmd.go` (drops the
   `:cloud` suggestion flow; thinking inference takes capabilities directly)
 - `cmd/launch/agent_shim.go` — hand-maintained types (`LauncherState`,
