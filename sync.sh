@@ -22,6 +22,7 @@ cp "$SRC/cmd/launch/spinner.go" cmd/launch/spinner.go
 # Agent TUI command, adapted for this repo (see README "Divergence").
 cp "$SRC/cmd/agent_tui.go" cmd/o/agent_tui.go
 sed -i '' 's/^package cmd$/package main/' cmd/o/agent_tui.go
+sed -i '' 's/^func agentToolsRegistry(/func agentToolsRegistryBase(/' cmd/o/agent_tui.go
 sed -i '' 's|inferThinkingOption(&info.Capabilities, &runOptions{Model: opts.Model, Think: opts.Think}, thinkExplicit)|inferThinkingOption(info.Capabilities, opts.Think, thinkExplicit)|' cmd/o/agent_tui.go
 
 # Rewrite import paths (quote-anchored: only Go import specs, not URLs.
