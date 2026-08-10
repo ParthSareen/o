@@ -72,7 +72,7 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := setupMCP(ctx, mcpConfigPath, os.Stderr); err != nil {
+	if err := setupMCP(ctx, mcpConfigPath, os.Stderr, !headless); err != nil {
 		return err
 	}
 	defer closeMCP()

@@ -14,8 +14,10 @@ package mcpclient
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ServerConfig describes one MCP server. Exactly one of Command (stdio
@@ -26,6 +28,20 @@ type ServerConfig struct {
 	Env     map[string]string `json:"env,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+	OAuth   *OAuthConfig      `json:"oauth,omitempty"`
+}
+
+// OAuthConfig optionally customizes OAuth for a URL server. With no config,
+// OAuth is still attempted automatically on 401 responses via dynamic client
+// registration.
+type OAuthConfig struct {
+	// ClientID/ClientSecret skip dynamic registration when the provider
+	// requires a preregistered OAuth app.
+	ClientID     string `json:"clientID,omitempty"`
+	ClientSecret string `json:"clientSecret,omitempty"`
+	// Disable turns off the OAuth flow for this server (requests go out
+	// unauthenticated; 401s surface as ordinary errors).
+	Disable bool `json:"disable,omitempty"`
 }
 
 // Config is the top-level mcp.json document.
@@ -72,5 +88,18 @@ func (c ServerConfig) validate() error {
 	case c.Command == "" && c.URL == "":
 		return fmt.Errorf("one of command or url is required")
 	}
+	if c.URL != "" && !strings.HasPrefix(c.URL, "https://") && !isLoopbackURL(c.URL) {
+		return fmt.Errorf("url must use https (http allowed only for loopback/dev servers)")
+	}
 	return nil
+}
+
+// isLoopbackURL allows plain http for local development servers only.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
 }

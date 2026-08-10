@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,11 +31,41 @@ type Manager struct {
 	sessions []*mcp.ClientSession
 	tools    []ServerTool
 	warnings []string
+
+	// OAuth wiring for URL servers
+	oauthCache  *oauthCache
+	openBrowser openBrowserFunc
+	consentOut  io.Writer
+}
+
+// ManagerOption customizes NewManager.
+type ManagerOption func(*Manager)
+
+// WithOAuth configures how URL servers perform OAuth consent: open opens the
+// authorization URL in a browser (nil = print only), consentOut receives the
+// consent prompts. The token cache defaults to ~/.ollama/mcp-oauth.json.
+func WithOAuth(open openBrowserFunc, consentOut io.Writer) ManagerOption {
+	return func(m *Manager) {
+		m.openBrowser = open
+		m.consentOut = consentOut
+	}
+}
+
+func withOAuthCache(c *oauthCache) ManagerOption {
+	return func(m *Manager) { m.oauthCache = c }
 }
 
 // NewManager creates a manager. clientInfo identifies this client to servers.
-func NewManager(clientInfo *mcp.Implementation) *Manager {
-	return &Manager{client: mcp.NewClient(clientInfo, nil)}
+func NewManager(clientInfo *mcp.Implementation, opts ...ManagerOption) *Manager {
+	m := &Manager{
+		client:     mcp.NewClient(clientInfo, nil),
+		oauthCache: defaultOAuthCache(),
+		consentOut: io.Discard,
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Connect connects every configured server and snapshots their tools. Servers
@@ -52,13 +83,19 @@ func (m *Manager) Connect(ctx context.Context, cfg *Config) {
 }
 
 func (m *Manager) connectServer(ctx context.Context, name string, sc ServerConfig) error {
-	transport, err := transportFor(sc)
+	transport, err := m.transportFor(name, sc)
 	if err != nil {
 		return err
 	}
-	cctx, cancel := context.WithTimeout(ctx, connectTimeout)
-	defer cancel()
-	session, err := m.client.Connect(cctx, transport, nil)
+	connectCtx := ctx
+	var cancel context.CancelFunc
+	// OAuth-capable URL servers may block on interactive browser consent;
+	// their budget is consentTimeout, not the handshake timeout.
+	if sc.URL == "" || (sc.OAuth != nil && sc.OAuth.Disable) {
+		connectCtx, cancel = context.WithTimeout(ctx, connectTimeout)
+		defer cancel()
+	}
+	session, err := m.client.Connect(connectCtx, transport, nil)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -68,7 +105,7 @@ func (m *Manager) connectServer(ctx context.Context, name string, sc ServerConfi
 
 	var cursor string
 	for {
-		res, err := session.ListTools(cctx, &mcp.ListToolsParams{Cursor: cursor})
+		res, err := session.ListTools(connectCtx, &mcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
 			m.warn(fmt.Sprintf("mcp server %q: list tools: %v", name, err))
 			return nil
@@ -86,11 +123,17 @@ func (m *Manager) connectServer(ctx context.Context, name string, sc ServerConfi
 	return nil
 }
 
-func transportFor(sc ServerConfig) (mcp.Transport, error) {
+func (m *Manager) transportFor(serverName string, sc ServerConfig) (mcp.Transport, error) {
 	if sc.URL != "" {
 		t := &mcp.StreamableClientTransport{Endpoint: sc.URL}
+		httpClient := http.DefaultClient
 		if len(sc.Headers) > 0 {
-			t.HTTPClient = &http.Client{Transport: headerRoundTripper{headers: sc.Headers, base: http.DefaultTransport}}
+			httpClient = &http.Client{Transport: headerRoundTripper{headers: sc.Headers, base: http.DefaultTransport}}
+		}
+		oauthDisabled := sc.OAuth != nil && sc.OAuth.Disable
+		t.HTTPClient = httpClient
+		if !oauthDisabled {
+			t.OAuthHandler = newOAuthHandler(serverName, sc.URL, sc, m.oauthCache, m.openBrowser, m.consentOut, httpClient)
 		}
 		return t, nil
 	}

@@ -14,6 +14,7 @@ import (
 	coreagent "github.com/ParthSareen/o/agent"
 	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/mcpclient"
+	"github.com/ParthSareen/o/cmd/launch"
 	"github.com/ParthSareen/o/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -23,7 +24,9 @@ var mcpManager *mcpclient.Manager
 
 // setupMCP loads the MCP config (missing file = no-op) and connects servers.
 // Failures are non-fatal: they surface as warnings printed by the caller.
-func setupMCP(ctx context.Context, configPath string, stderr io.Writer) error {
+// interactive controls OAuth consent UX: when false (headless/piped), the
+// authorization URL is printed instead of opened in a browser.
+func setupMCP(ctx context.Context, configPath string, stderr io.Writer, interactive bool) error {
 	if configPath == "" {
 		configPath = mcpclient.DefaultConfigPath()
 	}
@@ -35,7 +38,14 @@ func setupMCP(ctx context.Context, configPath string, stderr io.Writer) error {
 	if cfg == nil {
 		return nil
 	}
-	mcpManager = mcpclient.NewManager(&mcp.Implementation{Name: "o", Version: version.Version})
+	var open func(string)
+	if interactive {
+		open = launch.OpenBrowser
+	}
+	mcpManager = mcpclient.NewManager(
+		&mcp.Implementation{Name: "o", Version: version.Version},
+		mcpclient.WithOAuth(open, stderr),
+	)
 	mcpManager.Connect(ctx, cfg)
 	for _, w := range mcpManager.Warnings() {
 		fmt.Fprintf(stderr, "warning: %s\n", w)
