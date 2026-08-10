@@ -13,7 +13,7 @@ Copied from the ollama repo (see `sync.sh`), imports rewritten to
 | --- | --- |
 | `agent/` | harness core: session, events, tool registry, approvals, compactor, skills |
 | `agent/tools/` | bash, file, web, skill tools |
-| `cmd/o/` | the agent TUI entry point (`ollama`'s `cmd/o_tui.go` as `package main`) |
+| `cmd/o/` | the agent TUI entry point (`ollama`'s `cmd/agent_tui.go` as `package main`) |
 | `cmd/tui/`, `cmd/tui/chat/` | interactive chat UI (bubbletea) |
 | `cmd/launch/` | **trimmed shim** — spinner + the ~10 types the TUI references; the integration runners (claude/codex/…) are intentionally excluded |
 | `cmd/config/`, `cmd/internal/filedata/`, `cmd/internal/fileutil/` | small support packages used by the TUI |
