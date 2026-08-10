@@ -24,7 +24,6 @@ func main() {
 		multiModal          bool
 		contextWindowTokens int
 		headless            bool
-		mcpConfig           string
 	)
 
 	fs := flag.NewFlagSet("o", flag.ExitOnError)
@@ -34,7 +33,6 @@ func main() {
 	fs.BoolVar(&multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
 	fs.BoolVar(&headless, "headless", false, "print the response and exit (prompt from args or stdin)")
-	fs.StringVar(&mcpConfig, "mcp-config", "", "path to MCP config (default ~/.ollama/mcp.json)")
 	_ = fs.Parse(os.Args[1:])
 
 	model, prompt := "", ""
@@ -48,15 +46,15 @@ func main() {
 		headless = true
 	}
 
-	if err := run(model, prompt, system, allowAllTools, toolsDisabled, multiModal, contextWindowTokens, headless, mcpConfig); err != nil {
+	if err := run(model, prompt, system, allowAllTools, toolsDisabled, multiModal, contextWindowTokens, headless); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-// run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with
-// headless and MCP additions.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, mcpConfigPath string) error {
+// run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
+// headless addition.
+func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool) error {
 	if model == "" {
 		model = config.LastModel()
 	}
@@ -71,11 +69,6 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if err := setupMCP(ctx, mcpConfigPath, os.Stderr, !headless); err != nil {
-		return err
-	}
-	defer closeMCP()
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(ctx)

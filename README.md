@@ -31,17 +31,15 @@ echo "prompt" | o --headless <model>
 ```
 
 Flags: `--system`, `--allow-all-tools` (skip approval prompts), `--no-tools`,
-`--multimodal`, `--context-window`, `--headless`, `--mcp-config`.
+`--multimodal`, `--context-window`, `--headless`.
 
 Requires a local Ollama server (`ollama serve`) like the normal CLI.
 
 ## MCP
 
-MCP servers are configured in `~/.ollama/mcp.json` (Claude-compatible;
-override with `--mcp-config`). Tools appear as `mcp__<server>__<tool>` in both
-the TUI and headless mode, and always require approval unless
-`--allow-all-tools` is set. Dead servers warn on stderr and are skipped. See
-`TEST_PLAN.md` for the config schema and a runnable example.
+Removed for now; the work (including OAuth 2.0 authorization-code+PKCE flow
+with dynamic client registration and a loopback callback) is parked on the
+`mcp` branch.
 
 ## Divergence from upstream
 
@@ -49,10 +47,7 @@ Kept intentionally small so `sync.sh` re-syncs cleanly:
 
 - `cmd/o/main.go` — new runner, mirrors `launchInteractiveModel` without
   the `cmd` package plumbing
-- `cmd/o/mcp.go`, `cmd/o/headless.go` — o-only features: MCP wiring (upstream
-  `agentToolsRegistry` is renamed to `agentToolsRegistryBase` by sync.sh and
-  wrapped) and headless mode
-- `mcpclient/` — o-only MCP client (config, session manager, tool adapter)
+- `cmd/o/headless.go` — o-only headless mode
 - `cmd/o/model_helpers.go` — simplified copies of `showOrPullModel`,
   `ensureCloudStub`, `inferThinkingOption` from `cmd/cmd.go` (drops the
   `:cloud` suggestion flow; thinking inference takes capabilities directly)

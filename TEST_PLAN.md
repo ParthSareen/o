@@ -1,7 +1,7 @@
 # Test plan — headless mode & MCP support
 
-Status as of 2026-08-10: all items below pass (automated) or were verified live
-with `glm-5.2:cloud` (marked LIVE).
+Status as of 2026-08-10: headless items all pass (automated or live with
+glm-5.2:cloud). MCP was removed pending redesign; see `git log mcp`.
 
 ## 1. Headless mode
 
@@ -28,50 +28,9 @@ under long tool loops, multi-round runs at the local-model tool-round guard.
 
 ## 2. MCP support
 
-Config: `~/.ollama/mcp.json` (override with `--mcp-config`), Claude-compatible:
-
-```json
-{
-  "mcpServers": {
-    "echo":   {"command": "/path/to/server", "args": [], "env": {}},
-    "remote": {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer …"}}
-  }
-}
-```
-
-Tools appear as `mcp__<server>__<tool>` in the registry (TUI and headless —
-one shared injection point). All MCP tools require approval by default.
-
-| # | Case | Type | Result |
-|---|------|------|--------|
-| M1 | Config parse: command & URL servers, env, headers | unit | pass |
-| M2 | Missing config file = no-op (nil config, no error) | unit | pass |
-| M3 | Config validation: neither/both of command+url → error | unit | pass |
-| M4 | Tool naming: `mcp__server__tool`, sanitizes `.` `/` etc. | unit | pass |
-| M5 | JSON Schema → api params round-trip: required, nested objects, enums, array items, type unions | unit | pass |
-| M6 | Garbage/non-object schemas fall back to a plain object schema, no panic | unit | pass |
-| M7 | Tool call round-trip over in-memory transport | unit | pass |
-| M8 | MCP `IsError` results surface content and a Go error | unit | pass |
-| M9 | Dead/failed server: warning recorded, harness continues without it | unit | pass |
-| M10 | Registry name collision: skipped with warning | unit | pass |
-| M11 | Real stdio JSON-RPC end-to-end (spawns test binary as MCP server) | unit/integration | pass |
-| M12 | LIVE: discover → register → glm-5.2:cloud calls `mcp__echo__echo` → result relayed, exit 0 | LIVE | pass |
-
-Live reproduction for M12:
-
-```sh
-go build -o /tmp/echo-mcp ./mcpclient/testdata/echoserver
-echo '{"mcpServers": {"echo": {"command": "/tmp/echo-mcp"}}}' > ~/.ollama/mcp.json
-o --allow-all-tools glm-5.2:cloud \
-  "Use the mcp__echo__echo tool with text 'hello-o'. Then reply with exactly what the tool returned."
-# expect stdout: echo:hello-o
-```
-
-Not covered yet: streamable-HTTP servers against a real remote endpoint
-(unit covers transport construction only), OAuth flows, servers with >1 page
-of tools (pagination loop untested), MCP in the interactive TUI (code path is
-shared and unit-covered; needs a TTY manual check), tool-name collisions
-between two servers exposing identical sanitized names for *different* tools.
+Removed for now — parked on the `mcp` branch (config, transports, tool
+adapter, full OAuth consent flow; last live gap: Mintlify issues a second
+consent window, likely the standalone-SSE connection re-challenging).
 
 ## 3. Regression
 
