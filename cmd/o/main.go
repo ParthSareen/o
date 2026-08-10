@@ -2,9 +2,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/ParthSareen/o/api"
 	"github.com/spf13/cobra"
@@ -45,7 +48,11 @@ func run(model, system string, allowAllTools, toolsDisabled, multiModal bool, co
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
 
 	opts := agentTUIOptions{
 		Model:               model,
