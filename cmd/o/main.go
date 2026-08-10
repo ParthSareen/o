@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/ParthSareen/o/api"
+	"github.com/ParthSareen/o/cmd/config"
 	"github.com/spf13/cobra"
 )
 
@@ -43,6 +44,13 @@ func main() {
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go.
 func run(model, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int) error {
+	if model == "" {
+		model = config.LastModel()
+	}
+	if model == "" {
+		return fmt.Errorf("model is required (run `o <model>` once; it is remembered after that)")
+	}
+
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
 		return err
