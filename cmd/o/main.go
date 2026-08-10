@@ -42,6 +42,13 @@ func main() {
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), usageText(fs))
 	}
+	// explicit help goes to stdout; parse errors keep flag's stderr default
+	for _, arg := range os.Args[1:] {
+		if arg == "-h" || arg == "--help" || arg == "-help" {
+			fmt.Print(usageText(fs))
+			return
+		}
+	}
 	_ = fs.Parse(os.Args[1:])
 
 	model, prompt := "", ""
@@ -92,7 +99,7 @@ AGENTS
   approval prompt headlessly, so without the flag the tool is denied, the
   run stops, and o exits 1.
 
-  o --allow-all-tools llama3.2 "list the files in src/ and summarize them"
+  o --allow-all-tools glm-5.2:cloud "list the files in src/ and summarize them"
 
   Keep prompts self-contained: state the goal, the exact output format,
   and any constraints in one prompt. Use --no-tools for pure text work.
