@@ -328,12 +328,17 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatAgentMsg:
+		anchorBefore := m.scrollAnchorSnapshot()
 		printedLines := m.flowPrintedLines
 		var printedTranscript []string
 		if printedLines > 0 {
 			printedTranscript = slices.Clone(m.transcriptLines(m.viewWidth()))
 		}
 		m.applyAgentEvent(msg.event)
+		m.anchorScrollToAppendedLines(anchorBefore)
+		if m.scroll > 0 {
+			return m, waitForChatMsg(m.events)
+		}
 		return m.withFlowTranscriptRefreshAfter(printedTranscript, printedLines, waitForChatMsg(m.events))
 
 	case chatClipboardErrorMsg:
@@ -454,6 +459,21 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleTranscriptScrollKey processes wheel events over the transcript.
+// Reaching the bottom deliberately does NOT flush: the pending tail simply
+// re-enters the live view, and the next streamed delta resumes incremental
+// flow printing. Flushing on resume would only duplicate what the view
+// already shows.
+func (m chatModel) handleTranscriptScrollKey(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.MouseWheelUp:
+		m.scrollBy(3)
+	case tea.MouseWheelDown:
+		m.scrollBy(-3)
+	}
+	return m, nil
+}
+
 func (m chatModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.promptDebug != nil {
 		switch msg.Type {
@@ -474,13 +494,7 @@ func (m chatModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !m.mouseInTranscript(msg) && !m.selection.active {
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			m.scrollBy(3)
-		case tea.MouseWheelDown:
-			m.scrollBy(-3)
-		}
-		return m, nil
+		return m.handleTranscriptScrollKey(msg)
 	}
 	switch msg.Type {
 	case tea.MouseWheelUp:
@@ -644,6 +658,9 @@ func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollBy(max(1, m.transcriptHeight()-1))
 	case tea.KeyPgDown:
 		m.scrollBy(-max(1, m.transcriptHeight()-1))
+		if m.scroll == 0 {
+			return m.withFlowTranscriptFlush(nil)
+		}
 	case tea.KeyHome:
 		m.moveInputCursorToLineStart()
 	case tea.KeyEnd:
@@ -652,6 +669,7 @@ func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scroll = m.maxScroll()
 	case tea.KeyCtrlEnd:
 		m.scroll = 0
+		return m.withFlowTranscriptFlush(nil)
 	case tea.KeyBackspace, tea.KeyCtrlH:
 		m.resetPromptHistoryCursor()
 		if msg.Alt {
@@ -834,6 +852,9 @@ func (m chatModel) View() string {
 	if m.thinkPicker != nil {
 		return m.renderThinkPicker(width)
 	}
+	if m.scroll > 0 {
+		return m.scrolledView(width, height)
+	}
 	return m.flowView(width)
 }
 
@@ -852,11 +873,21 @@ func (m chatModel) flowView(width int) string {
 }
 
 func (m chatModel) withFlowTranscriptFlush(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.scroll > 0 {
+		// flow printing is suspended while the app-level scrollback viewport
+		// is showing; pending lines print when the user returns to the bottom
+		return m, cmd
+	}
 	next, printCmd := m.flowTranscriptFlushCmd()
 	return next, tea.Batch(printCmd, cmd)
 }
 
 func (m chatModel) withFlowTranscriptRepaint(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.scroll > 0 {
+		// the app-level scrollback viewport owns the screen; leave the printed
+		// scrollback untouched and repaint on return to the bottom
+		return m, cmd
+	}
 	if m.flowPrintedLines == 0 {
 		return m.withFlowTranscriptFlush(cmd)
 	}
@@ -871,6 +902,9 @@ func (m chatModel) withFlowTranscriptRefreshAfter(before []string, printed int, 
 }
 
 func (m chatModel) flowTranscriptRefreshAfterCmd(before []string, printed int) (chatModel, tea.Cmd) {
+	if m.scroll > 0 {
+		return m, nil
+	}
 	width := m.viewWidth()
 	after := m.transcriptLines(width)
 	start := flowTranscriptChangedPrefixStart(before, after, printed)

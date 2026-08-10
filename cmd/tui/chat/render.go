@@ -382,6 +382,125 @@ func transcriptInputGap(maxHeight, bottomLineCount, transcriptLineCount int) int
 	return min(desiredGap, available-1)
 }
 
+// scrolledView renders the app-level scrollback viewport shown while the
+// user has scrolled away from the bottom (m.scroll > 0). It is rendered by
+// the app (not the terminal's native scrollback), and scroll anchoring keeps
+// the same transcript lines on screen while new content streams in
+// underneath, so the reading position never drifts.
+func (m chatModel) scrolledView(width, height int) string {
+	all := m.transcriptLines(width)
+	bottomLines := m.bottomLines(width, 0)
+	available := max(1, m.transcriptHeight())
+	start := m.visibleTranscriptStartLineForLines(len(all), available)
+	end := min(len(all), start+available)
+	lines := slices.Clone(all[start:end])
+	for range transcriptInputGap(0, len(bottomLines), len(all)) {
+		lines = append(lines, "")
+	}
+	lines = append(lines, bottomLines...)
+	return strings.Join(lines, "\n")
+}
+
+// scrollAnchor captures the scrolled viewport's position by *content*: the
+// lines currently at the top of the visible window. Anchoring by content
+// (rather than by total line count) keeps the window stable across any
+// transcript change — appends at the tail, reflows, and lines appearing or
+// disappearing *above* the viewport (thinking collapse, table formation,
+// compaction).
+type scrollAnchor struct {
+	lineCount int
+	startLine int
+	lines     []string
+}
+
+// scrollAnchorFingerprintLines is how many visible lines the fingerprint spans.
+const scrollAnchorFingerprintLines = 4
+
+// scrollAnchorSnapshot captures the scrolled position. It is a no-op
+// (returns the zero value) while pinned to the bottom.
+func (m chatModel) scrollAnchorSnapshot() scrollAnchor {
+	if m.scroll <= 0 {
+		return scrollAnchor{}
+	}
+	width := m.viewWidth()
+	all := m.transcriptLines(width)
+	available := max(1, m.transcriptHeight())
+	start := m.visibleTranscriptStartLineForLines(len(all), available)
+	end := min(start+scrollAnchorFingerprintLines, len(all))
+	return scrollAnchor{
+		lineCount: len(all),
+		startLine: start,
+		lines:     slices.Clone(all[start:end]),
+	}
+}
+
+// anchorScrollToAppendedLines re-pins the scrolled viewport to the content
+// captured in prev: it first locates the fingerprint in the new transcript
+// (handling arbitrary mid-transcript edits above the viewport), and falls
+// back to the signed line-count delta when the content itself was edited
+// (pure rewrites can't be located). Only runs while scrolled up; the
+// bottom-pinned case (scroll == 0) tracks the tail as before.
+func (m *chatModel) anchorScrollToAppendedLines(prev scrollAnchor) {
+	if m.scroll <= 0 || prev.lineCount <= 0 {
+		return
+	}
+	all := m.transcriptLines(m.viewWidth())
+	maxScroll := len(all) - max(1, m.transcriptHeight())
+	if maxScroll <= 0 {
+		return // no longer scrollable; scroll clamps to 0 elsewhere
+	}
+	if idx, ok := findScrollAnchorOffset(all, prev); ok {
+		m.scroll = clamp(maxScroll-idx, 0, maxScroll)
+		return
+	}
+	m.scroll = clamp(m.scroll+len(all)-prev.lineCount, 0, maxScroll)
+}
+
+// findScrollAnchorOffset locates the anchor fingerprint in the new
+// transcript, preferring longer fingerprints (more specific) and, among
+// matches at the same length, the one closest to the old position.
+func findScrollAnchorOffset(all []string, prev scrollAnchor) (int, bool) {
+	for size := len(prev.lines); size > 0; size-- {
+		probe := prev.lines[:size]
+		if allBlankLines(probe) {
+			continue
+		}
+		best := -1
+		for i := 0; i+size <= len(all); i++ {
+			match := true
+			for j, want := range probe {
+				if all[i+j] != want {
+					match = false
+					break
+				}
+			}
+			if match && (best < 0 || dist(i, prev.startLine) < dist(best, prev.startLine)) {
+				best = i
+			}
+		}
+		if best >= 0 {
+			return best, true
+		}
+	}
+	return 0, false
+}
+
+func allBlankLines(lines []string) bool {
+	for _, l := range lines {
+		if strings.TrimSpace(stripChatANSI(l)) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func dist(a, b int) int {
+	if a > b {
+		return a - b
+	}
+	return b - a
+}
+
 func (m *chatModel) scrollBy(lines int) {
 	if lines == 0 {
 		return
