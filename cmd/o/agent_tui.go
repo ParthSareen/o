@@ -41,6 +41,7 @@ type agentTUIOptions struct {
 	MultiModal          bool
 	ChatID              string
 	Messages            []api.Message
+	RLM                 bool
 }
 
 func saveLastAgentModel(model string) error {
@@ -99,10 +100,10 @@ func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptio
 	}
 	var registry *coreagent.Registry
 	registryForModel := func(ctx context.Context, model string) *coreagent.Registry {
-		return agentToolsRegistry(ctx, client, model, skillCatalog)
+		return agentToolsRegistryWithRLM(ctx, client, model, skillCatalog, opts.RLM, nil)
 	}
 	if opts.Model != "" {
-		registry = agentToolsRegistry(cmd.Context(), client, opts.Model, skillCatalog)
+		registry = agentToolsRegistryWithRLM(cmd.Context(), client, opts.Model, skillCatalog, opts.RLM, nil)
 	}
 	systemPrompt := agentSystemPromptWithWorkingDir(opts.Model, opts.System, agentSkillSystemContext(skillCatalog, registry, opts.ToolsDisabled), cwd)
 
@@ -255,6 +256,10 @@ func agentSystemFromShow(ctx context.Context, client *api.Client, modelName stri
 }
 
 func agentToolsRegistry(ctx context.Context, client *api.Client, modelName string, skillCatalog *coreagent.SkillCatalog) *coreagent.Registry {
+	return agentToolsRegistryWithRLM(ctx, client, modelName, skillCatalog, false, nil)
+}
+
+func agentToolsRegistryWithRLM(ctx context.Context, client *api.Client, modelName string, skillCatalog *coreagent.SkillCatalog, rlm bool, rlmOpts *rlmToolConfig) *coreagent.Registry {
 	supportsTools, err := agentModelSupportsTools(ctx, client, modelName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\033[1mwarning:\033[0m could not check model capabilities: %v\n", err)
@@ -281,7 +286,41 @@ func agentToolsRegistry(ctx context.Context, client *api.Client, modelName strin
 			fmt.Fprintf(os.Stderr, "%s\n", internalcloud.DisabledError("web search is unavailable"))
 		}
 	}
+
+	if rlm {
+		toolName := "subagents"
+		maxDepth := 1
+		if rlmOpts != nil {
+			if rlmOpts.ToolName != "" {
+				toolName = rlmOpts.ToolName
+			}
+			if rlmOpts.MaxDepth > 0 {
+				maxDepth = rlmOpts.MaxDepth
+			}
+		}
+		// OLLAMA_RLM_TOOL_NAME overrides the tool name for experiments.
+		if envName := os.Getenv("OLLAMA_RLM_TOOL_NAME"); envName != "" {
+			toolName = envName
+		}
+		rlmTool := &agenttools.RLMQuery{
+			Client:   client,
+			Model:    modelName,
+			ToolName: toolName,
+			MaxDepth: maxDepth,
+		}
+		registry.Register(rlmTool)
+		// Wire the registry back-reference so the child session gets the
+		// full tool suite (minus subagents) for depth=1 calls.
+		rlmTool.Registry = registry
+	}
+
 	return registry
+}
+
+// rlmToolConfig configures the RLM tool for experiments.
+type rlmToolConfig struct {
+	ToolName string
+	MaxDepth int
 }
 
 func agentModelSupportsTools(ctx context.Context, client *api.Client, modelName string) (bool, error) {

@@ -73,10 +73,14 @@ type Event struct {
 	Content           string            `json:"content,omitempty"`
 	Thinking          string            `json:"thinking,omitempty"`
 	ToolCalls         []api.ToolCall    `json:"toolCalls,omitempty"`
-	Messages          []api.Message     `json:"messages,omitempty"`
+	Messages          []api.Message    `json:"messages,omitempty"`
 	Args              map[string]any    `json:"args,omitempty"`
 	Tokens            int               `json:"tokens,omitempty"`
 	Error             string            `json:"error,omitempty"`
+	// SubagentID is set on events forwarded from a child sub-agent session.
+	// It carries the parent tool call ID so the TUI can nest the child's
+	// activity under the subagents tool entry.
+	SubagentID string `json:"subagentId,omitempty"`
 }
 
 type EventSink interface {

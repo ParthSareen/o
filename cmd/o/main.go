@@ -28,6 +28,7 @@ type cliOptions struct {
 	resumeID            string
 	listSessions        bool
 	name                string
+	rlm                 bool
 }
 
 func buildFlagSet() (*flag.FlagSet, *cliOptions) {
@@ -43,6 +44,7 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
 	fs.StringVar(&opts.name, "name", "", "set a human-readable name for a new session")
+	fs.BoolVar(&opts.rlm, "rlm", false, "enable recursive language model mode (registers the subagents tool)")
 	return fs, opts
 }
 
@@ -78,7 +80,7 @@ func main() {
 	// positional prompt reads the prompt from stdin.
 	headless := opts.headless || prompt != ""
 
-	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.resume, opts.resumeID, opts.name); err != nil {
+	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.resume, opts.resumeID, opts.name, opts.rlm); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -143,6 +145,12 @@ USAGE
   o --list                      list saved sessions
   o --name <text> [model]       start a new session with a human-readable name
 
+RLM MODE
+  o --rlm [model] "prompt"     enable recursive language model mode, which
+                               registers a "subagents" tool for spawning
+                               sub-LM calls. Use OLLAMA_RLM_TOOL_NAME to
+                               override the tool name for experiments.
+
 FLAGS
 `)
 	var defaults strings.Builder
@@ -175,7 +183,7 @@ AGENTS
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
 // headless addition.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, resume bool, resumeID string, name string) error {
+func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, resume bool, resumeID string, name string, rlm bool) error {
 	// Open the session store for persistence (non-fatal if it fails).
 	store, storeErr := sessionstore.Open()
 	if storeErr != nil {
@@ -236,6 +244,7 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 			MultiModal:          multiModal,
 			ContextWindowTokens: contextWindowTokens,
 			Options:             map[string]any{},
+			RLM:                 rlm,
 		}
 
 		info, err := prepareAgentModel(cmd, client, &opts, false)
@@ -307,6 +316,7 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		MultiModal:          multiModal,
 		ContextWindowTokens: contextWindowTokens,
 		Options:             map[string]any{},
+		RLM:                 rlm,
 	}
 
 	info, err := prepareAgentModel(cmd, client, &opts, false)
