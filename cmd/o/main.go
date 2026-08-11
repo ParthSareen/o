@@ -27,6 +27,7 @@ type cliOptions struct {
 	resume              bool
 	resumeID            string
 	listSessions        bool
+	name                string
 }
 
 func buildFlagSet() (*flag.FlagSet, *cliOptions) {
@@ -41,6 +42,7 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.BoolVar(&opts.resume, "resume", false, "resume the most recent session")
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
+	fs.StringVar(&opts.name, "name", "", "set a human-readable name for a new session")
 	return fs, opts
 }
 
@@ -76,7 +78,7 @@ func main() {
 	// positional prompt reads the prompt from stdin.
 	headless := opts.headless || prompt != ""
 
-	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.resume, opts.resumeID); err != nil {
+	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.resume, opts.resumeID, opts.name); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -98,15 +100,31 @@ func listAndPrintSessions() error {
 		fmt.Println("No saved sessions.")
 		return nil
 	}
-	fmt.Printf("%-36s  %-20s  %s\n", "ID", "Model", "Title")
+	fmt.Printf("%-36s  %-20s  %-20s  %s\n", "ID", "Name", "Model", "Title")
 	for _, s := range sessions {
+		name := s.Name
+		if strings.TrimSpace(name) == "" {
+			name = "(unnamed)"
+		}
 		title := s.Title
 		if strings.TrimSpace(title) == "" {
 			title = "(untitled)"
 		}
-		fmt.Printf("%-36s  %-20s  %s\n", s.ID, s.Model, title)
+		fmt.Printf("%-36s  %-20s  %-20s  %s\n", s.ID, truncate(name, 20), truncate(s.Model, 20), title)
 	}
 	return nil
+}
+
+// truncate shortens s to max runes, appending "…" if it was longer.
+func truncate(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // usageText renders --help. The AGENTS section teaches non-interactive
@@ -123,6 +141,7 @@ USAGE
   o --resume                    resume the most recent session
   o --resume-id <id>           resume a specific session by ID
   o --list                      list saved sessions
+  o --name <text> [model]       start a new session with a human-readable name
 
 FLAGS
 `)
@@ -156,7 +175,7 @@ AGENTS
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
 // headless addition.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, resume bool, resumeID string) error {
+func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, resume bool, resumeID string, name string) error {
 	// Open the session store for persistence (non-fatal if it fails).
 	store, storeErr := sessionstore.Open()
 	if storeErr != nil {
@@ -281,6 +300,7 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 
 	opts := agentTUIOptions{
 		Model:               model,
+		Name:                name,
 		System:              system,
 		AllowAllTools:       allowAllTools,
 		ToolsDisabled:       toolsDisabled,

@@ -12,6 +12,7 @@ import (
 
 	coreagent "github.com/ParthSareen/o/agent"
 	"github.com/ParthSareen/o/api"
+	"github.com/ParthSareen/o/sessionstore"
 )
 
 func TestChatHelpCommandShowsV1Commands(t *testing.T) {
@@ -1351,5 +1352,85 @@ func TestChatEnterCompletesHighlightedFileMentionWithoutSubmitting(t *testing.T)
 	}
 	if completions := m.mentionCompletions(); completions != nil {
 		t.Fatalf("mention selector remained visible after selection: %#v", completions)
+	}
+}
+
+// openNameTestStore opens a session store under a temp HOME and returns it
+// along with a created session.
+func openNameTestStore(t *testing.T) (*sessionstore.Store, *sessionstore.Session) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	store, err := sessionstore.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	sess, err := store.CreateSession("m", "", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	return store, sess
+}
+
+func TestChatNameCommandShowsName(t *testing.T) {
+	store, sess := openNameTestStore(t)
+	m := chatModel{ctx: context.Background(), store: store, chatID: sess.ID, chatName: "", input: []rune("/name")}
+
+	updated, cmd := m.handleSubmit()
+	if cmd != nil {
+		t.Fatal("/name should not return a command")
+	}
+	m = updated.(chatModel)
+	if !strings.Contains(m.entries[0].content, "(unnamed)") {
+		t.Fatalf("expected (unnamed) in output, got %q", m.entries[0].content)
+	}
+}
+
+func TestChatNameCommandSetsName(t *testing.T) {
+	store, sess := openNameTestStore(t)
+	m := chatModel{ctx: context.Background(), store: store, chatID: sess.ID, chatName: "", input: []rune("/name set my-feature-work")}
+
+	updated, cmd := m.handleSubmit()
+	if cmd != nil {
+		t.Fatal("/name set should not return a command")
+	}
+	m = updated.(chatModel)
+	if m.chatName != "my-feature-work" {
+		t.Fatalf("chatName = %q, want %q", m.chatName, "my-feature-work")
+	}
+	// Persisted to the store.
+	list, err := store.ListSessions(10)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "my-feature-work" {
+		t.Fatalf("stored name = %q", list[0].Name)
+	}
+
+	// Re-show: now it reports the set name.
+	m.input = []rune("/name")
+	updated, _ = m.handleSubmit()
+	m = updated.(chatModel)
+	if !strings.Contains(m.entries[0].content, "my-feature-work") {
+		t.Fatalf("expected name in output, got %q", m.entries[0].content)
+	}
+}
+
+func TestChatNameCommandClearsName(t *testing.T) {
+	store, sess := openNameTestStore(t)
+	if err := store.SetName(sess.ID, "existing"); err != nil {
+		t.Fatalf("SetName: %v", err)
+	}
+	m := chatModel{ctx: context.Background(), store: store, chatID: sess.ID, chatName: "existing", input: []rune("/name set")}
+
+	updated, _ := m.handleSubmit()
+	m = updated.(chatModel)
+	if m.chatName != "" {
+		t.Fatalf("chatName = %q, want empty", m.chatName)
+	}
+	list, _ := store.ListSessions(10)
+	if list[0].Name != "" {
+		t.Fatalf("stored name = %q, want empty", list[0].Name)
 	}
 }

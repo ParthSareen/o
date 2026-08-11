@@ -25,7 +25,7 @@ func openTestStore(t *testing.T) *Store {
 func TestCreateAndLoadSession(t *testing.T) {
 	s := openTestStore(t)
 
-	sess, err := s.CreateSession("llama3", "/tmp/work", "you are helpful")
+	sess, err := s.CreateSession("llama3", "/tmp/work", "you are helpful", "")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestCreateAndLoadSession(t *testing.T) {
 
 func TestAppendOnlyGrowsSeq(t *testing.T) {
 	s := openTestStore(t)
-	sess, _ := s.CreateSession("m", "", "")
+	sess, _ := s.CreateSession("m", "", "", "")
 
 	s.AppendMessages(sess.ID, []api.Message{{Role: "user", Content: "first"}})
 	s.AppendMessages(sess.ID, []api.Message{{Role: "assistant", Content: "reply"}})
@@ -78,8 +78,8 @@ func TestAppendOnlyGrowsSeq(t *testing.T) {
 
 func TestListSessions(t *testing.T) {
 	s := openTestStore(t)
-	s.CreateSession("a", "", "")
-	sess2, _ := s.CreateSession("b", "", "")
+	s.CreateSession("a", "", "", "")
+	sess2, _ := s.CreateSession("b", "", "", "")
 	s.AppendMessages(sess2.ID, []api.Message{{Role: "user", Content: "hi"}})
 
 	list, err := s.ListSessions(10)
@@ -95,9 +95,59 @@ func TestListSessions(t *testing.T) {
 	}
 }
 
+func TestSessionName(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("m", "", "", "my-session")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.Name != "my-session" {
+		t.Fatalf("session name = %q, want %q", sess.Name, "my-session")
+	}
+
+	loaded, err := s.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if loaded.Name != "my-session" {
+		t.Fatalf("loaded name = %q, want %q", loaded.Name, "my-session")
+	}
+
+	if err := s.SetName(sess.ID, "renamed"); err != nil {
+		t.Fatalf("SetName: %v", err)
+	}
+	list, _ := s.ListSessions(10)
+	if len(list) != 1 || list[0].Name != "renamed" {
+		t.Fatalf("list name = %q", list[0].Name)
+	}
+}
+
+func TestMigrateAddsNameColumn(t *testing.T) {
+	s := openTestStore(t)
+	// A fresh store already has the column; verify it is queryable and
+	// that re-migrating (e.g. on an older DB) is idempotent.
+	if err := s.migrate(); err != nil {
+		t.Fatalf("re-migrate: %v", err)
+	}
+	sess, err := s.CreateSession("m", "", "", "probe")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if sess.Name != "probe" {
+		t.Fatalf("session name = %q, want %q", sess.Name, "probe")
+	}
+	list, err := s.ListSessions(10)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "probe" {
+		t.Fatalf("name after migrate = %q", list[0].Name)
+	}
+}
+
 func TestDeleteSession(t *testing.T) {
 	s := openTestStore(t)
-	sess, _ := s.CreateSession("m", "", "")
+	sess, _ := s.CreateSession("m", "", "", "")
 	s.AppendMessages(sess.ID, []api.Message{{Role: "user", Content: "x"}})
 
 	if err := s.DeleteSession(sess.ID); err != nil {
@@ -110,7 +160,7 @@ func TestDeleteSession(t *testing.T) {
 
 func TestPromptHistory(t *testing.T) {
 	s := openTestStore(t)
-	sess, _ := s.CreateSession("m", "", "")
+	sess, _ := s.CreateSession("m", "", "", "")
 
 	s.AddPrompt(sess.ID, "hello")
 	s.AddPrompt(sess.ID, "world")
@@ -131,7 +181,7 @@ func TestPromptHistory(t *testing.T) {
 
 func TestTitleTruncation(t *testing.T) {
 	s := openTestStore(t)
-	sess, _ := s.CreateSession("m", "", "")
+	sess, _ := s.CreateSession("m", "", "", "")
 	long := "This is a very long first line that definitely exceeds the eighty rune limit for session titles and should be truncated with an ellipsis"
 	s.AppendMessages(sess.ID, []api.Message{{Role: "user", Content: long}})
 
