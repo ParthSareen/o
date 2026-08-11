@@ -2263,3 +2263,83 @@ func TestSessionAllowAllToolsExecutesApprovalTool(t *testing.T) {
 		t.Fatalf("tool content = %q, want approved", result.Messages[2].Content)
 	}
 }
+
+// contextCaptureTool captures the ToolContext for inspection in tests.
+type contextCaptureTool struct {
+	captured *ToolContext
+}
+
+func (t *contextCaptureTool) Name() string { return "ctx_capture" }
+func (t *contextCaptureTool) Description() string { return "captures tool context" }
+func (t *contextCaptureTool) Schema() api.ToolFunction {
+	return api.ToolFunction{
+		Name:        "ctx_capture",
+		Description: "captures tool context",
+		Parameters:  api.ToolFunctionParameters{Type: "object"},
+	}
+}
+func (t *contextCaptureTool) Execute(_ context.Context, toolCtx ToolContext, _ map[string]any) (ToolResult, error) {
+	*t.captured = toolCtx
+	return ToolResult{Content: "captured"}, nil
+}
+
+func TestSessionPassesEventSinksAndToolCallIDInToolContext(t *testing.T) {
+	captured := &ToolContext{}
+	tool := &contextCaptureTool{captured: captured}
+	registry := &Registry{}
+	registry.Register(tool)
+
+	args := api.NewToolCallFunctionArguments()
+	var events []Event
+	eventSink := EventSinkFunc(func(e Event) error {
+		events = append(events, e)
+		return nil
+	})
+
+	session := &Session{
+		Client:     &fakeClient{responses: [][]api.ChatResponse{
+			{
+				{
+					Message: api.Message{
+						Role: "assistant",
+						ToolCalls: []api.ToolCall{{
+							ID: "tool-call-42",
+							Function: api.ToolCallFunction{
+								Name:      "ctx_capture",
+								Arguments: args,
+							},
+						}},
+					},
+					Done: true,
+				},
+			},
+			{
+				{
+					Message: api.Message{Role: "assistant", Content: "done"},
+					Done:    true,
+				},
+			},
+		}},
+		EventSinks: []EventSink{eventSink},
+		Tools:      registry,
+	}
+
+	_, err := session.Run(context.Background(), RunOptions{
+		Model:    "test-model",
+		NewMessages: []api.Message{{Role: "user", Content: "run"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if captured.ToolCallID != "tool-call-42" {
+		t.Fatalf("expected ToolCallID %q, got %q", "tool-call-42", captured.ToolCallID)
+	}
+	if len(captured.EventSinks) != 1 {
+		t.Fatalf("expected 1 event sink in ToolContext, got %d", len(captured.EventSinks))
+	}
+	// Verify the sink is functional by emitting through it.
+	if err := captured.EventSinks[0].Emit(Event{Type: EventMessageDelta, Content: "test"}); err != nil {
+		t.Fatalf("expected sink to be functional: %v", err)
+	}
+}

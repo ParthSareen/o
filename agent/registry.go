@@ -10,6 +10,13 @@ import (
 
 type ToolContext struct {
 	WorkingDir string
+	// EventSinks are the parent session's event sinks, passed so tools that
+	// spawn child sessions (e.g. the RLM subagents tool) can forward child
+	// events to the parent TUI.
+	EventSinks []EventSink
+	// ToolCallID is the ID of the tool call that triggered this execution,
+	// used to tag forwarded child events with their parent tool call.
+	ToolCallID string
 }
 
 type ToolResult struct {

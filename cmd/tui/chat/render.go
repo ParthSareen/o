@@ -83,13 +83,13 @@ func (m chatModel) toolStartedAt(toolID string) time.Time {
 }
 
 func entryHasExpandableOutput(entry chatEntry) bool {
-	return (entry.role == "tool" && (len(entry.args) > 0 || strings.TrimSpace(entry.content) != "")) ||
+	return (entry.role == "tool" && (len(entry.args) > 0 || strings.TrimSpace(entry.content) != "" || len(entry.tools) > 0)) ||
 		(entry.role == "tool_group" && len(entry.tools) > 0) ||
 		(entry.role == "compaction_summary" && strings.TrimSpace(entry.content) != "")
 }
 
 func entryHasToolOutputMode(entry chatEntry) bool {
-	return (entry.role == "tool" && (isToolActiveStatus(entry.status) || isToolResultStatus(entry.status) || entry.content != "")) ||
+	return (entry.role == "tool" && (isToolActiveStatus(entry.status) || isToolResultStatus(entry.status) || entry.content != "" || len(entry.tools) > 0)) ||
 		(entry.role == "tool_group" && len(entry.tools) > 0) ||
 		(entry.role == "compaction_summary" && strings.TrimSpace(entry.content) != "")
 }
@@ -740,6 +740,23 @@ func renderToolResultLines(entry chatEntry, width int) []string {
 		return lines
 	}
 
+	// Render nested subagent child tool calls (when this entry is a
+	// subagents tool call with forwarded child activity).
+	if len(entry.tools) > 0 {
+		for i, child := range entry.tools {
+			if i > 0 || len(detailLinesForTool(entry, width)) > 0 || strings.TrimSpace(entry.content) != "" {
+				lines = append(lines, "")
+			}
+			lines = append(lines, "  "+toolGroupChildStatusLine(child))
+			if detailLines := renderToolCallDetailLines(child, width-4); len(detailLines) > 0 {
+				lines = append(lines, indentLines(detailLines, "    ")...)
+			}
+			if strings.TrimSpace(child.content) != "" {
+				lines = append(lines, indentLines(renderToolOutputLines(child, child.content, width-4), "    ")...)
+			}
+		}
+	}
+
 	detailLines := renderToolCallDetailLines(entry, width)
 	if len(detailLines) > 0 {
 		lines = append(lines, "")
@@ -750,6 +767,12 @@ func renderToolResultLines(entry chatEntry, width int) []string {
 		lines = append(lines, renderToolOutputLines(entry, entry.content, width)...)
 	}
 	return lines
+}
+
+// detailLinesForTool returns the detail lines for a tool entry, used to
+// determine spacing when rendering nested subagent children.
+func detailLinesForTool(entry chatEntry, width int) []string {
+	return renderToolCallDetailLines(entry, width)
 }
 
 func renderToolGroupLines(entry chatEntry, width int) []string {
@@ -1011,11 +1034,23 @@ func renderToolStatusSegment(entry chatEntry) string {
 func toolStatusLine(entry chatEntry) string {
 	label := toolEntryStatusLabel(entry)
 
+	// Show live subagent child activity count while a subagents call is running.
+	if len(entry.tools) > 0 && isToolActiveStatus(entry.status) {
+		label = fmt.Sprintf("%s (%d sub-agent action%s)", label, len(entry.tools), pluralS(len(entry.tools)))
+	}
+
 	segment := renderToolStatusSegment(entry)
 	if segment == "" {
 		return label
 	}
 	return fmt.Sprintf("%s %s", label, segment)
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func toolEntryStatusLabel(entry chatEntry) string {

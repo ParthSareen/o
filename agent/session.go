@@ -608,7 +608,7 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			return toolBatchResult{}, err
 		}
 
-		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir}, call)
+		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir, EventSinks: s.EventSinks, ToolCallID: call.ID}, call)
 		if err != nil {
 			rawContent := fmt.Sprintf("Error: %v", err)
 			msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)

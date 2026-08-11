@@ -19,6 +19,10 @@ import (
 // The child gets all tools except subagents itself (enforcing max depth=1),
 // so it can run bash, edit files, search the web, etc. to answer the query.
 //
+// Child session events are forwarded to the parent TUI's event sinks, tagged
+// with SubagentID (the parent tool call ID) so the TUI can render the child's
+// activity — tool calls, messages, etc. — nested under the subagents entry.
+//
 // For experiments, the tool name is configurable via ToolName so we can test
 // which name models call most naturally (e.g., "subagents" vs "rlm_query").
 type RLMQuery struct {
@@ -117,6 +121,28 @@ func (t *RLMQuery) Execute(ctx context.Context, toolCtx agent.ToolContext, args 
 	return t.executeRaw(callCtx, query, contextText)
 }
 
+// subagentEventSink wraps the parent session's event sinks, tagging each
+// forwarded event with SubagentID so the TUI can nest child activity under
+// the subagents tool entry.
+type subagentEventSink struct {
+	parentSinks []agent.EventSink
+	subagentID  string
+}
+
+func (s subagentEventSink) Emit(event agent.Event) error {
+	event.SubagentID = s.subagentID
+	var errs []error
+	for _, sink := range s.parentSinks {
+		if sink == nil {
+			continue
+		}
+		if err := sink.Emit(event); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // executeWithTools runs a child agent session with the full tool suite
 // (minus subagents) so the sub-agent can inspect files, run commands, and
 // search the web to answer the query.
@@ -138,11 +164,23 @@ func (t *RLMQuery) executeWithTools(ctx context.Context, toolCtx agent.ToolConte
 	approvalState := &agent.ApprovalState{}
 	approvalState.GrantAll()
 
+	// Forward child session events to the parent TUI, tagged with the
+	// parent tool call ID so the TUI can render the child's activity
+	// (tool calls, messages, etc.) nested under the subagents entry.
+	var childEventSinks []agent.EventSink
+	if len(toolCtx.EventSinks) > 0 && toolCtx.ToolCallID != "" {
+		childEventSinks = []agent.EventSink{subagentEventSink{
+			parentSinks: toolCtx.EventSinks,
+			subagentID:  toolCtx.ToolCallID,
+		}}
+	}
+
 	childSession := &agent.Session{
 		Client:        t.Client,
 		Tools:         childRegistry,
 		ApprovalState: approvalState,
 		WorkingDir:    toolCtx.WorkingDir,
+		EventSinks:    childEventSinks,
 	}
 
 	systemPrompt := "You are a sub-agent answering a query about the provided context. " +
