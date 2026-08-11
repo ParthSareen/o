@@ -18,12 +18,13 @@ func (m *chatModel) initSession() {
 		return
 	}
 	if m.chatID == "" {
-		sess, err := m.store.CreateSession(m.opts.Model, m.opts.WorkingDir, m.opts.SystemPrompt)
+		sess, err := m.store.CreateSession(m.opts.Model, m.opts.WorkingDir, m.opts.SystemPrompt, m.opts.Name)
 		if err != nil {
 			// Non-fatal: chat works without persistence.
 			return
 		}
 		m.chatID = sess.ID
+		m.chatName = sess.Name
 		// Persist any pre-loaded messages (resume scenario where the caller
 		// passed messages via Options but no ChatID — shouldn't normally happen
 		// since resume passes the ChatID, but handle it just in case).
@@ -87,11 +88,12 @@ func (m *chatModel) resetSession() {
 	if m.store == nil {
 		return
 	}
-	sess, err := m.store.CreateSession(m.opts.Model, m.opts.WorkingDir, m.opts.SystemPrompt)
+	sess, err := m.store.CreateSession(m.opts.Model, m.opts.WorkingDir, m.opts.SystemPrompt, m.opts.Name)
 	if err != nil {
 		return
 	}
 	m.chatID = sess.ID
+	m.chatName = sess.Name
 }
 
 // dedupPrompts merges two prompt slices (both chronological), removing
@@ -114,6 +116,7 @@ func dedupPrompts(a, b []string) []string {
 // sessionListEntry is a UI-facing session summary.
 type sessionListEntry struct {
 	ID    string
+	Name  string
 	Model string
 	Title string
 }
@@ -135,6 +138,7 @@ func (m *chatModel) loadSessionList() []sessionListEntry {
 		}
 		entries = append(entries, sessionListEntry{
 			ID:    meta.ID,
+			Name:  meta.Name,
 			Model: meta.Model,
 			Title: title,
 		})
@@ -152,7 +156,9 @@ func (m *chatModel) resumeSession(id string) bool {
 		return false
 	}
 	m.chatID = sess.ID
+	m.chatName = sess.Name
 	m.opts.Model = sess.Model
+	m.opts.Name = sess.Name
 	m.messages = slices.Clone(sess.Messages)
 	m.liveMessages = nil
 	m.entries = entriesFromMessages(sess.Messages)
@@ -187,9 +193,10 @@ func (m *chatModel) openSessionPicker() (tea.Model, tea.Cmd) {
 	}
 	items := make([]apptui.SelectItem, 0, len(entries))
 	for _, e := range entries {
-		desc := e.Title
+		label := sessionDisplayLabel(e.Name, e.Title)
+		desc := label
 		if e.Model != "" {
-			desc = e.Model + " — " + e.Title
+			desc = e.Model + " — " + label
 		}
 		items = append(items, apptui.SelectItem{
 			Name:        e.ID,
@@ -247,4 +254,16 @@ func (m chatModel) renderSessionPicker(width int) string {
 		return ""
 	}
 	return m.sessionPicker.RenderContent()
+}
+
+// sessionDisplayLabel picks a human-readable label for a session, preferring
+// a user-set name and falling back to the auto-derived title.
+func sessionDisplayLabel(name, title string) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	if title = strings.TrimSpace(title); title != "" {
+		return title
+	}
+	return "(untitled)"
 }

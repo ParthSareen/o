@@ -163,7 +163,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 	// is persisted and can be resumed later.
 	var chatID string
 	if store != nil {
-		sess, err := store.CreateSession(opts.Model, workingDir, systemPrompt)
+		sess, err := store.CreateSession(opts.Model, workingDir, systemPrompt, opts.Name)
 		if err != nil {
 			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
 		} else {

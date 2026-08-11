@@ -52,6 +52,7 @@ type ModelOption struct {
 
 type Options struct {
 	Model                       string
+	Name                        string
 	OpenModelPicker             bool
 	ChatID                      string
 	Messages                    []api.Message
@@ -99,6 +100,7 @@ type chatModel struct {
 	ctx          context.Context
 	opts         Options
 	chatID       string
+	chatName     string
 	messages     []api.Message
 	liveMessages []api.Message
 	entries      []chatEntry
@@ -1074,6 +1076,9 @@ func (m *chatModel) resetChat(status string) (tea.Model, tea.Cmd) {
 	m.contextEstimate = true
 	m.scroll = 0
 	m.flowPrintedLines = 0
+	// A new chat starts unnamed even if the launcher passed --name for the
+	// previous session; /new should not inherit it.
+	m.opts.Name = ""
 	m.status = status
 	return *m, tea.ClearScreen
 }

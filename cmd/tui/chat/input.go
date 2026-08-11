@@ -64,6 +64,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/prompt", description: "show full prompt, tools, and messages"},
 	{name: "/save", usage: "/save <filename>", description: "save request JSON; saved as <filename>.json"},
 	{name: "/sessions", description: "list and resume past sessions"},
+	{name: "/name", usage: "/name [set <text>]", description: "show or set the session name"},
 }
 
 var skillsImportCompletions = []chatCompletion{
@@ -177,6 +178,8 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 	case command == "/sessions" && args == "":
 		return m.openSessionPicker()
 	case command == "/sessions" && args == "":
+	case command == "/name":
+		return m.handleNameCommand(args)
 	case command == "/compact" && args == "":
 		return m.startManualCompaction()
 	case command == "/copy" && args == "":
@@ -334,6 +337,53 @@ func (m *chatModel) handleToolsCommand(args string) (tea.Model, tea.Cmd) {
 		m.opts.SystemPrompt = m.opts.SystemPromptForModel(m.ctx, m.opts.Model, m.opts.Tools, m.opts.ToolsDisabled)
 	}
 	return *m, nil
+}
+
+// handleNameCommand implements /name: with no args it shows the current
+// session name; "/name set <text>" sets (or clears with empty text) it.
+func (m *chatModel) handleNameCommand(args string) (tea.Model, tea.Cmd) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		label := m.chatName
+		if label == "" {
+			label = "(unnamed)"
+		}
+		m.entries = append(m.entries, newSlashEntry("Session name: "+label+"\n\nUsage: /name set <text>"))
+		m.status = "ready"
+		return *m, nil
+	}
+	// Accept "/name set <text>" or, for brevity, "/name <text>".
+	setPrefix := "set "
+	if strings.HasPrefix(args, setPrefix) {
+		args = strings.TrimSpace(strings.TrimPrefix(args, setPrefix))
+	} else if strings.EqualFold(args, "set") {
+		args = ""
+	}
+	name := strings.TrimSpace(args)
+	if m.store == nil || m.chatID == "" {
+		m.chatName = name
+		m.opts.Name = name
+		m.status = "name set (unsaved)"
+		m.entries = append(m.entries, newSlashEntry("Session name set to: "+displayName(name)))
+		return *m, nil
+	}
+	if err := m.store.SetName(m.chatID, name); err != nil {
+		m.status = "error"
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: "Could not set session name: " + err.Error()}))
+		return *m, nil
+	}
+	m.chatName = name
+	m.opts.Name = name
+	m.status = "name set"
+	m.entries = append(m.entries, newSlashEntry("Session name set to: "+displayName(name)))
+	return *m, nil
+}
+
+func displayName(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "(none)"
+	}
+	return name
 }
 
 func (m *chatModel) handleSystemCommand(args string) (tea.Model, tea.Cmd) {

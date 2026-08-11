@@ -29,6 +29,7 @@ import (
 
 type agentTUIOptions struct {
 	Model               string
+	Name                string
 	System              string
 	Format              string
 	Options             map[string]any
@@ -107,6 +108,7 @@ func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptio
 
 	_, err := agentchat.Run(cmd.Context(), agentchat.Options{
 		ChatID:              opts.ChatID,
+		Name:                opts.Name,
 		Messages:            opts.Messages,
 		Store:               store,
 		Model:                opts.Model,

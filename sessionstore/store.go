@@ -27,6 +27,7 @@ type Store struct {
 // SessionMeta is the lightweight metadata for a session, used in listings.
 type SessionMeta struct {
 	ID         string
+	Name       string
 	Model      string
 	Title      string
 	WorkingDir string
@@ -37,6 +38,7 @@ type SessionMeta struct {
 // Session is a full session with its message history.
 type Session struct {
 	ID         string
+	Name       string
 	Model      string
 	WorkingDir string
 	System     string
@@ -88,7 +90,40 @@ func (s *Store) Close() error {
 
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(schemaSQL)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.addColumnIfMissing("sessions", "name", "TEXT NOT NULL DEFAULT ''")
+}
+
+// addColumnIfMissing adds a column to a table if it is not already present.
+// This keeps existing databases compatible when the schema grows.
+func (s *Store) addColumnIfMissing(table, column, definition string) error {
+	rows, err := s.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("check %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition))
+	if err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 const schemaSQL = `
@@ -97,6 +132,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     model       TEXT NOT NULL,
     working_dir TEXT,
     system      TEXT,
+    name        TEXT NOT NULL DEFAULT '',
     title       TEXT,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
@@ -129,22 +165,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_prompts_session ON prompt_history(session_id, id DESC);
 `
 
-// CreateSession inserts a new session row and returns it.
-func (s *Store) CreateSession(model, workingDir, system string) (*Session, error) {
+// CreateSession inserts a new session row and returns it. The name is a
+// human-settable label (may be empty); title is auto-derived later.
+func (s *Store) CreateSession(model, workingDir, system, name string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	id := uuid.NewString()
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, model, working_dir, system, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, model, workingDir, system, "", now.Unix(), now.Unix(),
+		`INSERT INTO sessions (id, model, working_dir, system, name, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, model, workingDir, system, name, "", now.Unix(), now.Unix(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 	return &Session{
 		ID:         id,
+		Name:       name,
 		Model:      model,
 		WorkingDir: workingDir,
 		System:     system,
@@ -161,9 +199,9 @@ func (s *Store) LoadSession(id string) (*Session, error) {
 	sess := &Session{}
 	var createdAt, updatedAt int64
 	err := s.db.QueryRow(
-		`SELECT id, model, working_dir, system, title, created_at, updated_at FROM sessions WHERE id = ?`,
+		`SELECT id, model, working_dir, system, name, title, created_at, updated_at FROM sessions WHERE id = ?`,
 		id,
-	).Scan(&sess.ID, &sess.Model, &sess.WorkingDir, &sess.System, &sess.Title, &createdAt, &updatedAt)
+	).Scan(&sess.ID, &sess.Model, &sess.WorkingDir, &sess.System, &sess.Name, &sess.Title, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session %s not found", id)
@@ -201,7 +239,7 @@ func (s *Store) ListSessions(limit int) ([]SessionMeta, error) {
 		limit = 50
 	}
 	rows, err := s.db.Query(
-		`SELECT id, model, title, working_dir, created_at, updated_at FROM sessions ORDER BY updated_at DESC, rowid DESC LIMIT ?`,
+		`SELECT id, name, model, title, working_dir, created_at, updated_at FROM sessions ORDER BY updated_at DESC, rowid DESC LIMIT ?`,
 		limit,
 	)
 	if err != nil {
@@ -213,7 +251,7 @@ func (s *Store) ListSessions(limit int) ([]SessionMeta, error) {
 	for rows.Next() {
 		var sm SessionMeta
 		var createdAt, updatedAt int64
-		if err := rows.Scan(&sm.ID, &sm.Model, &sm.Title, &sm.WorkingDir, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&sm.ID, &sm.Name, &sm.Model, &sm.Title, &sm.WorkingDir, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		sm.CreatedAt = time.Unix(createdAt, 0)
@@ -248,6 +286,14 @@ func (s *Store) SetTitle(sessionID, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`, title, time.Now().Unix(), sessionID)
+	return err
+}
+
+// SetName updates the human-settable session name.
+func (s *Store) SetName(sessionID, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?`, name, time.Now().Unix(), sessionID)
 	return err
 }
 
