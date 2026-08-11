@@ -39,16 +39,22 @@ func (m *chatModel) startManualCompaction() (tea.Model, tea.Cmd) {
 	if m.opts.Tools != nil {
 		tools = m.opts.Tools.Tools()
 	}
+	// prompt shape lives in the budget since the PromptBudget refactor
+	budget := coreagent.NewPromptBudget(
+		compactor.ContextWindowTokens(m.opts.Options),
+		coreagent.ResolveCompactionThreshold(compactor.Threshold()),
+		m.systemPrompt(""),
+		tools,
+		m.opts.Format,
+	)
 	req := coreagent.CompactionRequest{
-		ChatID:       m.chatID,
-		Model:        m.opts.Model,
-		SystemPrompt: m.systemPrompt(""),
-		Messages:     messages,
-		Tools:        tools,
-		Format:       m.opts.Format,
-		Options:      m.opts.Options,
-		KeepAlive:    m.opts.KeepAlive,
-		Force:        true,
+		ChatID:    m.chatID,
+		Model:     m.opts.Model,
+		Messages:  messages,
+		Options:   m.opts.Options,
+		KeepAlive: m.opts.KeepAlive,
+		Force:     true,
+		Budget:    budget,
 		Progress: func(progress coreagent.CompactionProgress) {
 			select {
 			case events <- chatCompactProgressMsg{tokens: progress.Tokens}:
