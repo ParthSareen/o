@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	coreagent "github.com/ParthSareen/o/agent"
+	"github.com/ParthSareen/o/sessionstore"
 	"github.com/ParthSareen/o/api"
 )
 
@@ -110,7 +111,7 @@ func oneLine(s string) string {
 
 // runHeadless runs one agent turn non-interactively and returns a process
 // exit code: 0 on a finished run, 1 on error/denial/cancel.
-func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions, prompt, workingDir string, stdout, stderr io.Writer) int {
+func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions, store *sessionstore.Store, prompt, workingDir string, stdout, stderr io.Writer) int {
 	catalog, err := coreagent.LoadDefaultSkills(workingDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: load agent skills: %v\n", err)
@@ -131,12 +132,12 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 		workingDir,
 	)
 
-	return runHeadlessSession(ctx, client, opts, catalog, registry, systemPrompt, prompt, workingDir, stdout, stderr)
+	return runHeadlessSession(ctx, client, opts, store, catalog, registry, systemPrompt, prompt, workingDir, stdout, stderr)
 }
 
 // runHeadlessSession drives one agent session against any ChatClient; split
 // out so tests can run without a real server.
-func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt, prompt, workingDir string, stdout, stderr io.Writer) int {
+func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt, prompt, workingDir string, stdout, stderr io.Writer) int {
 	state := &coreagent.ApprovalState{}
 	if opts.AllowAllTools {
 		state.GrantAll()
@@ -158,7 +159,23 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 		},
 	}
 
+	// Create a session in the store for headless mode so the conversation
+	// is persisted and can be resumed later.
+	var chatID string
+	if store != nil {
+		sess, err := store.CreateSession(opts.Model, workingDir, systemPrompt)
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
+		} else {
+			chatID = sess.ID
+			if err := store.AddPrompt(chatID, prompt); err != nil {
+				fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
+			}
+		}
+	}
+
 	result, err := session.Run(ctx, coreagent.RunOptions{
+		ChatID:       chatID,
 		Model:        opts.Model,
 		SystemPrompt: systemPrompt,
 		NewMessages:  []api.Message{{Role: "user", Content: prompt}},
@@ -173,9 +190,96 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 	}
 
 	fmt.Fprintln(stdout)
+
+	// Persist the conversation to the session store.
+	if store != nil && chatID != "" && result != nil {
+		if err := store.AppendMessages(chatID, result.Messages); err != nil {
+			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
+		}
+	}
+
 	if renderer.sawError || renderer.runStatus == coreagent.RunStatusDenied || renderer.runStatus == coreagent.RunStatusCanceled {
 		return 1
 	}
-	_ = result
+	return 0
+}
+
+// runHeadlessResume runs one headless turn against a previously saved session,
+// loading its message history and appending the new turn's result.
+func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOptions, store *sessionstore.Store, sess *sessionstore.Session, prompt, workingDir string, stdout, stderr io.Writer) int {
+	catalog, err := coreagent.LoadDefaultSkills(workingDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: load agent skills: %v\n", err)
+		return 1
+	}
+	for _, d := range catalog.Diagnostics() {
+		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
+	}
+
+	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
+	if len(registry.Names()) > 0 {
+		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
+	}
+
+	systemPrompt := agentSystemPromptWithWorkingDir(
+		opts.Model, opts.System,
+		agentSkillSystemContext(catalog, registry, opts.ToolsDisabled),
+		workingDir,
+	)
+
+	state := &coreagent.ApprovalState{}
+	if opts.AllowAllTools {
+		state.GrantAll()
+	}
+
+	renderer := newHeadlessRenderer(stdout, stderr, true)
+	session := &coreagent.Session{
+		Client:           client,
+		EventSinks:       []coreagent.EventSink{coreagent.EventSinkFunc(renderer.Emit)},
+		Tools:            registry,
+		Skills:           catalog,
+		DisableTools:     opts.ToolsDisabled,
+		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
+		ApprovalState:    state,
+		WorkingDir:       workingDir,
+		Compactor: &coreagent.SimpleCompactor{
+			Client:  client,
+			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
+		},
+	}
+
+	if store != nil {
+		if err := store.AddPrompt(sess.ID, prompt); err != nil {
+			fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
+		}
+	}
+
+	result, err := session.Run(ctx, coreagent.RunOptions{
+		ChatID:       sess.ID,
+		Model:        opts.Model,
+		SystemPrompt: systemPrompt,
+		Messages:     sess.Messages,
+		NewMessages:  []api.Message{{Role: "user", Content: prompt}},
+		Format:       opts.Format,
+		Options:      opts.Options,
+		Think:        opts.Think,
+		KeepAlive:    opts.KeepAlive,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout)
+
+	if store != nil && result != nil {
+		if err := store.AppendMessages(sess.ID, result.Messages[len(sess.Messages):]); err != nil {
+			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
+		}
+	}
+
+	if renderer.sawError || renderer.runStatus == coreagent.RunStatusDenied || renderer.runStatus == coreagent.RunStatusCanceled {
+		return 1
+	}
 	return 0
 }

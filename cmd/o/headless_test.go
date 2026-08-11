@@ -88,7 +88,7 @@ func runFake(t *testing.T, fc *fakeClient, registry *coreagent.Registry, allowAl
 	t.Helper()
 	var out, errb bytes.Buffer
 	opts := &agentTUIOptions{Model: "test-model", AllowAllTools: allowAll, Options: map[string]any{}}
-	code = runHeadlessSession(context.Background(), fc, opts, nil, registry, "system prompt", "do the thing", t.TempDir(), &out, &errb)
+	code = runHeadlessSession(context.Background(), fc, opts, nil, nil, registry, "system prompt", "do the thing", t.TempDir(), &out, &errb)
 	return out.String(), errb.String(), code
 }
 

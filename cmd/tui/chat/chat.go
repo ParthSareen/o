@@ -14,6 +14,7 @@ import (
 	coreagent "github.com/ParthSareen/o/agent"
 	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/internal/filedata"
+	"github.com/ParthSareen/o/sessionstore"
 )
 
 var chatSpinnerFrames = []string{".", "..", "..."}
@@ -81,6 +82,7 @@ type Options struct {
 	CheckCloudModel             func(context.Context, string, string) error
 	OpenBrowser                 func(string)
 	PollCloudAuth               func(context.Context) (string, bool, error)
+	Store                       *sessionstore.Store
 	CompactionThreshold         float64
 	SystemPrompt                string
 }
@@ -129,7 +131,9 @@ type chatModel struct {
 	contextTokens      int
 	contextEstimate    bool
 	modelPicker        *chatModelPicker
+	sessionPicker      *chatModelPicker
 	modelPickerModels  []ModelOption
+	sessionPickerEntries []sessionListEntry
 	thinkPicker        *chatThinkPicker
 	promptDebug        *chatPromptDebug
 	approvalPrompt     *chatApprovalPrompt
@@ -157,6 +161,7 @@ type chatModel struct {
 	escArmed           bool
 	eventErrorRendered bool
 	err                error
+	store              *sessionstore.Store
 }
 
 type chatSelectionPoint struct {
@@ -222,6 +227,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		approvalState:   approvalState,
 		defaultAllowAll: opts.AllowAllTools,
 		promptHistory:   initialPromptHistory(ctx, opts),
+		store:           opts.Store,
 		status:          "ready",
 		openModelOnInit: opts.OpenModelPicker || (strings.TrimSpace(opts.Model) == "" && opts.ModelOptions != nil),
 	}
@@ -234,6 +240,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// pre-load fallback. Refreshing now would just re-derive that same value
 	// (and block construction on a network call).
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
+	m.initSession()
 	m.contextEstimate = true
 	if m.openModelOnInit {
 		updated, cmd := m.openModelPicker("")
@@ -387,6 +394,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result != nil {
 			m.messages = msg.result.Messages
 			m.liveMessages = nil
+			m.persistRunResult(msg.result.Messages)
 			if msg.result.WorkingDir != "" {
 				m.workingDir = msg.result.WorkingDir
 			}
@@ -588,6 +596,9 @@ func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.cloudAuthPrompt != nil {
 		return m.updateCloudAuthPrompt(msg)
+	}
+	if m.sessionPicker != nil {
+		return m.updateSessionPicker(msg)
 	}
 	if m.modelPicker != nil {
 		return m.updateModelPicker(msg)
@@ -850,6 +861,9 @@ func (m chatModel) View() string {
 	if m.modelPicker != nil && m.openModelOnInit {
 		return m.renderModelPicker(width)
 	}
+	if m.sessionPicker != nil {
+		return m.renderSessionPicker(width)
+	}
 	if m.cloudAuthPrompt != nil {
 		return m.renderCloudAuthPrompt(width)
 	}
@@ -958,7 +972,7 @@ func flowTranscriptRewriteSequence(rewind int, lines []string) string {
 }
 
 func (m chatModel) flowTranscriptFlushCmd() (chatModel, tea.Cmd) {
-	if m.promptDebug != nil || m.modelPicker != nil || m.thinkPicker != nil || m.cloudAuthPrompt != nil {
+	if m.promptDebug != nil || m.modelPicker != nil || m.sessionPicker != nil || m.thinkPicker != nil || m.cloudAuthPrompt != nil {
 		return m, nil
 	}
 	width := m.viewWidth()
@@ -1026,11 +1040,14 @@ func (m chatModel) headerLines() []string {
 
 func (m *chatModel) resetChat(status string) (tea.Model, tea.Cmd) {
 	m.messages = nil
+	m.resetSession()
 	m.liveMessages = nil
 	m.entries = nil
 	m.inputAttachments = nil
 	m.inputPastedTexts = nil
 	m.modelPicker = nil
+	m.sessionPicker = nil
+	m.sessionPickerEntries = nil
 	m.modelPickerModels = nil
 	m.approvalController = nil
 	m.resetApprovalState()
@@ -1145,6 +1162,7 @@ func (m *chatModel) startSkillRun(name, prompt string) (tea.Model, tea.Cmd) {
 
 func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newMessages []api.Message, extraSystemPrompt, skillName string) (tea.Model, tea.Cmd) {
 	m.addPromptHistory(historyInput)
+	m.persistPrompt(historyInput)
 	m.entries = append(m.entries, newChatEntry(chatEntry{role: "user", content: displayInput}))
 	if len(newMessages) > 1 {
 		m.entries = append(m.entries, entriesFromMessages(newMessages[1:])...)
@@ -1226,6 +1244,7 @@ func (m *chatModel) finishLiveMessagesForStoppedRun(promote bool, persistedMessa
 			m.messages = slices.Clone(m.liveMessages)
 		}
 	}
+	m.persistRunResult(m.messages)
 	m.liveMessages = nil
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
 	m.contextEstimate = true
@@ -1268,7 +1287,7 @@ func (m *chatModel) disarmEsc() {
 }
 
 func (m chatModel) canEditInput() bool {
-	return m.promptDebug == nil && m.approvalPrompt == nil && m.cloudAuthPrompt == nil && m.modelPicker == nil && m.thinkPicker == nil
+	return m.promptDebug == nil && m.approvalPrompt == nil && m.cloudAuthPrompt == nil && m.modelPicker == nil && m.sessionPicker == nil && m.thinkPicker == nil
 }
 
 func isChatContextCanceledError(err error) bool {

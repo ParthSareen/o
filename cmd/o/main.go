@@ -13,6 +13,7 @@ import (
 
 	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/config"
+	"github.com/ParthSareen/o/sessionstore"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,9 @@ type cliOptions struct {
 	multiModal          bool
 	contextWindowTokens int
 	headless            bool
+	resume              bool
+	resumeID            string
+	listSessions        bool
 }
 
 func buildFlagSet() (*flag.FlagSet, *cliOptions) {
@@ -34,6 +38,9 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.BoolVar(&opts.multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&opts.contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
 	fs.BoolVar(&opts.headless, "headless", false, "print the response and exit (prompt from args or stdin)")
+	fs.BoolVar(&opts.resume, "resume", false, "resume the most recent session")
+	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
+	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
 	return fs, opts
 }
 
@@ -56,14 +63,50 @@ func main() {
 		model = fs.Arg(0)
 		prompt = strings.Join(fs.Args()[1:], " ")
 	}
+
+	if opts.listSessions {
+		if err := listAndPrintSessions(); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// A positional prompt implies headless; explicit --headless with no
 	// positional prompt reads the prompt from stdin.
 	headless := opts.headless || prompt != ""
 
-	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless); err != nil {
+	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.resume, opts.resumeID); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// listAndPrintSessions prints all saved sessions to stdout and exits.
+func listAndPrintSessions() error {
+	store, err := sessionstore.Open()
+	if err != nil {
+		return fmt.Errorf("open session store: %w", err)
+	}
+	defer store.Close()
+
+	sessions, err := store.ListSessions(50)
+	if err != nil {
+		return fmt.Errorf("list sessions: %w", err)
+	}
+	if len(sessions) == 0 {
+		fmt.Println("No saved sessions.")
+		return nil
+	}
+	fmt.Printf("%-36s  %-20s  %s\n", "ID", "Model", "Title")
+	for _, s := range sessions {
+		title := s.Title
+		if strings.TrimSpace(title) == "" {
+			title = "(untitled)"
+		}
+		fmt.Printf("%-36s  %-20s  %s\n", s.ID, s.Model, title)
+	}
+	return nil
 }
 
 // usageText renders --help. The AGENTS section teaches non-interactive
@@ -77,6 +120,9 @@ USAGE
   o [flags] [model]             interactive agent TUI (remembers your last model)
   o [flags] [model] "prompt"    headless: answer once and exit
   prompt | o --headless [model] headless with the prompt on stdin
+  o --resume                    resume the most recent session
+  o --resume-id <id>           resume a specific session by ID
+  o --list                      list saved sessions
 
 FLAGS
 `)
@@ -110,7 +156,105 @@ AGENTS
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
 // headless addition.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool) error {
+func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, resume bool, resumeID string) error {
+	// Open the session store for persistence (non-fatal if it fails).
+	store, storeErr := sessionstore.Open()
+	if storeErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not open session store: %v\n", storeErr)
+	}
+
+	// --resume / --resume-id: load a saved session and continue it.
+	if resume || resumeID != "" {
+		if store == nil {
+			return fmt.Errorf("session store unavailable, cannot resume")
+		}
+		if resumeID == "" {
+			// --resume without --resume-id: load the most recent session.
+			meta, err := store.MostRecentSession()
+			if err != nil {
+				return fmt.Errorf("find latest session: %w", err)
+			}
+			if meta == nil {
+				return fmt.Errorf("no saved sessions to resume")
+			}
+			resumeID = meta.ID
+		}
+		sess, err := store.LoadSession(resumeID)
+		if err != nil {
+			return fmt.Errorf("resume session: %w", err)
+		}
+		// Use the session's model unless overridden by a positional arg.
+		if model == "" {
+			model = sess.Model
+		}
+		if model == "" {
+			model = config.LastModel()
+		}
+		if model == "" {
+			return fmt.Errorf("model is required (run `o <model>` once; it is remembered after that)")
+		}
+
+		ensureDebugServer(realServerBootstrap(func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}))
+
+		client, err := api.ClientFromEnvironment()
+		if err != nil {
+			return err
+		}
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		cmd := &cobra.Command{}
+		cmd.SetContext(ctx)
+
+		opts := agentTUIOptions{
+			Model:               model,
+			System:              system,
+			AllowAllTools:       allowAllTools,
+			ToolsDisabled:       toolsDisabled,
+			MultiModal:          multiModal,
+			ContextWindowTokens: contextWindowTokens,
+			Options:             map[string]any{},
+		}
+
+		info, err := prepareAgentModel(cmd, client, &opts, false)
+		if err != nil {
+			return err
+		}
+		opts.System = firstNonEmpty(system, info.System)
+
+		if err := saveLastAgentModel(opts.Model); err != nil {
+			return err
+		}
+
+		if headless {
+			if prompt == "" {
+				raw, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("read prompt from stdin: %w", err)
+				}
+				prompt = strings.TrimSpace(string(raw))
+			}
+			if prompt == "" {
+				return fmt.Errorf("headless mode needs a prompt (positional args or stdin)")
+			}
+			if code := runHeadlessResume(ctx, client, &opts, store, sess, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
+				os.Exit(code)
+			}
+			return nil
+		}
+
+		// Interactive resume: pass the session's messages and ChatID to the TUI.
+		opts.ChatID = sess.ID
+		opts.Messages = sess.Messages
+		if err := GenerateAgentTUI(cmd, client, opts, store); err != nil {
+			return fmt.Errorf("error running agent: %w", err)
+		}
+		return nil
+	}
+
 	if model == "" {
 		model = config.LastModel()
 	}
@@ -166,13 +310,13 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		if prompt == "" {
 			return fmt.Errorf("headless mode needs a prompt (positional args or stdin)")
 		}
-		if code := runHeadless(ctx, client, &opts, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
+		if code := runHeadless(ctx, client, &opts, store, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
 			os.Exit(code)
 		}
 		return nil
 	}
 
-	if err := GenerateAgentTUI(cmd, client, opts); err != nil {
+	if err := GenerateAgentTUI(cmd, client, opts, store); err != nil {
 		return fmt.Errorf("error running agent: %w", err)
 	}
 	return nil

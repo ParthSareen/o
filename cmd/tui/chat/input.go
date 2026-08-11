@@ -63,6 +63,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/bye", description: "exit", aliases: []string{"/exit"}},
 	{name: "/prompt", description: "show full prompt, tools, and messages"},
 	{name: "/save", usage: "/save <filename>", description: "save request JSON; saved as <filename>.json"},
+	{name: "/sessions", description: "list and resume past sessions"},
 }
 
 var skillsImportCompletions = []chatCompletion{
@@ -173,6 +174,9 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return m.handleSaveCommand(args)
 	case command == "/new" && args == "":
 		return m.resetChat("new chat")
+	case command == "/sessions" && args == "":
+		return m.openSessionPicker()
+	case command == "/sessions" && args == "":
 	case command == "/compact" && args == "":
 		return m.startManualCompaction()
 	case command == "/copy" && args == "":

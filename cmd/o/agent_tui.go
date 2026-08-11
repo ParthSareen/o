@@ -23,6 +23,7 @@ import (
 	"github.com/ParthSareen/o/format"
 	internalcloud "github.com/ParthSareen/o/internal/cloud"
 	"github.com/ParthSareen/o/internal/modelref"
+	"github.com/ParthSareen/o/sessionstore"
 	"github.com/ParthSareen/o/types/model"
 )
 
@@ -37,6 +38,8 @@ type agentTUIOptions struct {
 	AllowAllTools       bool
 	ToolsDisabled       bool
 	MultiModal          bool
+	ChatID              string
+	Messages            []api.Message
 }
 
 func saveLastAgentModel(model string) error {
@@ -69,7 +72,7 @@ func prepareAgentModel(cmd *cobra.Command, client *api.Client, opts *agentTUIOpt
 	return info, nil
 }
 
-func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptions) error {
+func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptions, store *sessionstore.Store) error {
 	cwd := agentWorkingDir()
 	contextWindowForModel := func(ctx context.Context, model string, fallback int) int {
 		return agentContextWindowForModel(ctx, client, model, fallback)
@@ -103,6 +106,9 @@ func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptio
 	systemPrompt := agentSystemPromptWithWorkingDir(opts.Model, opts.System, agentSkillSystemContext(skillCatalog, registry, opts.ToolsDisabled), cwd)
 
 	_, err := agentchat.Run(cmd.Context(), agentchat.Options{
+		ChatID:              opts.ChatID,
+		Messages:            opts.Messages,
+		Store:               store,
 		Model:                opts.Model,
 		Client:               client,
 		Tools:                registry,

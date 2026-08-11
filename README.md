@@ -28,10 +28,17 @@ go install ./cmd/o
 o [model]                          # interactive TUI (remembers last model)
 o [model] "prompt"                 # headless: answer and exit
 echo "prompt" | o --headless <model>
+o --resume <id>                  # resume a saved session
+o --list                          # list saved sessions
+o /sessions                       # in TUI: pick a session to resume
 ```
 
 Flags: `--system`, `--allow-all-tools` (skip approval prompts), `--no-tools`,
-`--multimodal`, `--context-window`, `--headless`.
+`--multimodal`, `--context-window`, `--headless`, `--resume`, `--list`.
+
+Sessions are persisted to `~/.o/sessions.db` (SQLite). Each conversation gets
+a UUID; messages are appended after each run. Use `/sessions` in the TUI or
+`o --list` from the shell to browse and resume past sessions.
 
 Requires a local Ollama server (`ollama serve`) like the normal CLI. If none
 answers on the default port, `o` starts a **debug server on port 11433** via
