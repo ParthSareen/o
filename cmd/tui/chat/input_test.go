@@ -409,7 +409,7 @@ func TestTruncateInputLineUsesDisplayWidth(t *testing.T) {
 }
 
 func TestRenderInputBoxTruncationUsesSingleContinuationMarker(t *testing.T) {
-	lines := renderInputBoxLines("one two three four five six seven", len("one two three four five six seven"), 16, 1, "")
+	lines := renderInputBoxLines("one two three four five six seven", len("one two three four five six seven"), 16, 1, "", chatInputBorderStyle, chatInputPlaceholderStyle)
 	rendered := strings.Join(lines, "\n")
 	if strings.Contains(rendered, "... ...") {
 		t.Fatalf("input rendered duplicate continuation marker: %q", rendered)

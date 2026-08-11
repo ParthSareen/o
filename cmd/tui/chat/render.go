@@ -325,7 +325,7 @@ func (m chatModel) bottomLines(width, maxHeight int) []string {
 	if m.approvalPrompt != nil || m.cloudAuthPrompt != nil {
 		inputCursor = -1
 	}
-	lines = append(lines, renderInputBoxLines(string(m.input), inputCursor, width, inputBodyLines, m.emptyInputPlaceholder())...)
+	lines = append(lines, renderInputBoxLines(string(m.input), inputCursor, width, inputBodyLines, m.emptyInputPlaceholder(), m.inputBorderStyle(), m.inputPlaceholderStyle())...)
 	if len(modelLines) > 0 {
 		lines = append(lines, modelLines...)
 	}
@@ -1867,7 +1867,15 @@ func (m chatModel) spinnerFrame() string {
 	if len(chatSpinnerFrames) == 0 {
 		return ""
 	}
-	return chatSpinnerFrames[m.spinner%len(chatSpinnerFrames)]
+	frame := chatSpinnerFrames[m.spinner%len(chatSpinnerFrames)]
+	if m.theme.Accent == "" {
+		return frame
+	}
+	color := m.theme.Accent
+	if m.theme.Accent2 != "" && m.spinner%4 >= 2 {
+		color = m.theme.Accent2
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(frame)
 }
 
 func statusWithSpinner(frame, label string) string {

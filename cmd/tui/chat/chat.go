@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -50,6 +51,7 @@ type ModelOption struct {
 
 type Options struct {
 	Model                       string
+	Theme                       string
 	OpenModelPicker             bool
 	ChatID                      string
 	Messages                    []api.Message
@@ -97,53 +99,54 @@ type chatModel struct {
 	ctx          context.Context
 	opts         Options
 	chatID       string
+	theme        chatTheme
 	messages     []api.Message
 	liveMessages []api.Message
 	entries      []chatEntry
 	workingDir   string
 
-	input              []rune
-	inputCursor        int
-	inputCursorSet     bool
-	inputAttachments   []chatInputAttachment
-	inputPastedTexts   []chatInputPastedText
-	nextImageID        int
-	nextAudioID        int
-	nextPastedTextID   int
-	promptHistory      []string
-	promptCursor       int
-	promptDraft        []rune
-	promptActive       bool
-	running            bool
-	awaitingModel      bool
-	compacting         bool
-	cancel             context.CancelFunc
-	events             <-chan tea.Msg
-	compactEvents      <-chan tea.Msg
-	detectedToolCalls  []chatEntry
-	scroll             int
-	toolOutputMode     bool
-	toolOutputOpen     bool
-	flowPrintedLines   int
-	thinking           bool
-	thinkingTokens     int
-	compactingTokens   int
-	contextTokens      int
-	contextEstimate    bool
-	modelPicker        *chatModelPicker
-	sessionPicker      *chatModelPicker
-	modelPickerModels  []ModelOption
+	input                []rune
+	inputCursor          int
+	inputCursorSet       bool
+	inputAttachments     []chatInputAttachment
+	inputPastedTexts     []chatInputPastedText
+	nextImageID          int
+	nextAudioID          int
+	nextPastedTextID     int
+	promptHistory        []string
+	promptCursor         int
+	promptDraft          []rune
+	promptActive         bool
+	running              bool
+	awaitingModel        bool
+	compacting           bool
+	cancel               context.CancelFunc
+	events               <-chan tea.Msg
+	compactEvents        <-chan tea.Msg
+	detectedToolCalls    []chatEntry
+	scroll               int
+	toolOutputMode       bool
+	toolOutputOpen       bool
+	flowPrintedLines     int
+	thinking             bool
+	thinkingTokens       int
+	compactingTokens     int
+	contextTokens        int
+	contextEstimate      bool
+	modelPicker          *chatModelPicker
+	sessionPicker        *chatModelPicker
+	modelPickerModels    []ModelOption
 	sessionPickerEntries []sessionListEntry
-	thinkPicker        *chatThinkPicker
-	promptDebug        *chatPromptDebug
-	approvalPrompt     *chatApprovalPrompt
-	approvalController *chatApprovalController
-	approvalState      *coreagent.ApprovalState
-	cloudAuthPrompt    *cloudAuthPrompt
-	pendingModel       string
-	defaultAllowAll    bool
-	permissionNotice   string
-	selection          chatSelection
+	thinkPicker          *chatThinkPicker
+	promptDebug          *chatPromptDebug
+	approvalPrompt       *chatApprovalPrompt
+	approvalController   *chatApprovalController
+	approvalState        *coreagent.ApprovalState
+	cloudAuthPrompt      *cloudAuthPrompt
+	pendingModel         string
+	defaultAllowAll      bool
+	permissionNotice     string
+	selection            chatSelection
 
 	systemPromptDisabled bool
 
@@ -222,6 +225,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		ctx:             ctx,
 		opts:            opts,
 		chatID:          opts.ChatID,
+		theme:           themeForName(resolveThemeName(opts.Theme)),
 		messages:        slices.Clone(opts.Messages),
 		workingDir:      opts.WorkingDir,
 		approvalState:   approvalState,
@@ -1303,4 +1307,12 @@ func (m *chatModel) copyLastResponse() (tea.Model, tea.Cmd) {
 	}
 	m.status = "nothing to copy"
 	return *m, nil
+}
+
+// resolveThemeName picks the configured theme: Option beats env; empty = default.
+func resolveThemeName(opt string) string {
+	if name := strings.TrimSpace(opt); name != "" {
+		return name
+	}
+	return strings.TrimSpace(os.Getenv("OLLAMA_THEME"))
 }

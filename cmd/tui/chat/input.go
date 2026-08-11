@@ -56,6 +56,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/think", description: "set thinking mode"},
 	{name: "/tools", description: "toggle tools on or off"},
 	{name: "/system", usage: "/system [on|off]", description: "show or set the built-in system prompt"},
+	{name: "/theme", usage: "/theme [name]", description: "show or set the color theme"},
 	{name: "/skills", usage: "/skills [import codex|claude|pi]", description: "list or import skills"},
 	{name: "/compact", description: "summarize older context"},
 	{name: "/copy", description: "copy last response to the clipboard"},
@@ -166,6 +167,8 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return m.handleToolsCommand(args)
 	case command == "/system":
 		return m.handleSystemCommand(args)
+	case command == "/theme":
+		return m.handleThemeCommand(args)
 	case command == "/skills":
 		return m.handleSkillsCommand(args)
 	case command == "/prompt":
@@ -1017,7 +1020,7 @@ func (m chatModel) emptyInputPlaceholder() string {
 	return m.emptyChatHint()
 }
 
-func renderInputBoxLines(input string, cursor int, width, maxBodyLines int, placeholder string) []string {
+func renderInputBoxLines(input string, cursor int, width, maxBodyLines int, placeholder string, borderStyle, placeholderStyle lipgloss.Style) []string {
 	if width < 12 {
 		width = 12
 	}
@@ -1048,33 +1051,33 @@ func renderInputBoxLines(input string, cursor int, width, maxBodyLines int, plac
 	}
 
 	lines := make([]string, 0, len(raw)+2)
-	lines = append(lines, chatInputBorderStyle.Render(inputBoxTopBorderLine(width)))
+	lines = append(lines, borderStyle.Render(inputBoxTopBorderLine(width)))
 	for i, line := range raw {
 		rendered := line
 		if placeholderMode {
 			if i == 0 && strings.HasPrefix(line, prefix) {
 				rest := strings.TrimPrefix(line, prefix)
 				if strings.HasPrefix(rest, inputCursorMarker) {
-					rendered = chatUserStyle.Render(prefix) + renderInputTextWithCursorStyle(rest, chatInputPlaceholderStyle)
-					lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth))
+					rendered = chatUserStyle.Render(prefix) + renderInputTextWithCursorStyle(rest, placeholderStyle)
+					lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth, borderStyle))
 					continue
 				}
-				rendered = chatUserStyle.Render(prefix) + chatInputPlaceholderStyle.Render(rest)
-				lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth))
+				rendered = chatUserStyle.Render(prefix) + placeholderStyle.Render(rest)
+				lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth, borderStyle))
 				continue
 			}
 			if strings.HasPrefix(line, continuationPrefix) {
-				rendered = chatInputPlaceholderStyle.Render(continuationPrefix + strings.TrimPrefix(line, continuationPrefix))
-				lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth))
+				rendered = placeholderStyle.Render(continuationPrefix + strings.TrimPrefix(line, continuationPrefix))
+				lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth, borderStyle))
 				continue
 			}
-			rendered = chatInputPlaceholderStyle.Render(line)
-			lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth))
+			rendered = placeholderStyle.Render(line)
+			lines = append(lines, renderInputBoxBodyLine(rendered, contentWidth, borderStyle))
 			continue
 		}
-		lines = append(lines, renderInputBoxBodyLine(renderInputTextWithCursor(rendered), contentWidth))
+		lines = append(lines, renderInputBoxBodyLine(renderInputTextWithCursor(rendered), contentWidth, borderStyle))
 	}
-	lines = append(lines, chatInputBorderStyle.Render(inputBoxBottomBorderLine(width)))
+	lines = append(lines, borderStyle.Render(inputBoxBottomBorderLine(width)))
 	return lines
 }
 
@@ -1155,9 +1158,9 @@ func inputBoxBorderLine(width int, left, right string) string {
 	return left + strings.Repeat("─", max(0, width-2)) + right
 }
 
-func renderInputBoxBodyLine(line string, width int) string {
+func renderInputBoxBodyLine(line string, width int, borderStyle lipgloss.Style) string {
 	padding := strings.Repeat(" ", inputBoxHorizontalPadding)
-	return chatInputBorderStyle.Render("│") + padding + padRenderedLine(line, width) + padding + chatInputBorderStyle.Render("│")
+	return borderStyle.Render("│") + padding + padRenderedLine(line, width) + padding + borderStyle.Render("│")
 }
 
 func padRenderedLine(line string, width int) string {
@@ -1266,6 +1269,9 @@ func (m chatModel) slashCompletions() []chatCompletion {
 		return nil
 	}
 	if completions := matchingSkillsImportCompletions(input); completions != nil {
+		return completions
+	}
+	if completions := matchingThemeCompletions(input); completions != nil {
 		return completions
 	}
 
@@ -1698,4 +1704,51 @@ func (m *chatModel) applyTokenSlashCompletion() bool {
 	m.resetPromptHistoryCursor()
 	m.complete = 0
 	return true
+}
+
+func (m *chatModel) handleThemeCommand(args string) (tea.Model, tea.Cmd) {
+	name := strings.ToLower(strings.TrimSpace(args))
+	if name == "" {
+		current := m.theme.Name
+		if current == "" {
+			current = "default"
+		}
+		m.entries = append(m.entries, newSlashEntry(fmt.Sprintf("theme: %s\navailable: %s", current, strings.Join(chatThemeNames(), ", "))))
+		return *m, nil
+	}
+	theme, ok := chatThemes[name]
+	if !ok {
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: fmt.Sprintf("unknown theme %q; available: %s", name, strings.Join(chatThemeNames(), ", "))}))
+		return *m, nil
+	}
+	m.theme = theme
+	m.status = "theme: " + name
+	return *m, nil
+}
+
+// matchingThemeCompletions completes "/theme <prefix>" against the theme list.
+func matchingThemeCompletions(input string) []chatCompletion {
+	const themeCommand = "/theme"
+	lower := strings.ToLower(input)
+	if lower == themeCommand {
+		return nil // preserve Enter on /theme as the show command
+	}
+	if !strings.HasPrefix(lower, themeCommand+" ") {
+		return nil
+	}
+	prefix := strings.TrimSpace(strings.TrimPrefix(lower, themeCommand))
+	completions := make([]chatCompletion, 0, len(chatThemes))
+	for _, name := range chatThemeNames() {
+		if strings.HasPrefix(name, prefix) {
+			completions = append(completions, chatCompletion{
+				value:       themeCommand + " " + name,
+				label:       themeCommand + " " + name,
+				description: "color theme",
+			})
+		}
+	}
+	if len(completions) == 0 {
+		return []chatCompletion{{label: "No matching themes"}}
+	}
+	return completions
 }

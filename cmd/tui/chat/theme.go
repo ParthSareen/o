@@ -1,6 +1,11 @@
 package chat
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"sort"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 const (
 	chatAnsiRed         = "1"
@@ -127,3 +132,98 @@ var (
 
 	chatHistoryTextStyle = lipgloss.NewStyle()
 )
+
+// chatTheme is the user-facing accent palette. Empty color fields fall back to
+// the legacy styling above, so "default" (all empty) renders exactly as before.
+type chatTheme struct {
+	Name           string
+	Accent         string // spinner and other accent moments
+	Accent2        string // second spinner tone for a subtle two-tone pulse
+	BorderIdle     string // input box border at rest
+	BorderRunning  string // input box border while a run is active
+	BorderThinking string // input box border while thinking streams
+	BorderApproval string // input box border with a pending approval prompt
+	Placeholder    string // input placeholder text
+}
+
+var chatThemes = map[string]chatTheme{
+	"default": {Name: "default"},
+	"nord": {
+		Name:           "nord",
+		Accent:         "#88C0D0", // frost cyan
+		Accent2:        "#A3BE8C", // aurora green
+		BorderIdle:     "#4C566A", // polar night light
+		BorderRunning:  "#EBCB8B", // aurora yellow
+		BorderThinking: "#B48EAD", // aurora purple
+		BorderApproval: "#BF616A", // aurora red
+		Placeholder:    "#616E88",
+	},
+	"dracula": {
+		Name:           "dracula",
+		Accent:         "#BD93F9", // purple
+		Accent2:        "#50FA7B", // green
+		BorderIdle:     "#6272A4", // comment
+		BorderRunning:  "#F1FA8C", // yellow
+		BorderThinking: "#8BE9FD", // cyan
+		BorderApproval: "#FF5555", // red
+		Placeholder:    "#6272A4",
+	},
+	"catppuccin": {
+		Name:           "catppuccin",
+		Accent:         "#CBA6F7", // mocha mauve
+		Accent2:        "#A6E3A1", // mocha green
+		BorderIdle:     "#585B70", // mocha surface2
+		BorderRunning:  "#F9E2AF", // mocha yellow
+		BorderThinking: "#89DCEB", // mocha sky
+		BorderApproval: "#F38BA8", // mocha red
+		Placeholder:    "#6C7086", // mocha overlay1
+	},
+}
+
+func chatThemeNames() []string {
+	names := make([]string, 0, len(chatThemes))
+	for name := range chatThemes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// themeForName resolves a theme by name (case-insensitive); unknown or empty
+// names resolve to the default theme.
+func themeForName(name string) chatTheme {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if theme, ok := chatThemes[name]; ok && theme.Name != "" {
+		return theme
+	}
+	return chatThemes["default"]
+}
+
+// inputBorderColor picks the border accent for the current model state;
+// approval wins, then thinking, then any active run.
+func (m chatModel) inputBorderColor() string {
+	switch {
+	case m.approvalPrompt != nil:
+		return m.theme.BorderApproval
+	case m.thinking:
+		return m.theme.BorderThinking
+	case m.running || m.compacting || m.preloadingModel != "":
+		return m.theme.BorderRunning
+	default:
+		return m.theme.BorderIdle
+	}
+}
+
+func (m chatModel) inputBorderStyle() lipgloss.Style {
+	if color := m.inputBorderColor(); color != "" {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	}
+	return chatInputBorderStyle
+}
+
+func (m chatModel) inputPlaceholderStyle() lipgloss.Style {
+	if m.theme.Placeholder != "" {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(m.theme.Placeholder))
+	}
+	return chatInputPlaceholderStyle
+}

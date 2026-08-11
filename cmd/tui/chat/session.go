@@ -173,7 +173,6 @@ func (m *chatModel) resumeSession(id string) bool {
 	return true
 }
 
-
 // openSessionPicker opens a selector modal listing recent sessions.
 func (m *chatModel) openSessionPicker() (tea.Model, tea.Cmd) {
 	if m.store == nil {
