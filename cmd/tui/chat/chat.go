@@ -347,6 +347,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case chatClipboardCopiedMsg:
+		m.status = fmt.Sprintf("copied last response (%d chars)", msg.chars)
+		return m, nil
+
 	case chatApprovalPromptMsg:
 		// Full access may have been enabled while this request was in flight
 		// (the user toggled it on after the agent sent the approval request
@@ -1269,4 +1273,15 @@ func (m chatModel) canEditInput() bool {
 
 func isChatContextCanceledError(err error) bool {
 	return err != nil && (errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled"))
+}
+
+// copyLastResponse copies the most recent assistant message to the clipboard.
+func (m *chatModel) copyLastResponse() (tea.Model, tea.Cmd) {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if m.entries[i].role == "assistant" && strings.TrimSpace(m.entries[i].content) != "" {
+			return *m, copyCountedCmd(m.ctx, m.entries[i].content)
+		}
+	}
+	m.status = "nothing to copy"
+	return *m, nil
 }

@@ -76,6 +76,7 @@ func (m *chatModel) applyAgentEvent(event coreagent.Event) {
 		m.awaitingModel = false
 		if event.Thinking != "" {
 			m.thinking = true
+			m.spinner = 0 // silence timer: quiet thinking means the model is parsing, show Working
 			if event.Tokens > 0 {
 				m.thinkingTokens = max(m.thinkingTokens, event.Tokens)
 			} else {

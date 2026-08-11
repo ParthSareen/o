@@ -15,6 +15,20 @@ type chatClipboardErrorMsg struct {
 	err error
 }
 
+type chatClipboardCopiedMsg struct {
+	chars int
+}
+
+// copyCountedCmd copies text and reports success with a character count.
+func copyCountedCmd(ctx context.Context, text string) tea.Cmd {
+	return func() tea.Msg {
+		if err := writeClipboard(ctx, text); err != nil {
+			return chatClipboardErrorMsg{err: err}
+		}
+		return chatClipboardCopiedMsg{chars: len([]rune(text))}
+	}
+}
+
 var writeClipboard = writeSystemClipboard
 
 func copyTextCmd(ctx context.Context, text string) tea.Cmd {

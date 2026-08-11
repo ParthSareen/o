@@ -58,6 +58,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/system", usage: "/system [on|off]", description: "show or set the built-in system prompt"},
 	{name: "/skills", usage: "/skills [import codex|claude|pi]", description: "list or import skills"},
 	{name: "/compact", description: "summarize older context"},
+	{name: "/copy", description: "copy last response to the clipboard"},
 	{name: "/help", description: "show commands", aliases: []string{"/?"}},
 	{name: "/bye", description: "exit", aliases: []string{"/exit"}},
 	{name: "/prompt", description: "show full prompt, tools, and messages"},
@@ -116,7 +117,7 @@ func (m *chatModel) applySlashCompletion() bool {
 	rawInput := string(m.input)
 	input := strings.TrimSpace(rawInput)
 	if !strings.HasPrefix(input, "/") {
-		return false
+		return m.applyTokenSlashCompletion()
 	}
 	if _, _, known := slashCommandInvocation(input); known && !hasSystemCommandArgument(rawInput) {
 		return false
@@ -174,13 +175,12 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return m.resetChat("new chat")
 	case command == "/compact" && args == "":
 		return m.startManualCompaction()
+	case command == "/copy" && args == "":
+		return m.copyLastResponse()
 	case skillOK:
 		return m.startSkillRun(skillName, skillPrompt)
 	case strings.HasPrefix(input, "/") && m.slashInputIsMultimodalFile(input):
 		return m.startRun(input)
-	case strings.HasPrefix(input, "/"):
-		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: fmt.Sprintf("Unknown command %q", strings.Fields(input)[0])}))
-		return *m, nil
 	}
 
 	return m.startRun(input)
@@ -283,21 +283,29 @@ func skillsDirForDisplay(catalog *coreagent.SkillCatalog) string {
 // skills, so they are never claimed here.
 func (m *chatModel) skillSlashInvocation(input string) (name, prompt string, ok bool) {
 	input = strings.TrimSpace(input)
-	if !strings.HasPrefix(input, "/") {
-		return "", "", false
+	fields := strings.Fields(input)
+	for i, field := range fields {
+		if !strings.HasPrefix(field, "/") {
+			continue
+		}
+		name = strings.TrimPrefix(field, "/")
+		if name == "" {
+			continue
+		}
+		if _, _, known := slashCommandInvocation(field); known {
+			continue // built-in command wins
+		}
+		if m.opts.Skills == nil {
+			return "", "", false
+		}
+		if _, err := m.opts.Skills.Load(name); err != nil {
+			continue
+		}
+		// invocation prompt = the rest of the line with the /token removed
+		rest := slices.Delete(slices.Clone(fields), i, i+1)
+		return name, strings.TrimSpace(strings.Join(rest, " ")), true
 	}
-	token, args, _ := strings.Cut(input, " ")
-	name = strings.TrimPrefix(token, "/")
-	if name == "" {
-		return "", "", false
-	}
-	if _, _, known := slashCommandInvocation(input); known {
-		return "", "", false
-	}
-	if _, err := m.opts.Skills.Load(name); err != nil {
-		return "", "", false
-	}
-	return name, strings.TrimSpace(args), true
+	return "", "", false
 }
 
 func (m *chatModel) handleToolsCommand(args string) (tea.Model, tea.Cmd) {
@@ -1231,6 +1239,13 @@ func (m chatModel) completions() []chatCompletion {
 	if completions := m.slashCompletions(); len(completions) > 0 {
 		return completions
 	}
+	// mid-line: complete the token at the cursor when it is a "/..." token
+	// with matches (bare unmatched tokens just stay text — no dropdown)
+	if start, token, ok := activeSlashToken(m.input, m.normalizedInputCursor()); ok && start > 0 {
+		if matches := m.slashNameCompletions(token); len(matches) > 0 {
+			return matches
+		}
+	}
 	return m.mentionCompletions()
 }
 
@@ -1250,45 +1265,7 @@ func (m chatModel) slashCompletions() []chatCompletion {
 		return completions
 	}
 
-	commands := matchingSlashCommands(input)
-	completions := make([]chatCompletion, 0, len(commands))
-	for _, command := range commands {
-		completions = append(completions, chatCompletion{
-			value:       command.name,
-			label:       command.name,
-			description: command.description,
-		})
-	}
-	if strings.EqualFold(input, "/skills") {
-		completions = append(completions, chatCompletion{
-			value:       "/skills import",
-			label:       "/skills import",
-			description: "import skills from Codex, Claude, or Pi",
-		})
-	}
-	// Each catalog skill is also invocable as "/<skill-name>"; surface them as
-	// completions so they are discoverable by typing.
-	if m.opts.Skills != nil {
-		prefix := strings.ToLower(input)
-		for _, skill := range m.opts.Skills.List() {
-			name := "/" + skill.Name
-			if !strings.HasPrefix(name, prefix) {
-				continue
-			}
-			if _, _, known := slashCommandInvocation(name); known {
-				continue // built-in command wins; don't shadow it
-			}
-			description := skill.Description
-			if description == "" {
-				description = "No description provided."
-			}
-			completions = append(completions, chatCompletion{
-				value:       name,
-				label:       name,
-				description: description,
-			})
-		}
-	}
+	completions := m.slashNameCompletions(input)
 	if len(completions) == 0 {
 		return []chatCompletion{{label: "No matching commands"}}
 	}
@@ -1626,4 +1603,95 @@ func (m chatModel) systemPrompt(extra string) string {
 		parts = append(parts, strings.TrimSpace(extra))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// activeSlashToken returns the whitespace-delimited token ending at the cursor
+// when it starts with "/": its start index, the token text up to the cursor,
+// and ok. Cursor-positioned anywhere-in-input slash detection is what powers
+// mid-line skill completion.
+func activeSlashToken(input []rune, cursor int) (int, string, bool) {
+	cursor = clamp(cursor, 0, len(input))
+	start := cursor
+	for start > 0 && !unicode.IsSpace(input[start-1]) {
+		start--
+	}
+	token := string(input[start:cursor])
+	if !strings.HasPrefix(token, "/") {
+		return 0, "", false
+	}
+	return start, token, true
+}
+
+// slashNameCompletions matches built-in commands and catalog skills against a
+// "/prefix" token, without placeholders. Shared by the line-start completion
+// path (which adds its no-match placeholder) and the mid-line token path
+// (which shows nothing when there is no match).
+func (m chatModel) slashNameCompletions(prefix string) []chatCompletion {
+	commands := matchingSlashCommands(prefix)
+	completions := make([]chatCompletion, 0, len(commands))
+	for _, command := range commands {
+		completions = append(completions, chatCompletion{
+			value:       command.name,
+			label:       command.name,
+			description: command.description,
+		})
+	}
+	if strings.EqualFold(prefix, "/skills") {
+		completions = append(completions, chatCompletion{
+			value:       "/skills import",
+			label:       "/skills import",
+			description: "import skills from Codex, Claude, or Pi",
+		})
+	}
+	if m.opts.Skills != nil {
+		lower := strings.ToLower(prefix)
+		for _, skill := range m.opts.Skills.List() {
+			name := "/" + skill.Name
+			if !strings.HasPrefix(name, lower) {
+				continue
+			}
+			if _, _, known := slashCommandInvocation(name); known {
+				continue // built-in command wins; don't shadow it
+			}
+			description := skill.Description
+			if description == "" {
+				description = "No description provided."
+			}
+			completions = append(completions, chatCompletion{
+				value:       name,
+				label:       name,
+				description: description,
+			})
+		}
+	}
+	return completions
+}
+
+// applyTokenSlashCompletion replaces the slash token at the cursor with the
+// selected completion, preserving the rest of the line.
+func (m *chatModel) applyTokenSlashCompletion() bool {
+	start, token, ok := activeSlashToken(m.input, m.normalizedInputCursor())
+	if !ok {
+		return false
+	}
+	matches := m.slashNameCompletions(token)
+	if len(matches) == 0 || !completionIsSelectable(matches) {
+		return false
+	}
+	selected := matches[clamp(m.complete, 0, len(matches)-1)]
+	if strings.EqualFold(selected.value, token) {
+		return false
+	}
+	cursor := m.normalizedInputCursor()
+	next := make([]rune, 0, len(m.input)+len(selected.value))
+	next = append(next, m.input[:start]...)
+	next = append(next, []rune(selected.value)...)
+	insertEnd := len(next)
+	next = append(next, m.input[cursor:]...)
+	m.input = next
+	m.inputCursor = insertEnd
+	m.inputCursorSet = true
+	m.resetPromptHistoryCursor()
+	m.complete = 0
+	return true
 }

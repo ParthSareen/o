@@ -1593,6 +1593,12 @@ func (m chatModel) activityLine() string {
 		return statusWithSpinner(m.spinnerFrame(), "Working")
 	}
 	if m.thinking {
+		// thinking deltas reset the spinner every tick interval they arrive;
+		// when the stream goes quiet (the model has stopped thinking and is
+		// building its (tool) call) surface the idle Working indicator
+		if m.spinner >= idleWorkingDelayTicks {
+			return statusWithSpinner(m.spinnerFrame(), "Working")
+		}
 		return label
 	}
 	return statusWithSpinner(m.spinnerFrame(), label)
