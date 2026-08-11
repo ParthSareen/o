@@ -121,7 +121,7 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
 	}
 
-	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
+	registry := agentToolsRegistryWithRLM(ctx, client, opts.Model, catalog, opts.RLM, nil)
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}
@@ -216,7 +216,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
 	}
 
-	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
+	registry := agentToolsRegistryWithRLM(ctx, client, opts.Model, catalog, opts.RLM, nil)
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}

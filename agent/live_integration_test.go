@@ -28,7 +28,7 @@ func TestLiveCompactionAgainstLocalServer(t *testing.T) {
 	}
 	model := os.Getenv("OLLAMA_LIVE_MODEL")
 	if model == "" {
-		model = "muse"
+		model = "glm-5.2:cloud"
 	}
 	base, err := url.Parse(host)
 	if err != nil {
