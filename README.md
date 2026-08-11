@@ -33,7 +33,13 @@ echo "prompt" | o --headless <model>
 Flags: `--system`, `--allow-all-tools` (skip approval prompts), `--no-tools`,
 `--multimodal`, `--context-window`, `--headless`.
 
-Requires a local Ollama server (`ollama serve`) like the normal CLI.
+Requires a local Ollama server (`ollama serve`) like the normal CLI. If none
+answers on the default port, `o` starts a **debug server on port 11433** via
+[watchy] (`OLLAMA_DEBUG=1`, loopback-only) — only when watchy and the `ollama`
+binary are installed, and never by restarting or preempting a server that's
+already running. It reuses a debug server from an earlier launch, honors an
+explicit `OLLAMA_HOST` as-is, and is a quiet no-op when the default server is
+up. Manage it with `watchy logs o-ollama-debug-11433` / `watchy stop`.
 
 ## MCP
 

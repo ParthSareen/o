@@ -118,6 +118,12 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		return fmt.Errorf("model is required (run `o <model>` once; it is remembered after that)")
 	}
 
+	// If no server answers, start a debug server on :11433 via watchy (never
+	// restarts one that's already running).
+	ensureDebugServer(realServerBootstrap(func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	}))
+
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
 		return err
