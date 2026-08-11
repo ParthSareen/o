@@ -60,6 +60,25 @@ func renderMarkdownForViewWithCodeCache(markdown string, width int, codeCache *m
 			continue
 		}
 
+		if markdownThematicBreak(trimmed) {
+			rendered = append(rendered, chatMetaStyle.Render(strings.Repeat("─", width)))
+			continue
+		}
+		if markdownBlockquoteStart(line) {
+			if quoted, consumed := renderMarkdownBlockquote(source[i:], width); consumed > 0 {
+				rendered = append(rendered, quoted...)
+				i += consumed - 1
+				continue
+			}
+		}
+		if _, ok := markdownListItemMatch(line); ok {
+			if listed, consumed := renderMarkdownList(source[i:], width); consumed > 0 {
+				rendered = append(rendered, listed...)
+				i += consumed - 1
+				continue
+			}
+		}
+
 		if heading, ok := markdownHeading(trimmed); ok {
 			rendered = append(rendered, chatHeaderStyle.Render(renderMarkdownRunes(parseMarkdownInline(heading))))
 			continue
@@ -105,6 +124,8 @@ const (
 	markdownPlain markdownInlineStyle = iota
 	markdownStrong
 	markdownCode
+	markdownLink
+	markdownImage
 )
 
 type markdownInlineRune struct {
@@ -156,6 +177,20 @@ func wrapInlineRunes(runes []markdownInlineRune, width int) []string {
 func parseMarkdownInline(line string) []markdownInlineRune {
 	var out []markdownInlineRune
 	for len(line) > 0 {
+		if strings.HasPrefix(line, "![") {
+			if text, rest, ok := markdownImageParts(line); ok {
+				out = appendMarkdownRunes(out, text, markdownImage)
+				line = rest
+				continue
+			}
+		}
+		if strings.HasPrefix(line, "[") {
+			if text, rest, ok := markdownLinkParts(line); ok {
+				out = appendMarkdownRunes(out, text, markdownLink)
+				line = rest
+				continue
+			}
+		}
 		if strings.HasPrefix(line, "`") {
 			if end := strings.Index(line[1:], "`"); end >= 0 {
 				out = appendMarkdownRunes(out, line[1:end+1], markdownCode)
@@ -177,6 +212,59 @@ func parseMarkdownInline(line string) []markdownInlineRune {
 		line = line[size:]
 	}
 	return out
+}
+
+// markdownLinkParts parses a Markdown link of the form [text](target) (the
+// target may carry an optional "title"). It returns the link text, the
+// remaining source after the link, and ok.
+func markdownLinkParts(line string) (string, string, bool) {
+	return markdownLinkLike(line, "[")
+}
+
+// markdownImageParts parses a Markdown image ![alt](src) and returns the alt
+// text, the remaining source, and ok.
+func markdownImageParts(line string) (string, string, bool) {
+	return markdownLinkLike(line, "![")
+}
+
+// markdownLinkLike is the shared bracket-matching core for links and images.
+// open is the leading delimiter ("[" or "![").
+func markdownLinkLike(line, open string) (string, string, bool) {
+	if !strings.HasPrefix(line, open) {
+		return "", line, false
+	}
+	close, ok := markdownMatchBracket(line, len(open), '[', ']')
+	if !ok || close+1 >= len(line) || line[close+1] != '(' {
+		return "", line, false
+	}
+	end, ok := markdownMatchBracket(line, close+2, '(', ')')
+	if !ok {
+		return "", line, false
+	}
+	return line[len(open):close], line[end+1:], true
+}
+
+// markdownMatchBracket finds the index of the bracket that closes the one at
+// start, honoring backslash escapes and nesting.
+func markdownMatchBracket(line string, start int, open, close byte) (int, bool) {
+	depth := 1
+	i := start
+	for i < len(line) {
+		switch line[i] {
+		case '\\':
+			i += 2
+			continue
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+		i++
+	}
+	return 0, false
 }
 
 // canOpenMarkdownStrong keeps delimiter-like text in bare URLs and identifiers
@@ -237,12 +325,315 @@ func renderMarkdownRunes(runes []markdownInlineRune) string {
 			b.WriteString(chatStrongStyle.Render(text.String()))
 		case markdownCode:
 			b.WriteString(chatInlineCodeStyle.Render(text.String()))
+		case markdownLink:
+			b.WriteString(chatLinkStyle.Render(text.String()))
+		case markdownImage:
+			b.WriteString(chatImageStyle.Render(text.String()))
 		default:
 			b.WriteString(text.String())
 		}
 		start = end
 	}
 	return b.String()
+}
+
+// markdownThematicBreak reports whether a line is a Markdown thematic break
+// (---, ***, ___ with three or more matching characters and optional spaces).
+func markdownThematicBreak(line string) bool {
+	line = strings.TrimSpace(line)
+	if len(line) < 3 {
+		return false
+	}
+	var ch byte
+	switch line[0] {
+	case '-', '*', '_':
+		ch = line[0]
+	default:
+		return false
+	}
+	count := 0
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ch:
+			count++
+		case ' ', '\t':
+			continue
+		default:
+			return false
+		}
+	}
+	return count >= 3
+}
+
+// markdownBlockquoteStart reports whether a line begins a Markdown blockquote.
+func markdownBlockquoteStart(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), ">")
+}
+
+// renderMarkdownBlockquote consumes a run of '>'-prefixed lines, strips one
+// level of quote marker, and renders the inner Markdown recursively (so
+// nested blockquotes, lists, and tables work) under a faint rule prefix.
+func renderMarkdownBlockquote(lines []string, width int) ([]string, int) {
+	var inner []string
+	consumed := 0
+	for consumed < len(lines) {
+		trimmed := strings.TrimSpace(lines[consumed])
+		if !strings.HasPrefix(trimmed, ">") {
+			break
+		}
+		body := strings.TrimPrefix(trimmed, ">")
+		body = strings.TrimPrefix(body, " ")
+		inner = append(inner, body)
+		consumed++
+	}
+	if len(inner) == 0 {
+		return nil, 0
+	}
+	innerWidth := max(1, width-2)
+	rendered := renderMarkdownForView(strings.Join(inner, "\n"), innerWidth)
+	prefix := chatBlockquoteStyle.Render("▎") + " "
+	out := make([]string, 0, len(rendered))
+	for _, line := range strings.Split(rendered, "\n") {
+		out = append(out, prefix+line)
+	}
+	return out, consumed
+}
+
+// markdownListMarker describes a single list-item line's marker.
+type markdownListMarker struct {
+	indent  int
+	ordered bool
+	number  string
+	marker  string
+	content string
+}
+
+// markdownListItemMatch parses a line into a list marker, returning ok=false
+// for lines that are not list items. A space (or end-of-line) must follow the
+// marker, so values like "1.5" or "value__x__" are not mistaken for lists.
+func markdownListItemMatch(line string) (markdownListMarker, bool) {
+	indent := 0
+	for indent < len(line) && line[indent] == ' ' {
+		indent++
+	}
+	rest := line[indent:]
+	if rest == "" {
+		return markdownListMarker{}, false
+	}
+	var m markdownListMarker
+	m.indent = indent
+	switch rest[0] {
+	case '-', '*', '+':
+		if len(rest) == 1 || (rest[1] != ' ' && rest[1] != '\t') {
+			return markdownListMarker{}, false
+		}
+		m.marker = string(rest[0])
+		m.content = strings.TrimLeft(rest[1:], " \t")
+		return m, true
+	default:
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
+		}
+		if i == 0 || i >= len(rest) {
+			return markdownListMarker{}, false
+		}
+		if rest[i] != '.' && rest[i] != ')' {
+			return markdownListMarker{}, false
+		}
+		if i+1 < len(rest) && rest[i+1] != ' ' && rest[i+1] != '\t' {
+			return markdownListMarker{}, false
+		}
+		m.ordered = true
+		m.number = rest[:i]
+		m.marker = rest[:i+1]
+		m.content = strings.TrimLeft(rest[i+1:], " \t")
+		return m, true
+	}
+}
+
+// renderMarkdownList consumes a list block (siblings at the same base indent,
+// plus nested sub-lists and continuation paragraphs) and renders it with
+// bullets, numbers, and hanging indents. It recurses for nested lists.
+func renderMarkdownList(lines []string, width int) ([]string, int) {
+	first, ok := markdownListItemMatch(lines[0])
+	if !ok {
+		return nil, 0
+	}
+	baseIndent := first.indent
+	var rendered []string
+	consumed := 0
+	pendingBlank := false
+	for consumed < len(lines) {
+		line := lines[consumed]
+		item, isItem := markdownListItemMatch(line)
+		if isItem {
+			if item.indent < baseIndent {
+				break
+			}
+			if item.indent > baseIndent {
+				sub, subConsumed := renderMarkdownList(lines[consumed:], width)
+				if subConsumed > 0 {
+					rendered = append(rendered, sub...)
+					consumed += subConsumed
+					pendingBlank = false
+					continue
+				}
+			}
+			if pendingBlank {
+				rendered = append(rendered, "")
+				pendingBlank = false
+			}
+			itemLines, itemConsumed := renderMarkdownListItem(lines[consumed:], width)
+			rendered = append(rendered, itemLines...)
+			consumed += itemConsumed
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			pendingBlank = true
+			consumed++
+			continue
+		}
+		break
+	}
+	return rendered, consumed
+}
+
+// renderMarkdownListItem renders a single item: its first content line with the
+// marker, wrapped continuation lines, continuation paragraphs, and any nested
+// sub-list that belongs to it. It returns the rendered lines and the number of
+// source lines consumed.
+func renderMarkdownListItem(lines []string, width int) ([]string, int) {
+	item, _ := markdownListItemMatch(lines[0])
+	contentIndent := item.indent + len(item.marker) + 1
+	bullet := markdownListBullet(item)
+	textWidth := max(1, width-contentIndent)
+
+	var rendered []string
+	first := wrapMarkdownInline(item.content, textWidth)
+	if len(first) == 0 {
+		first = []string{""}
+	}
+	indent := strings.Repeat(" ", item.indent)
+	rendered = append(rendered, indent+bullet+" "+first[0])
+	contIndent := strings.Repeat(" ", contentIndent)
+	for _, l := range first[1:] {
+		rendered = append(rendered, contIndent+l)
+	}
+
+	consumed := 1
+	for consumed < len(lines) {
+		line := lines[consumed]
+		if strings.TrimSpace(line) == "" {
+			next := consumed + 1
+			for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+				next++
+			}
+			if next >= len(lines) {
+				break
+			}
+			nextLine := lines[next]
+			nextItem, isNextItem := markdownListItemMatch(nextLine)
+			if isNextItem && nextItem.indent >= contentIndent {
+				consumed = next
+				sub, subConsumed := renderMarkdownList(lines[consumed:], width)
+				rendered = append(rendered, sub...)
+				consumed += subConsumed
+				continue
+			}
+			if !isNextItem && indentOf(nextLine) >= contentIndent {
+				consumed++ // consume the blank line
+				para, paraConsumed := markdownContinuationParagraph(lines[consumed:], contentIndent, width)
+				if paraConsumed > 0 {
+					rendered = append(rendered, "")
+					rendered = append(rendered, para...)
+					consumed += paraConsumed
+					continue
+				}
+				break
+			}
+			break
+		}
+		nested, isNested := markdownListItemMatch(line)
+		if isNested && nested.indent >= contentIndent {
+			sub, subConsumed := renderMarkdownList(lines[consumed:], width)
+			rendered = append(rendered, sub...)
+			consumed += subConsumed
+			continue
+		}
+		if !isNested && indentOf(line) >= contentIndent {
+			para, paraConsumed := markdownContinuationParagraph(lines[consumed:], contentIndent, width)
+			if paraConsumed > 0 {
+				rendered = append(rendered, para...)
+				consumed += paraConsumed
+				continue
+			}
+		}
+		break
+	}
+	return rendered, consumed
+}
+
+// markdownContinuationParagraph collects a run of indented, non-blank, non-item
+// lines into a wrapped paragraph indented to contentIndent.
+func markdownContinuationParagraph(lines []string, contentIndent, width int) ([]string, int) {
+	var para []string
+	consumed := 0
+	pad := strings.Repeat(" ", contentIndent)
+	textWidth := max(1, width-contentIndent)
+	for consumed < len(lines) {
+		line := lines[consumed]
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		if _, isItem := markdownListItemMatch(line); isItem {
+			break
+		}
+		if indentOf(line) < contentIndent {
+			break
+		}
+		stripped := strings.TrimPrefix(line, pad)
+		if len(stripped) == len(line) {
+			stripped = strings.TrimLeft(line, " \t")
+		}
+		para = append(para, stripped)
+		consumed++
+	}
+	if len(para) == 0 {
+		return nil, 0
+	}
+	wrapped := wrapMarkdownInline(strings.Join(para, " "), textWidth)
+	out := make([]string, len(wrapped))
+	for i, l := range wrapped {
+		out[i] = pad + l
+	}
+	return out, consumed
+}
+
+// markdownListBullet returns the bullet glyph for an item, cycling by nesting
+// depth. Ordered items use their number followed by a period.
+func markdownListBullet(item markdownListMarker) string {
+	if item.ordered {
+		return item.number + "."
+	}
+	depth := item.indent / 2
+	switch depth % 3 {
+	case 1:
+		return "◦"
+	case 2:
+		return "▪"
+	default:
+		return "•"
+	}
+}
+
+// indentOf reports the count of leading spaces on a line.
+func indentOf(line string) int {
+	n := 0
+	for n < len(line) && line[n] == ' ' {
+		n++
+	}
+	return n
 }
 
 func renderMarkdownCodeBlock(source []string, language string, width int, codeCache *map[markdownCodeBlockCacheKey]string, complete bool) []string {
