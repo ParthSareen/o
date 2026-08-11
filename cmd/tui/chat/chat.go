@@ -370,6 +370,14 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "diffview closed"
 		return m, nil
 
+	case chatEditorClosedMsg:
+		if msg.err != nil {
+			m.status = "editor failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = "editor closed"
+		return m, nil
+
 	case chatApprovalPromptMsg:
 		// Full access may have been enabled while this request was in flight
 		// (the user toggled it on after the agent sent the approval request
@@ -649,6 +657,8 @@ func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyCtrlG:
 		return m.openDiffViewer()
+	case tea.KeyCtrlT:
+		return m.openEditor()
 	case tea.KeyCtrlP:
 		return m.updateUpKey()
 	case tea.KeyCtrlN:
@@ -1364,5 +1374,52 @@ func (m chatModel) openDiffViewer() (tea.Model, tea.Cmd) {
 	m.status = "diffview"
 	return m, tea.ExecProcess(execCmd, func(err error) tea.Msg {
 		return chatDiffViewerClosedMsg{err: err}
+	})
+}
+
+// chatEditorClosedMsg reports the plain nvim editor returning control.
+type chatEditorClosedMsg struct {
+	err error
+}
+
+var editorLookPath = exec.LookPath
+
+// buildEditorCmd returns the process that opens a plain nvim session (no
+// DiffviewOpen) in the working directory; O_NVIM overrides the whole command
+// (run through the shell), mirroring O_NVIM_DIFF for the diff viewer.
+func buildEditorCmd(workingDir string) (*exec.Cmd, error) {
+	if override := strings.TrimSpace(os.Getenv("O_NVIM")); override != "" {
+		cmd := exec.Command("sh", "-c", override)
+		cmd.Dir = workingDir
+		return cmd, nil
+	}
+	if _, err := editorLookPath("nvim"); err != nil {
+		return nil, fmt.Errorf("nvim not found (set O_NVIM to override the editor command): %w", err)
+	}
+	cmd := exec.Command("nvim", ".")
+	cmd.Dir = workingDir
+	return cmd, nil
+}
+
+// openEditor suspends the TUI and opens a plain nvim session (ctrl+t). It is
+// also reachable through the hidden /nvim command.
+func (m chatModel) openEditor() (tea.Model, tea.Cmd) {
+	dir := m.currentWorkingDir()
+	if strings.TrimSpace(dir) == "" {
+		var err error
+		dir, err = os.Getwd()
+		if err != nil {
+			m.status = "editor failed: " + err.Error()
+			return m, nil
+		}
+	}
+	execCmd, err := buildEditorCmd(dir)
+	if err != nil {
+		m.status = "editor failed: " + err.Error()
+		return m, nil
+	}
+	m.status = "editor"
+	return m, tea.ExecProcess(execCmd, func(err error) tea.Msg {
+		return chatEditorClosedMsg{err: err}
 	})
 }
