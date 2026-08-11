@@ -48,6 +48,19 @@ var (
 	chatStrongStyle = lipgloss.NewStyle().
 			Bold(true)
 
+	chatLinkStyle = lipgloss.NewStyle().
+			Underline(true).
+			Foreground(lipgloss.Color(chatAnsiCyan))
+
+	chatImageStyle = lipgloss.NewStyle().
+			Faint(true)
+
+	chatBlockquoteStyle = lipgloss.NewStyle().
+				Faint(true)
+
+	chatListMarkerStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: chatAnsiBlue, Dark: chatAnsiCyan})
+
 	chatCodeBlockStyle = lipgloss.NewStyle()
 
 	chatTableBorderStyle = lipgloss.NewStyle().
