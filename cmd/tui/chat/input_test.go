@@ -821,30 +821,35 @@ func TestSkillSlashNameResolvesAndRejectsArgsAndUnknown(t *testing.T) {
 		t.Fatal("/skills should resolve to the built-in, not a skill")
 	}
 
-	// Unknown slash input that is not a skill stays an unknown command.
-	m2 := chatModel{opts: Options{Skills: catalog}, input: []rune("/no-such-skill")}
+	// Unknown slash input is not an error anymore: it submits as plain text.
+	m2 := chatModel{ctx: context.Background(), opts: Options{Skills: catalog, Client: chatTestClient{}, Model: "test"}, input: []rune("/no-such-skill")}
 	updated, cmd := m2.handleSubmit()
-	if cmd != nil {
-		t.Fatal("unknown slash command should not start a run")
+	if cmd == nil {
+		t.Fatal("unknown slash should submit as plain text")
 	}
 	m2 = updated.(chatModel)
-	if len(m2.entries) != 1 || m2.entries[0].role != "error" || !strings.Contains(m2.entries[0].content, "Unknown command") {
-		t.Fatalf("entries = %#v, want unknown command", m2.entries)
+	for _, e := range m2.entries {
+		if e.role == "error" {
+			t.Fatalf("entries = %#v, want no error entry", m2.entries)
+		}
 	}
 }
 
-func TestChatDeletedSlashCommandsAreUnknown(t *testing.T) {
-	for _, command := range []string{"/clear", "/copy", "/copy-all", "/launch", "/history", "/load", "/raw", "/resume", "/set", "/show", "/verbose"} {
+func TestChatDeletedSlashCommandsArePlainText(t *testing.T) {
+	// unrecognized slash input submits as a normal prompt (no error entry)
+	for _, command := range []string{"/clear", "/copy-all", "/launch", "/history", "/load", "/raw", "/resume", "/set", "/show", "/verbose"} {
 		t.Run(command, func(t *testing.T) {
-			m := chatModel{input: []rune(command)}
+			m := chatModel{ctx: context.Background(), opts: Options{Client: chatTestClient{}, Model: "test"}, input: []rune(command)}
 
 			updated, cmd := m.handleSubmit()
-			if cmd != nil {
-				t.Fatal("deleted slash command should not return a command")
+			if cmd == nil {
+				t.Fatal("unrecognized slash command should submit as plain text")
 			}
 			m = updated.(chatModel)
-			if len(m.entries) != 1 || m.entries[0].role != "error" || !strings.Contains(m.entries[0].content, "Unknown command") {
-				t.Fatalf("entries = %#v, want unknown command error", m.entries)
+			for _, e := range m.entries {
+				if e.role == "error" {
+					t.Fatalf("entries = %#v, want no error entry", m.entries)
+				}
 			}
 		})
 	}
@@ -863,7 +868,7 @@ func TestChatViewRendersSlashCommandSuggestions(t *testing.T) {
 			t.Fatalf("view missing %s suggestion: %q", want, view)
 		}
 	}
-	for _, removed := range []string{"/clear", "/copy", "/copy-all", "/history", "/load", "/raw", "/resume", "/set", "/show", "/verbose"} {
+	for _, removed := range []string{"/clear", "/copy-all", "/history", "/load", "/raw", "/resume", "/set", "/show", "/verbose"} {
 		if strings.Contains(view, removed) {
 			t.Fatalf("bare slash should hide removed command %s: %q", removed, view)
 		}
