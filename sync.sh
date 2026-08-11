@@ -4,6 +4,15 @@
 set -euo pipefail
 
 SRC="${1:-../ollama}"
+
+# safety: never flatten in-flight work in the trees sync owns
+dirty=$(git status --porcelain --untracked-files=all -- agent api auth envconfig format progress version logutil types internal cmd/config cmd/tui cmd/internal 2>/dev/null)
+if [ -n "$dirty" ]; then
+  echo "sync.sh: refusing to run; uncommitted changes in synced trees (first 10):"
+  echo "$dirty" | head -10
+  echo "commit or stash them first — sync does rm -rf on these paths"
+  exit 1
+fi
 NEW_MODULE="github.com/ParthSareen/o"
 
 # Full trees that belong to the harness.
