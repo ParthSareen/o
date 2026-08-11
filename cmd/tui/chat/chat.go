@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
+	"os/exec"
 	"runtime"
 	"slices"
 	"strings"
@@ -102,48 +104,48 @@ type chatModel struct {
 	entries      []chatEntry
 	workingDir   string
 
-	input              []rune
-	inputCursor        int
-	inputCursorSet     bool
-	inputAttachments   []chatInputAttachment
-	inputPastedTexts   []chatInputPastedText
-	nextImageID        int
-	nextAudioID        int
-	nextPastedTextID   int
-	promptHistory      []string
-	promptCursor       int
-	promptDraft        []rune
-	promptActive       bool
-	running            bool
-	awaitingModel      bool
-	compacting         bool
-	cancel             context.CancelFunc
-	events             <-chan tea.Msg
-	compactEvents      <-chan tea.Msg
-	detectedToolCalls  []chatEntry
-	scroll             int
-	toolOutputMode     bool
-	toolOutputOpen     bool
-	flowPrintedLines   int
-	thinking           bool
-	thinkingTokens     int
-	compactingTokens   int
-	contextTokens      int
-	contextEstimate    bool
-	modelPicker        *chatModelPicker
-	sessionPicker      *chatModelPicker
-	modelPickerModels  []ModelOption
+	input                []rune
+	inputCursor          int
+	inputCursorSet       bool
+	inputAttachments     []chatInputAttachment
+	inputPastedTexts     []chatInputPastedText
+	nextImageID          int
+	nextAudioID          int
+	nextPastedTextID     int
+	promptHistory        []string
+	promptCursor         int
+	promptDraft          []rune
+	promptActive         bool
+	running              bool
+	awaitingModel        bool
+	compacting           bool
+	cancel               context.CancelFunc
+	events               <-chan tea.Msg
+	compactEvents        <-chan tea.Msg
+	detectedToolCalls    []chatEntry
+	scroll               int
+	toolOutputMode       bool
+	toolOutputOpen       bool
+	flowPrintedLines     int
+	thinking             bool
+	thinkingTokens       int
+	compactingTokens     int
+	contextTokens        int
+	contextEstimate      bool
+	modelPicker          *chatModelPicker
+	sessionPicker        *chatModelPicker
+	modelPickerModels    []ModelOption
 	sessionPickerEntries []sessionListEntry
-	thinkPicker        *chatThinkPicker
-	promptDebug        *chatPromptDebug
-	approvalPrompt     *chatApprovalPrompt
-	approvalController *chatApprovalController
-	approvalState      *coreagent.ApprovalState
-	cloudAuthPrompt    *cloudAuthPrompt
-	pendingModel       string
-	defaultAllowAll    bool
-	permissionNotice   string
-	selection          chatSelection
+	thinkPicker          *chatThinkPicker
+	promptDebug          *chatPromptDebug
+	approvalPrompt       *chatApprovalPrompt
+	approvalController   *chatApprovalController
+	approvalState        *coreagent.ApprovalState
+	cloudAuthPrompt      *cloudAuthPrompt
+	pendingModel         string
+	defaultAllowAll      bool
+	permissionNotice     string
+	selection            chatSelection
 
 	systemPromptDisabled bool
 
@@ -356,6 +358,14 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatClipboardCopiedMsg:
 		m.status = fmt.Sprintf("copied last response (%d chars)", msg.chars)
+		return m, nil
+
+	case chatDiffViewerClosedMsg:
+		if msg.err != nil {
+			m.status = "diffview failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = "diffview closed"
 		return m, nil
 
 	case chatApprovalPromptMsg:
@@ -636,7 +646,7 @@ func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.insertInputNewline()
 		return m, nil
 	case tea.KeyCtrlG:
-		return m, nil
+		return m.openDiffViewer()
 	case tea.KeyCtrlP:
 		return m.updateUpKey()
 	case tea.KeyCtrlN:
@@ -1303,4 +1313,51 @@ func (m *chatModel) copyLastResponse() (tea.Model, tea.Cmd) {
 	}
 	m.status = "nothing to copy"
 	return *m, nil
+}
+
+// chatDiffViewerClosedMsg reports the nvim diff viewer returning control.
+type chatDiffViewerClosedMsg struct {
+	err error
+}
+
+var diffViewerLookPath = exec.LookPath
+
+// buildDiffViewerCmd returns the process that opens the user's nvim diff
+// viewer. Default: `nvim -c DiffviewOpen` in the working directory; O_NVIM_DIFF
+// overrides the whole command (run through the shell).
+func buildDiffViewerCmd(workingDir string) (*exec.Cmd, error) {
+	if override := strings.TrimSpace(os.Getenv("O_NVIM_DIFF")); override != "" {
+		cmd := exec.Command("sh", "-c", override)
+		cmd.Dir = workingDir
+		return cmd, nil
+	}
+	if _, err := diffViewerLookPath("nvim"); err != nil {
+		return nil, fmt.Errorf("nvim not found (set O_NVIM_DIFF to override the diff command): %w", err)
+	}
+	cmd := exec.Command("nvim", "-c", "DiffviewOpen")
+	cmd.Dir = workingDir
+	return cmd, nil
+}
+
+// openDiffViewer suspends the TUI and opens the nvim diff viewer (ctrl+g). It
+// is also reachable through the hidden /diffview command.
+func (m chatModel) openDiffViewer() (tea.Model, tea.Cmd) {
+	dir := m.currentWorkingDir()
+	if strings.TrimSpace(dir) == "" {
+		var err error
+		dir, err = os.Getwd()
+		if err != nil {
+			m.status = "diffview failed: " + err.Error()
+			return m, nil
+		}
+	}
+	execCmd, err := buildDiffViewerCmd(dir)
+	if err != nil {
+		m.status = "diffview failed: " + err.Error()
+		return m, nil
+	}
+	m.status = "diffview"
+	return m, tea.ExecProcess(execCmd, func(err error) tea.Msg {
+		return chatDiffViewerClosedMsg{err: err}
+	})
 }

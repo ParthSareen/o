@@ -181,6 +181,8 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return m.startManualCompaction()
 	case command == "/copy" && args == "":
 		return m.copyLastResponse()
+	case input == "/diffview":
+		return m.openDiffViewer()
 	case skillOK:
 		return m.startSkillRun(skillName, skillPrompt)
 	case strings.HasPrefix(input, "/") && m.slashInputIsMultimodalFile(input):
