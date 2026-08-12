@@ -30,15 +30,20 @@ struct SidebarView: View {
             Text("Sessions").font(.headline)
             Spacer()
             Button {
-                openWindow(value: SessionSpec.new)
+                startNewChat()
             } label: {
                 Image(systemName: "square.and.pencil")
             }
             .buttonStyle(.plain)
-            .help("New session in new window")
+            .help("New chat in this window (⌘N for a new window)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+    }
+
+    /// "New session" restarts this window on a fresh conversation — the
+    /// current process is replaced. New *windows* stay under ⌘N.
+    private func startNewChat() {
+        selection = nil
+        current.restart(with: .new)
     }
 
     private var sessionList: some View {
