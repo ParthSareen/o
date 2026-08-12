@@ -257,7 +257,7 @@ struct DiffStoreTests {
             .replacingOccurrences(of: "/app", with: "") // tests run from package dir
         let store = DiffStore()
         store.setDirectory(repo)
-        await store.refresh()
+        await store.waitUntilLoaded()
         guard store.isRepo else {
             // non-git environment (e.g. CI tarball): nothing to assert
             return
@@ -274,7 +274,7 @@ struct DiffStoreTests {
         let store = DiffStore()
         let tmp = NSTemporaryDirectory()
         store.setDirectory(tmp)
-        await store.refresh()
+        await store.waitUntilLoaded()
         #expect(!store.isRepo || store.sections.isEmpty) // /tmp may be inside a repo on some systems; both states safe
     }
 }
@@ -450,5 +450,46 @@ struct ReviewCommentTests {
         #expect(single.location == "x/y.swift:7")
         let range = CodeComment(id: UUID(), path: "x/y.swift", startLine: 7, endLine: 9, snippet: "", text: "")
         #expect(range.location == "x/y.swift:7-9")
+    }
+}
+
+@MainActor
+struct DiffStoreContentAttributionTests {
+    /// Regression guard: every untracked section must contain ONLY its own
+    /// file's content (view identity collisions once bled other files in).
+    @Test func untrackedSectionsCarryOwnContent() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("odiff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dir = tmp.path
+
+        _ = runProcessForOutput("/usr/bin/git", ["init", "-q"], cwd: dir)
+
+        let fm = FileManager.default
+        let markers: [String: String] = [
+            "alpha.md": "ALPHA_ONLY_MARKER_001\nalpha body",
+            "beta.md": "BETA_ONLY_MARKER_002\nbeta body",
+        ]
+        for (name, body) in markers {
+            try body.write(to: tmp.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        _ = fm // silence
+
+        let store = DiffStore()
+        store.setDirectory(dir)
+        await store.waitUntilLoaded()
+        #expect(store.isRepo)
+        #expect(store.sections.count == 2)
+
+        for section in store.sections {
+            let marker = markers.keys.contains(section.path) ? markers[section.path]! : ""
+            let own = section.lines.filter { $0.kind == .added }.map(\.text)
+            #expect(own.contains(where: { $0.contains(marker.components(separatedBy: "\n").first!) }),
+                    "section \(section.path) missing its own content")
+            let other = markers.first(where: { $0.key != section.path })!.value.components(separatedBy: "\n").first!
+            #expect(!own.contains(where: { $0.contains(other) }),
+                    "section \(section.path) contains another file's content")
+        }
     }
 }

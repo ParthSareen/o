@@ -120,7 +120,18 @@ final class DiffStore {
         directory = dir
         sections = []
         branch = ""
+        loaded = false
         Task { await refresh() }
+    }
+
+    /// Test/await helper: suspends until the current refresh settles. Polls
+    /// `loaded`, which is only set by the latest-token refresh, so it's safe
+    /// against the spawn race between setDirectory's task and manual calls.
+    func waitUntilLoaded(timeout: TimeInterval = 8) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !loaded && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     func refresh() async {
