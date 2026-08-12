@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>o_icon</string>
 	<key>CFBundleIconName</key>
-	<string>AppIcon</string>
+	<string>o_icon</string>
 	<key>CFBundleDisplayName</key>
 	<string>o</string>
 	<key>CFBundleExecutable</key>
