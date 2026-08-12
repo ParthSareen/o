@@ -160,6 +160,7 @@ struct ComposerView: View {
         HStack(spacing: 10) {
             modelMenu
             skillsButton
+            textScaleControl
             workingDirLabel
             Spacer()
             if let tokens = controller.contextTokens {
@@ -169,6 +170,33 @@ struct ComposerView: View {
             }
             phaseLabel
         }
+    }
+
+    /// Always-reachable text size control (the ⌘ shortcuts ride the menu).
+    private var textScaleControl: some View {
+        HStack(spacing: 0) {
+            Button {
+                SettingsStore.shared.decreaseTextScale()
+            } label: {
+                Text("A−").font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Smaller text (⌘-)")
+            Button {
+                SettingsStore.shared.increaseTextScale()
+            } label: {
+                Text("A+").font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Bigger text (⌘+)")
+        }
+        .foregroundStyle(.secondary)
+        .background(Color.primary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 
     @State private var modelPickerOpen = false

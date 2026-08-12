@@ -21,7 +21,7 @@ struct ChatView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(controller.blocks) { block in
                             BlockRow(block: block)
                                 .id(block.id)
@@ -75,6 +75,7 @@ struct LiveRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             Text(text)
+                .lineSpacing(2.5)
                 .foregroundStyle(dimmed ? .secondary : .primary)
                 .italic(dimmed)
                 .frame(maxWidth: .infinity, alignment: .leading)

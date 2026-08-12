@@ -521,14 +521,15 @@ struct TextScaleTests {
     @Test func stepsClampAndMap() {
         let s = SettingsStore.shared
         s.resetTextScale()
-        #expect(s.dynamicTypeSize == .large)
-        s.increaseTextScale(); #expect(s.dynamicTypeSize == .xLarge)
+        #expect(s.prefs.textScale == 1.1)
+        #expect(s.dynamicTypeSize == .xLarge)
+        s.increaseTextScale(); #expect(s.dynamicTypeSize == .xxLarge)
         s.increaseTextScale(); s.increaseTextScale(); s.increaseTextScale(); s.increaseTextScale()
-        #expect(s.prefs.textScale == 1.4) // clamped
-        #expect(s.dynamicTypeSize == .accessibility1)
+        #expect(s.prefs.textScale == 1.6) // clamped
+        #expect(s.dynamicTypeSize == .accessibility2)
         s.resetTextScale()
-        s.decreaseTextScale(); #expect(s.dynamicTypeSize == .medium)
-        s.decreaseTextScale(); s.decreaseTextScale(); s.decreaseTextScale()
+        s.decreaseTextScale(); s.decreaseTextScale(); #expect(s.dynamicTypeSize == .medium)
+        s.decreaseTextScale(); s.decreaseTextScale()
         #expect(s.prefs.textScale == 0.7) // clamped
         #expect(s.dynamicTypeSize == .xSmall)
         s.resetTextScale()
