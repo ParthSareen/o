@@ -90,7 +90,7 @@ struct DiffPanelView: View {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(store.filteredSections) { section in
                         Section(header: FileSectionHeader(section: section)) {
-                            ForEach(Array(section.lines.enumerated()), id: \.offset) { _, line in
+                            ForEach(section.lines) { line in
                                 DiffLineRow(line: line, path: section.path)
                             }
                             if section.truncated {

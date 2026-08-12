@@ -391,3 +391,28 @@ struct SyntaxHighlighterTests {
         #expect(String(DiffSyntax.highlight(text, path: "x.go").characters) == text)
     }
 }
+
+struct DiffEdgeCaseTests {
+    @Test func binaryDetection() {
+        let text = Data("hello\nworld\n".utf8)
+        #expect(!DiffStore.isLikelyBinary(text))
+        var binary = Data([0x7f, 0x45, 0x4c, 0x46])  // ELF magic
+        binary.append(0x00)
+        #expect(DiffStore.isLikelyBinary(binary))
+        let undecodable = Data([0xff, 0xfe, 0xfd, 0xfc, 0xfb])
+        #expect(DiffStore.isLikelyBinary(undecodable))
+    }
+
+    @Test func binaryPatchLineIsMeta() {
+        let patch = """
+        diff --git a/data.bin b/data.bin
+        index 111..222 100644
+        Binary files a/data.bin and b/data.bin differ
+        """
+        let sections = DiffStore.parseDiffSections(patch, statuses: [:])
+        #expect(sections.count == 1)
+        #expect(sections[0].lines.count == 1)
+        #expect(sections[0].lines[0].kind == .meta)
+        #expect(sections[0].lines[0].text.contains("binary"))
+    }
+}
