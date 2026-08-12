@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 struct UIPreferences: Codable, Equatable {
     var allowAllTools: Bool = true
@@ -7,6 +8,7 @@ struct UIPreferences: Codable, Equatable {
     var defaultSystemPrompt: String = ""
     var selectedModel: String = ""        // empty = o's last model
     var defaultWorkingDir: String = ""    // empty = home directory
+    var textScale: Double = 1.0           // 0.7…1.4, ⌘+/⌘- steps of 0.1
 }
 
 /// App preferences at ~/.o/ui.json, applied to every new session process.
@@ -21,6 +23,27 @@ final class SettingsStore {
     }
     var availableModels: [String] = []
     var modelFetchError: String? = nil
+
+    // MARK: text scale (⌘+ / ⌘-)
+
+    func increaseTextScale() { prefs.textScale = min(1.4, (prefs.textScale * 10 + 1).rounded() / 10) }
+    func decreaseTextScale() { prefs.textScale = max(0.7, (prefs.textScale * 10 - 1).rounded() / 10) }
+    func resetTextScale() { prefs.textScale = 1.0 }
+
+    /// Maps the 0.7–1.4 scale onto DynamicTypeSize steps: every styled font
+    /// in the detail content (body, caption, monospaced variants) follows.
+    var dynamicTypeSize: DynamicTypeSize {
+        switch prefs.textScale {
+        case ..<0.75: return .xSmall
+        case ..<0.85: return .small
+        case ..<0.95: return .medium
+        case ..<1.05: return .large // system default
+        case ..<1.15: return .xLarge
+        case ..<1.25: return .xxLarge
+        case ..<1.35: return .xxxLarge
+        default: return .accessibility1
+        }
+    }
 
     private init() { load() }
 
