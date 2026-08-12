@@ -3,7 +3,7 @@ import SwiftUI
 
 struct RootView: View {
     let spec: SessionSpec
-    @State private var controller = SessionController()
+    @State private var manager = SessionManager()
     @State private var diffStore = DiffStore()
     @State private var showDiff = false
     @State private var showPrompt = false
@@ -11,9 +11,11 @@ struct RootView: View {
     @State private var booted = false
     @State private var settings = SettingsStore.shared
 
+    private var controller: SessionController { manager.active }
+
     var body: some View {
         NavigationSplitView {
-            SidebarView(current: controller)
+            SidebarView(manager: manager)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
         } detail: {
             detail
@@ -26,21 +28,25 @@ struct RootView: View {
         .task {
             guard !booted else { return }
             booted = true
-            controller.start(spec)
+            manager.boot(spec)
             await SettingsStore.shared.reloadModels()
         }
-        .onChange(of: controller.workingDir) { _, dir in
+        .onChange(of: activeWorkingDir) { _, dir in
             diffStore.setDirectory(dir)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
+            Task { await diffStore.refresh() }
+        }
         .onDisappear {
-            controller.stop()
+            manager.stopAll()
         }
     }
+
+    private var activeWorkingDir: String { controller.workingDir }
 
     @ViewBuilder
     private var detail: some View {
         detailContent
-            // ⌘+/⌘- text scale: detail content (chat, composer, review) only
             .dynamicTypeSize(settings.dynamicTypeSize)
     }
 
@@ -48,9 +54,6 @@ struct RootView: View {
     private var detailContent: some View {
         if reviewFullScreen {
             ReviewSurface(store: diffStore, compact: false, onClose: { reviewFullScreen = false })
-                .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
-                    Task { await diffStore.refresh() }
-                }
         } else {
             ChatView(controller: controller, diffStore: diffStore)
                 .inspector(isPresented: $showDiff) {
@@ -71,7 +74,6 @@ struct RootView: View {
             }
             .help("Prompt inspector (system prompt, tools, messages)")
 
-            // side panel
             Button {
                 if !reviewFullScreen { showDiff.toggle() }
             } label: {
@@ -80,7 +82,6 @@ struct RootView: View {
             .help("Toggle changes panel")
             .disabled(reviewFullScreen)
 
-            // full-screen review
             Button {
                 reviewFullScreen = true
                 showDiff = false

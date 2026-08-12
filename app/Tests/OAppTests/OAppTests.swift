@@ -607,3 +607,46 @@ struct ChatCodeHighlightTests {
         #expect(hashDimmed)
     }
 }
+
+@MainActor
+struct SessionManagerTests {
+    @Test func switchingThreadsRetainsLiveControllers() {
+        let manager = SessionManager()
+        let first = SessionController()
+        let second = SessionController()
+        manager.testingRegister(first, id: "s1")
+        manager.testingRegister(second, id: "s2")
+
+        manager.switchTo("s1")
+        #expect(manager.active === first)
+        manager.switchTo("s2")
+        #expect(manager.active === second)
+        // back to s1: same instance — its process (if any) is untouched
+        manager.switchTo("s1")
+        #expect(manager.active === first)
+    }
+
+    @Test func finishWhileHiddenMarksUnread() {
+        let store = SessionListStore.shared
+        store.noteActiveSession("visible-1")
+        store.runFinished(sessionID: "visible-1")
+        #expect(!store.unreadIDs.contains("visible-1"))
+
+        store.runFinished(sessionID: "hidden-9")
+        #expect(store.unreadIDs.contains("hidden-9"))
+
+        // opening the unread session clears it
+        store.noteActiveSession("hidden-9")
+        #expect(!store.unreadIDs.contains("hidden-9"))
+    }
+
+    @Test func hiddenThenFinishedThenReadAgain() {
+        let store = SessionListStore.shared
+        store.runFinished(sessionID: "thread-x")
+        #expect(store.unreadIDs.contains("thread-x"))
+        store.noteSessionHidden("thread-x")
+        #expect(store.unreadIDs.contains("thread-x")) // hiding doesn't clear by itself
+        store.noteActiveSession("thread-x")
+        #expect(store.unreadIDs.isEmpty || !store.unreadIDs.contains("thread-x"))
+    }
+}

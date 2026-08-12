@@ -27,6 +27,32 @@ final class SessionListStore {
     private(set) var sessions: [SessionSummary] = []
     private(set) var loadError: String? = nil
 
+    /// Sessions that finished a run while not visible in any window.
+    private(set) var unreadIDs: Set<String> = []
+    /// Session currently active in at least one window.
+    private var visibleIDs: Set<String> = []
+
+    func noteActiveSession(_ id: String?) {
+        if let id {
+            visibleIDs.insert(id)
+            unreadIDs.remove(id)
+        }
+    }
+
+    /// Called by windows when one of their sessions finished a run.
+    func runFinished(sessionID: String) {
+        if !visibleIDs.contains(sessionID) {
+            unreadIDs.insert(sessionID)
+        }
+    }
+
+    func refreshFromRun() { refresh() }
+
+    /// Stale-window housekeeping: drop visibility a window no longer shows.
+    func noteSessionHidden(_ id: String) {
+        visibleIDs.remove(id)
+    }
+
     private var observersStarted = false
 
     func start() {

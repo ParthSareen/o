@@ -66,6 +66,10 @@ final class SessionController {
     private var flushTask: Task<Void, Never>?
     private(set) var spec: SessionSpec = .new
 
+    /// Hooks for SessionManager (background-runs + unread bookkeeping).
+    var onSessionOpened: ((String) -> Void)? = nil
+    var onRunFinished: (() -> Void)? = nil
+
     // MARK: lifecycle
 
     func start(_ spec: SessionSpec) {
@@ -123,26 +127,15 @@ final class SessionController {
         start(newSpec)
     }
 
-    /// "New chat": fresh session in this window. If a run is in flight it is
-    /// NOT killed — the old process detaches (stdin closes, the run finishes
-    /// and persists, then the process exits) while the window moves on.
-    func startNewChat() {
-        pumpTask?.cancel()
-        pumpTask = nil
-        exitTask?.cancel()
-        exitTask = nil
-        if let old = process {
-            let running = phase == .running
-            Task { running ? await old.detach() : await old.terminate() }
-        }
-        process = nil
-        start(.new)
-    }
-
     func stop() {
         tearDownProcess()
         flushTask?.cancel()
         flushTask = nil
+    }
+
+    /// Terminate the child process and stop all tasks (window close / delete).
+    func stopAndTerminate() async {
+        stop()
     }
 
     private func tearDownProcess() {
@@ -290,6 +283,7 @@ final class SessionController {
             skills = ev.skills ?? []
             blocks = Self.blocksFromHistory(ev.messages ?? [])
             phase = .idle
+            if let chatId = ev.chatId { onSessionOpened?(chatId) }
             NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
 
         case .messageDelta:
@@ -368,6 +362,7 @@ final class SessionController {
             if scope == nil {
                 phase = .idle
                 lastRunStatus = ev.status
+                onRunFinished?()
                 NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
             }
 
