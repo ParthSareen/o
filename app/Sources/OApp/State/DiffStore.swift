@@ -10,9 +10,11 @@ struct GitChange: Identifiable, Hashable, Sendable {
     var isUntracked: Bool { status.contains("?") }
 }
 
-/// One parsed line of a unified diff.
-struct DiffLine: Hashable, Sendable {
+/// One parsed line of a unified diff. UUID identity keeps row recycling
+/// safe across refreshes (offset-based ids can cross-contaminate sections).
+struct DiffLine: Hashable, Identifiable, Sendable {
     enum Kind: String, Sendable { case added, removed, context, hunk, meta }
+    var id = UUID()
     var kind: Kind
     var text: String
     var newNo: Int? = nil
@@ -84,9 +86,10 @@ final class DiffStore {
             let (branchOut, _) = runProcessForOutput("/usr/bin/git", ["branch", "--show-current"], cwd: dir)
             let branch = branchOut.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // status: names + statuses (rename destinations shown)
+            // status: names + statuses; -uall so untracked dirs expand into
+            // their files instead of one synthesized "directory" entry
             let (porcelain, _) = runProcessForOutput("/usr/bin/git",
-                ["status", "--porcelain=v1", "--untracked-files=normal"], cwd: dir)
+                ["status", "--porcelain=v1", "--untracked-files=all"], cwd: dir)
             var order: [String] = []
             var statuses: [String: String] = [:]
             for line in porcelain.split(separator: "\n") {
@@ -112,18 +115,29 @@ final class DiffStore {
 
             var sections = Self.parseDiffSections(patch, statuses: statuses)
 
-            // untracked files never appear in the patch: synthesize sections
+            // untracked files never appear in the patch: synthesize sections.
+            // Skip directories and binary blobs entirely — cat-ing a Mach-O
+            // into a text view is how you get a 300-line garbage section.
             for path in order where statuses[path]?.contains("?") == true {
                 if !sections.contains(where: { $0.path == path }) {
-                    let (content, _) = runProcessForOutput("/bin/cat", [path], cwd: dir)
-                    let raw = content.split(separator: "\n", omittingEmptySubsequences: false)
-                    var lines = raw.prefix(300).enumerated().map { i, l in
-                        DiffLine(kind: .added, text: String(l), newNo: i + 1)
+                    let full = URL(fileURLWithPath: dir).appendingPathComponent(path)
+                    var isDir: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: full.path, isDirectory: &isDir),
+                          !isDir.boolValue,
+                          let data = FileManager.default.contents(atPath: full.path) else { continue }
+
+                    var sec = FileSection(path: path, status: "??")
+                    if Self.isLikelyBinary(data) {
+                        sec.lines = [DiffLine(kind: .meta, text: "(binary file, \(data.count) bytes — not shown)")]
+                    } else {
+                        let text = String(decoding: data, as: UTF8.self)
+                        let raw = text.split(separator: "\n", omittingEmptySubsequences: false)
+                        sec.lines = raw.prefix(300).enumerated().map { i, l in
+                            DiffLine(kind: .added, text: String(l), newNo: i + 1)
+                        }
+                        sec.added = sec.lines.count
+                        if raw.count > 300 { sec.truncated = true }
                     }
-                    var sec = FileSection(path: path, status: "??", added: lines.count)
-                    if raw.count > 300 { sec.truncated = true }
-                    sec.lines = lines
-                    lines = []
                     sections.append(sec)
                 }
             }
@@ -136,6 +150,13 @@ final class DiffStore {
         branch = result.1
         sections = result.2
         loaded = true
+    }
+
+    /// Heuristic: NUL byte or mostly-undecodable UTF-8 in the first 8KB.
+    nonisolated static func isLikelyBinary(_ data: Data) -> Bool {
+        let sample = data.prefix(8 * 1024)
+        if sample.contains(0) { return true }
+        return String(data: Data(sample), encoding: .utf8) == nil
     }
 
     /// Split a unified diff into per-file sections with line numbers threaded.
@@ -203,6 +224,8 @@ final class DiffStore {
                 newNo += 1
             } else if line.hasPrefix("\\") {
                 c.lines.append(DiffLine(kind: .meta, text: line))
+            } else if line.hasPrefix("Binary files") || line.hasPrefix("GIT binary patch") {
+                c.lines.append(DiffLine(kind: .meta, text: "(binary content changed — not shown)"))
             }
             current = c
         }
