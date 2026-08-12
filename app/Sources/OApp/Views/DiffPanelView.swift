@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 /// Codex-style review surface, used both as the narrow inspector and as the
@@ -11,10 +10,12 @@ struct ReviewSurface: View {
     var onClose: (() -> Void)? = nil
 
     private struct CommentDraft: Equatable {
+        enum Phase: Equatable { case anchored, editing }
         var path: String
         var start: Int
         var end: Int
         var oldSide: Bool
+        var phase: Phase = .anchored
     }
     @State private var draft: CommentDraft? = nil
     @State private var draftText = ""
@@ -143,15 +144,31 @@ struct ReviewSurface: View {
     private func sectionRows(_ section: FileSection) -> some View {
         ForEach(Array(section.lines.enumerated()), id: \.offset) { index, line in
             let key = "\(section.path)#\(index)"
+            let isAnchor = draft.map { $0.phase == .anchored && $0.path == section.path
+                && lineAnchor(line) == $0.start } ?? false
+            // + appears on hover; while anchored it appears on all numbered
+            // rows as the "extend to here" affordance; hidden while editing
+            let showAdd = draft.map { $0.phase != .editing } ?? true
+                && (hoveredLine == key || draft?.phase == .anchored)
             DiffReviewLineRow(
                 line: line, path: section.path,
-                showAdd: hoveredLine == key || draft != nil,
+                showAdd: showAdd,
+                isAnchor: isAnchor,
                 onAdd: { addTapped(section: section, line: line) }
             )
             .onHover { hovering in hoveredLine = hovering ? key : nil }
 
+            // anchored-start hint: tap + on another line to extend, or on
+            // this line again to comment on just it
+            if let d = draft, d.phase == .anchored, d.path == section.path, lineAnchor(line) == d.start {
+                Text("＋ again on this line for a single-line comment, or ＋ on another line to set the range · esc to cancel")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                    .padding(.leading, 70)
+                    .padding(.vertical, 2)
+            }
             // inline draft editor / saved comment bubbles under the anchor end
-            if let d = draft, d.path == section.path, lineAnchor(line) == d.end {
+            if let d = draft, d.phase == .editing, d.path == section.path, lineAnchor(line) == d.end {
                 CommentEditorRow(text: $draftText,
                                  rangeLabel: rangeLabel(path: section.path, d.start, d.end),
                                  onAdd: commitDraft,
@@ -172,14 +189,22 @@ struct ReviewSurface: View {
     private func addTapped(section: FileSection, line: DiffLine) {
         guard let n = lineAnchor(line) else { return }
         let oldSide = line.newNo == nil
-        let shift = NSEvent.modifierFlags.contains(.shift)
-        if shift, let d = draft, d.path == section.path, d.oldSide == oldSide {
-            draft = CommentDraft(path: d.path,
-                                 start: min(d.start, d.end), end: max(n, min(d.start, d.end)),
-                                 oldSide: oldSide)
-        } else {
-            draft = CommentDraft(path: section.path, start: n, end: n, oldSide: oldSide)
+        if let d = draft, d.phase == .anchored {
+            if d.path == section.path && d.oldSide == oldSide {
+                if n == d.start {
+                    // second tap on the same line: single-line comment
+                    draft = CommentDraft(path: d.path, start: n, end: n, oldSide: oldSide, phase: .editing)
+                } else {
+                    // extend the range to this line
+                    draft = CommentDraft(path: d.path,
+                                         start: min(d.start, n), end: max(d.start, n),
+                                         oldSide: oldSide, phase: .editing)
+                }
+                return
+            }
+            // different file/side: re-anchor there
         }
+        draft = CommentDraft(path: section.path, start: n, end: n, oldSide: oldSide)
         draftText = ""
     }
 
@@ -327,6 +352,7 @@ struct DiffReviewLineRow: View {
     let line: DiffLine
     let path: String
     let showAdd: Bool
+    var isAnchor = false
     let onAdd: () -> Void
 
     var body: some View {
@@ -399,6 +425,7 @@ struct DiffReviewLineRow: View {
     }
 
     private var background: Color {
+        if isAnchor { return Color.accentColor.opacity(0.10) }
         switch line.kind {
         case .added: return .green.opacity(0.13)
         case .removed: return .red.opacity(0.13)
@@ -436,6 +463,10 @@ private struct CommentEditorRow: View {
                 .focused($focused)
                 .frame(minHeight: 44, maxHeight: 120)
                 .padding(.horizontal, 10)
+                .onKeyPress(keys: [.escape], phases: .down) { _ in
+                    onCancel()
+                    return .handled
+                }
 
             HStack {
                 Spacer()
