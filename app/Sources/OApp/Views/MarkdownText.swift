@@ -208,6 +208,20 @@ struct MarkdownText: View {
     private struct CodeBlockView: View {
         let language: String
         let code: String
+        private let highlighted: AttributedString
+
+        init(language: String, code: String) {
+            self.language = language
+            self.code = code
+            // whole-block AttributedString so text selection stays contiguous
+            let font = Font.system(.body, design: .monospaced)
+            highlighted = code.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { DiffSyntax.highlight(String($0), path: "snippet.\(language)", font: font) }
+                .reduce(into: AttributedString()) { acc, line in
+                    if !acc.characters.isEmpty { acc.append(AttributedString("\n")) }
+                    acc.append(line)
+                }
+        }
 
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
@@ -219,7 +233,7 @@ struct MarkdownText: View {
                         .padding(.top, 4)
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
-                    Text(code)
+                    Text(highlighted)
                         .font(.system(.body, design: .monospaced))
                         .textSelection(.enabled)
                         .padding(8)

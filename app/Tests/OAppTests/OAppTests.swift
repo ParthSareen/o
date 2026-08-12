@@ -583,3 +583,27 @@ struct MarkdownParserTests {
         guard case .paragraph = blocks.first else { Issue.record("\(blocks)"); return }
     }
 }
+
+struct ChatCodeHighlightTests {
+    @Test func fenceLanguageDrivesColors() {
+        // swift keyword colored
+        let swiftLine = DiffSyntax.highlight("let x = 1 // ok", path: "snippet.swift")
+        var keywordColored = false
+        var commentDimmed = false
+        for run in swiftLine.runs {
+            let t = String(swiftLine[run.range].characters)
+            if t == "let" && run.attributes.foregroundColor != nil { keywordColored = true }
+            if t.contains("// ok") && run.attributes.foregroundColor == .secondary { commentDimmed = true }
+        }
+        #expect(keywordColored && commentDimmed)
+    }
+
+    @Test func shellFenceUsesHashComments() {
+        let line = DiffSyntax.highlight("export PATH=$PATH # setup", path: "snippet.sh")
+        var hashDimmed = false
+        for run in line.runs where String(line[run.range].characters).contains("# setup") {
+            if run.attributes.foregroundColor == .secondary { hashDimmed = true }
+        }
+        #expect(hashDimmed)
+    }
+}

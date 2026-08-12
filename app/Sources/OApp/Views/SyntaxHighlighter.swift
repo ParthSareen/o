@@ -45,7 +45,10 @@ enum DiffSyntax {
     private static let numberRegex = try! NSRegularExpression(pattern: #"\b\d+(?:\.\d+)?(?:[eExX][\da-fA-F]+)?\b"#)
     private static let wordRegex = try! NSRegularExpression(pattern: #"\b[A-Za-z_][A-Za-z0-9_]*\b"#)
 
-    static func highlight(_ line: String, path: String) -> AttributedString {
+    static func highlight(
+        _ line: String, path: String,
+        font: Font = .system(.caption, design: .monospaced)
+    ) -> AttributedString {
         let lang = lang(for: path)
         let ns = line as NSString
         let full = NSRange(location: 0, length: ns.length)
@@ -63,13 +66,22 @@ enum DiffSyntax {
                 idx = found.upperBound
             }
         }
-        if lang.hashComments, line.first == "#" { commentStart = 0 }
+        if lang.hashComments {
+            // first # at start-of-line or after whitespace, not inside a string
+            var idx = line.startIndex
+            while let found = line[idx...].firstIndex(of: "#") {
+                let offset = line.distance(from: line.startIndex, to: found)
+                let atBoundary = found == line.startIndex || line[line.index(before: found)] == " "
+                if atBoundary && !inString(offset) { commentStart = min(commentStart ?? .max, offset); break }
+                idx = line.index(after: found)
+            }
+        }
         let codeEnd = commentStart ?? ns.length
 
         if let cs = commentStart, cs < ns.length,
            let range = Range(NSRange(location: cs, length: ns.length - cs), in: result) {
             result[range].foregroundColor = .secondary
-            result[range].font = .system(.caption, design: .monospaced).italic()
+            result[range].font = font.italic()
         }
 
         // 2. strings
