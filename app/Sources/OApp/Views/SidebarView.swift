@@ -77,6 +77,11 @@ struct SidebarView: View {
             openWindow(value: SessionSpec(sessionID: session.id,
                                           workingDir: session.workingDir.nilIfEmpty))
         }
+        if list.unreadIDs.contains(session.id) {
+            Button("Mark as Read") { list.markRead(session.id) }
+        } else {
+            Button("Mark as Unread") { list.markUnread(session.id) }
+        }
         Divider()
         Button("Delete", role: .destructive) {
             manager.sessionDeleted(session.id)

@@ -690,3 +690,20 @@ struct UnreadVisibilityTests {
         store.noteActiveSession("sess-c") // cleanup
     }
 }
+
+@MainActor
+struct MarkUnreadTests {
+    @Test func manualUnreadRoundTripsAndViewingClears() {
+        let store = SessionListStore.shared
+        store.markUnread("manual-1")
+        #expect(store.unreadIDs.contains("manual-1"))
+        // viewing the session clears it (same rule as automatic unread)
+        store.noteActiveSession("manual-1")
+        #expect(!store.unreadIDs.contains("manual-1"))
+        store.noteSessionHidden("manual-1")
+
+        store.markUnread("manual-2")
+        store.markRead("manual-2")
+        #expect(!store.unreadIDs.contains("manual-2"))
+    }
+}

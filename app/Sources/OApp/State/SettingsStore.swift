@@ -9,6 +9,7 @@ struct UIPreferences: Codable, Equatable {
     var selectedModel: String = ""        // empty = o's last model
     var defaultWorkingDir: String = ""    // empty = home directory
     var textScale: Double = 1.0           // 0.7…1.4, ⌘+/⌘- steps of 0.1
+    var unreadSessionIDs: [String] = []   // persisted unread sidebar markers
 }
 
 /// App preferences at ~/.o/ui.json, applied to every new session process.

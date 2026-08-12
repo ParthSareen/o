@@ -27,8 +27,15 @@ final class SessionListStore {
     private(set) var sessions: [SessionSummary] = []
     private(set) var loadError: String? = nil
 
-    /// Sessions that finished a run while not visible in any window.
-    private(set) var unreadIDs: Set<String> = []
+    /// Sessions that finished a run while not visible in any window, or were
+    /// marked unread manually. Persisted in ui.json.
+    private(set) var unreadIDs: Set<String> = [] {
+        didSet {
+            if unreadIDs != oldValue, observersStarted {
+                SettingsStore.shared.prefs.unreadSessionIDs = Array(unreadIDs).sorted()
+            }
+        }
+    }
     /// Sessions with a run in flight right now (any window).
     private(set) var runningIDs: Set<String> = []
     /// Visibility refcounts (a session may be active in several windows).
@@ -60,12 +67,16 @@ final class SessionListStore {
         }
     }
 
+    func markUnread(_ id: String) { unreadIDs.insert(id) }
+    func markRead(_ id: String) { unreadIDs.remove(id) }
+
     func refreshFromRun() { refresh() }
 
     private var observersStarted = false
 
     func start() {
         guard !observersStarted else { return }
+        unreadIDs = Set(SettingsStore.shared.prefs.unreadSessionIDs)
         observersStarted = true
         refresh()
         NotificationCenter.default.addObserver(
