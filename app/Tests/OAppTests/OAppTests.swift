@@ -416,3 +416,39 @@ struct DiffEdgeCaseTests {
         #expect(sections[0].lines[0].text.contains("binary"))
     }
 }
+
+@MainActor
+struct ReviewCommentTests {
+    @Test func promptAppendixFormatsLocationSnippetText() {
+        let store = DiffStore()
+        #expect(store.promptAppendix() == "") // empty when no comments
+
+        store.addComment(CodeComment(
+            id: UUID(), path: "agent/session.go", startLine: 646, endLine: 648,
+            snippet: "for _, tc := range …\n    if tc…", text: "can we avoid the copy here?"))
+        let appendix = store.promptAppendix()
+        #expect(appendix.contains("agent/session.go:646-648"))
+        #expect(appendix.contains("```"))
+        #expect(appendix.contains("can we avoid the copy here?"))
+    }
+
+    @Test func removeAndClearComments() {
+        let store = DiffStore()
+        let c = CodeComment(id: UUID(), path: "a.go", startLine: 1, endLine: 1, snippet: "", text: "t1")
+        store.addComment(c)
+        store.addComment(CodeComment(id: UUID(), path: "b.go", startLine: 2, endLine: 5, snippet: "", text: "t2"))
+        #expect(store.comments.count == 2)
+        store.removeComment(c.id)
+        #expect(store.comments.count == 1)
+        store.clearComments()
+        #expect(store.comments.isEmpty)
+        #expect(store.promptAppendix() == "")
+    }
+
+    @Test func locationStringShape() {
+        let single = CodeComment(id: UUID(), path: "x/y.swift", startLine: 7, endLine: 7, snippet: "", text: "")
+        #expect(single.location == "x/y.swift:7")
+        let range = CodeComment(id: UUID(), path: "x/y.swift", startLine: 7, endLine: 9, snippet: "", text: "")
+        #expect(range.location == "x/y.swift:7-9")
+    }
+}

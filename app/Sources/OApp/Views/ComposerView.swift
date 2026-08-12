@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ComposerView: View {
     @Bindable var controller: SessionController
+    let diffStore: DiffStore
     @State private var draft = ""
     @State private var slashOpen = false
     @FocusState private var focused: Bool
@@ -24,6 +25,9 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            if !diffStore.comments.isEmpty {
+                commentChips
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 editor
                 actionButton
@@ -34,6 +38,46 @@ struct ComposerView: View {
         .padding(.bottom, 8)
         .onAppear { focused = true }
         .onChange(of: slashQuery) { _, q in slashOpen = q != nil && !filteredSkills.isEmpty }
+    }
+
+    /// Staged review comments — they ride with the next prompt.
+    private var commentChips: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "text.bubble.fill")
+                .font(.caption2)
+                .foregroundStyle(Color.accentColor)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(diffStore.comments) { comment in
+                        HStack(spacing: 4) {
+                            Text(shortLocation(comment))
+                                .font(.caption2)
+                            Button {
+                                diffStore.removeComment(comment.id)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.10))
+                        .clipShape(Capsule())
+                    }
+                }
+            }
+            Spacer()
+            Button("Clear") { diffStore.clearComments() }
+                .buttonStyle(.plain)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func shortLocation(_ c: CodeComment) -> String {
+        let file = (c.path as NSString).lastPathComponent
+        return c.startLine == c.endLine ? "\(file):\(c.startLine)" : "\(file):\(c.startLine)-\(c.endLine)"
     }
 
     // MARK: editor
@@ -243,9 +287,13 @@ struct ComposerView: View {
 
     private func send() {
         let text = draft
+        let suffix = diffStore.promptAppendix()
         draft = ""
         slashOpen = false
-        controller.sendPrompt(text)
+        controller.sendPrompt(text, wireSuffix: suffix.isEmpty ? nil : suffix)
+        if controller.phase == .running {
+            diffStore.clearComments() // consumed by the prompt
+        }
     }
 }
 

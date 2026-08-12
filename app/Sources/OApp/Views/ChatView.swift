@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChatView: View {
     let controller: SessionController
+    let diffStore: DiffStore
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,7 +57,7 @@ struct ChatView: View {
             }
 
             Divider()
-            ComposerView(controller: controller)
+            ComposerView(controller: controller, diffStore: diffStore)
         }
     }
 }

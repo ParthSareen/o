@@ -32,6 +32,22 @@ struct FileSection: Identifiable, Sendable {
     var truncated = false
 }
 
+/// A user comment anchored to a diff line range (Codex "local comment").
+/// Attached to the next outgoing prompt as quoted context.
+struct CodeComment: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var path: String
+    var startLine: Int
+    var endLine: Int
+    var oldSide = false // anchored to a removed line (no new-side number)
+    var snippet: String
+    var text: String
+
+    var location: String {
+        startLine == endLine ? "\(path):\(startLine)" : "\(path):\(startLine)-\(endLine)"
+    }
+}
+
 /// Codex-style working-copy review: stacked per-file sections with syntax
 /// colors and line numbers, plus a filterable file tree. All git work is
 /// off-main; parsing is incremental-friendly.
@@ -42,6 +58,40 @@ final class DiffStore {
     private(set) var loaded = false
     private(set) var branch = ""
     var filter = ""
+    private(set) var comments: [CodeComment] = []
+
+    func addComment(_ comment: CodeComment) {
+        comments.append(comment)
+    }
+
+    func removeComment(_ id: UUID) {
+        comments.removeAll { $0.id == id }
+    }
+
+    func clearComments() {
+        comments.removeAll()
+    }
+
+    /// After a refresh, drop comments whose file left the diff; keep line
+    /// anchors otherwise (best effort — the anchor display is indicative).
+    func pruneComments() {
+        let paths = Set(sections.map(\.path))
+        comments.removeAll { !paths.contains($0.path) }
+    }
+
+    /// Formatted block that rides with the next user prompt.
+    func promptAppendix() -> String {
+        guard !comments.isEmpty else { return "" }
+        var parts = ["", "---", "Review comments on the working-copy diff:", ""]
+        for c in comments {
+            var block = "### \(c.location)\(c.oldSide ? " (removed side)" : "")\n"
+            let snippet = c.snippet.split(separator: "\n").prefix(12).joined(separator: "\n")
+            if !snippet.isEmpty { block += "```\n\(snippet)\n```\n" }
+            block += c.text
+            parts.append(block)
+        }
+        return parts.joined(separator: "\n")
+    }
 
     var totalAdded: Int { sections.reduce(0) { $0 + $1.added } }
     var totalRemoved: Int { sections.reduce(0) { $0 + $1.removed } }
@@ -150,6 +200,7 @@ final class DiffStore {
         branch = result.1
         sections = result.2
         loaded = true
+        pruneComments()
     }
 
     /// Heuristic: NUL byte or mostly-undecodable UTF-8 in the first 8KB.

@@ -1,11 +1,28 @@
+import AppKit
 import SwiftUI
 
-/// Codex-style review pane: stacked per-file diff sections with syntax
-/// highlighting and line numbers, plus a filterable file tree on the right.
-struct DiffPanelView: View {
+/// Codex-style review surface, used both as the narrow inspector and as the
+/// full-screen detail view. Stacked per-file diff sections with syntax
+/// highlighting, line numbers, inline code comments, and a filterable file
+/// tree column.
+struct ReviewSurface: View {
     @Bindable var store: DiffStore
-    let workingDir: String
+    var compact = true
+    var onClose: (() -> Void)? = nil
+
+    private struct CommentDraft: Equatable {
+        var path: String
+        var start: Int
+        var end: Int
+        var oldSide: Bool
+    }
+    @State private var draft: CommentDraft? = nil
+    @State private var draftText = ""
     @State private var showFileTree = true
+    @State private var scrollProxy: ScrollViewProxy? = nil
+    @State private var hoveredLine: LineKey? = nil
+
+    private typealias LineKey = String // "\(section)#\(index)"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,18 +30,14 @@ struct DiffPanelView: View {
             Divider()
             content
         }
-        .onAppear { store.setDirectory(workingDir) }
-        .onChange(of: workingDir) { _, dir in store.setDirectory(dir) }
-        .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
-            Task { await store.refresh() } // agent runs may have edited files
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: header
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text("Changes").font(.headline)
+            Text("Changes").font(compact ? .headline : .title3).fontWeight(.semibold)
             if !store.branch.isEmpty {
                 Text(store.branch)
                     .font(.caption)
@@ -35,6 +48,11 @@ struct DiffPanelView: View {
                     .font(.caption.monospacedDigit())
                 Text("−\(store.totalRemoved)").foregroundStyle(.red)
                     .font(.caption.monospacedDigit())
+            }
+            if !store.comments.isEmpty {
+                Label("\(store.comments.count)", systemImage: "text.bubble")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             Button { Task { await store.refresh() } } label: {
@@ -47,8 +65,15 @@ struct DiffPanelView: View {
             }
             .toggleStyle(.button)
             .help(showFileTree ? "Hide files" : "Show files")
+            if let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                }
+                .buttonStyle(.plain)
+                .help("Back to chat")
+            }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, compact ? 10 : 16)
         .padding(.vertical, 8)
     }
 
@@ -56,11 +81,11 @@ struct DiffPanelView: View {
 
     @ViewBuilder
     private var content: some View {
-        if workingDir.isEmpty {
-            emptyState("No working directory yet")
-        } else if store.loaded && !store.isRepo {
+        if !store.loaded {
+            loading
+        } else if !store.isRepo {
             emptyState("Not a git repository")
-        } else if store.loaded && store.sections.isEmpty {
+        } else if store.sections.isEmpty {
             emptyState("Working tree clean")
         } else {
             HStack(spacing: 0) {
@@ -68,9 +93,15 @@ struct DiffPanelView: View {
                 if showFileTree {
                     Divider()
                     fileTree
+                        .frame(width: compact ? 210 : 260)
                 }
             }
         }
+    }
+
+    private var loading: some View {
+        VStack { Spacer(); ProgressView(); Spacer() }
+            .frame(maxWidth: .infinity)
     }
 
     private func emptyState(_ text: String) -> some View {
@@ -82,7 +113,7 @@ struct DiffPanelView: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: stacked diff (all files)
+    // MARK: stacked diff with comments
 
     private var stackView: some View {
         ScrollViewReader { proxy in
@@ -90,15 +121,11 @@ struct DiffPanelView: View {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     ForEach(store.filteredSections) { section in
                         Section(header: FileSectionHeader(section: section)) {
-                            ForEach(section.lines) { line in
-                                DiffLineRow(line: line, path: section.path)
-                            }
+                            sectionRows(section)
                             if section.truncated {
                                 Text("  … truncated …")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.vertical, 4)
-                                    .padding(.horizontal, 8)
+                                    .font(.caption2).foregroundStyle(.secondary)
+                                    .padding(.vertical, 4).padding(.horizontal, 8)
                             }
                             Color.clear.frame(height: 10)
                         }
@@ -112,16 +139,90 @@ struct DiffPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @State private var scrollProxy: ScrollViewProxy? = nil
+    @ViewBuilder
+    private func sectionRows(_ section: FileSection) -> some View {
+        ForEach(Array(section.lines.enumerated()), id: \.offset) { index, line in
+            let key = "\(section.path)#\(index)"
+            DiffReviewLineRow(
+                line: line, path: section.path,
+                showAdd: hoveredLine == key || draft != nil,
+                onAdd: { addTapped(section: section, line: line) }
+            )
+            .onHover { hovering in hoveredLine = hovering ? key : nil }
 
-    // MARK: file tree (right column)
+            // inline draft editor / saved comment bubbles under the anchor end
+            if let d = draft, d.path == section.path, lineAnchor(line) == d.end {
+                CommentEditorRow(text: $draftText,
+                                 rangeLabel: rangeLabel(path: section.path, d.start, d.end),
+                                 onAdd: commitDraft,
+                                 onCancel: { draft = nil; draftText = "" })
+            }
+            ForEach(commentsEnding(at: section, line: line)) { comment in
+                CommentBubbleRow(comment: comment, onDelete: { store.removeComment(comment.id) })
+            }
+        }
+    }
+
+    // MARK: comment interactions
+
+    private func lineAnchor(_ line: DiffLine) -> Int? {
+        line.newNo ?? line.oldNo
+    }
+
+    private func addTapped(section: FileSection, line: DiffLine) {
+        guard let n = lineAnchor(line) else { return }
+        let oldSide = line.newNo == nil
+        let shift = NSEvent.modifierFlags.contains(.shift)
+        if shift, let d = draft, d.path == section.path, d.oldSide == oldSide {
+            draft = CommentDraft(path: d.path,
+                                 start: min(d.start, d.end), end: max(n, min(d.start, d.end)),
+                                 oldSide: oldSide)
+        } else {
+            draft = CommentDraft(path: section.path, start: n, end: n, oldSide: oldSide)
+        }
+        draftText = ""
+    }
+
+    private func commitDraft() {
+        guard let d = draft, !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            draft = nil
+            return
+        }
+        let snippet = snippetFor(path: d.path, start: d.start, end: d.end, oldSide: d.oldSide)
+        store.addComment(CodeComment(id: UUID(), path: d.path, startLine: d.start, endLine: d.end,
+                                     oldSide: d.oldSide, snippet: snippet,
+                                     text: draftText.trimmingCharacters(in: .whitespacesAndNewlines)))
+        draft = nil
+        draftText = ""
+    }
+
+    private func snippetFor(path: String, start: Int, end: Int, oldSide: Bool) -> String {
+        guard let section = store.sections.first(where: { $0.path == path }) else { return "" }
+        return section.lines.filter { line in
+            if oldSide { return line.oldNo.map { ($0 >= start && $0 <= end) } ?? false }
+            return line.newNo.map { ($0 >= start && $0 <= end) && line.kind != .removed } ?? false
+        }
+        .filter { $0.kind == .added || $0.kind == .removed || $0.kind == .context }
+        .map(\.text).joined(separator: "\n")
+    }
+
+    private func commentsEnding(at section: FileSection, line: DiffLine) -> [CodeComment] {
+        guard let n = lineAnchor(line) else { return [] }
+        return store.comments.filter { $0.path == section.path && $0.endLine == n }
+    }
+
+    private func rangeLabel(path: String, _ start: Int, _ end: Int) -> String {
+        let file = (path as NSString).lastPathComponent
+        return start == end ? "\(file):\(start)" : "\(file):\(start)-\(end)"
+    }
+
+    // MARK: file tree
 
     private var fileTree: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(.secondary)
                 TextField("Filter files…", text: $store.filter)
                     .textFieldStyle(.plain)
                     .font(.caption)
@@ -152,9 +253,10 @@ struct DiffPanelView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
         }
-        .frame(width: 210)
     }
 }
+
+// MARK: - rows
 
 private struct FileTreeRow: View {
     let file: FileSection
@@ -220,17 +322,33 @@ private struct FileSectionHeader: View {
     }
 }
 
-struct DiffLineRow: View {
+/// One diff line with a hover "+" affordance in the gutter for commenting.
+struct DiffReviewLineRow: View {
     let line: DiffLine
     let path: String
+    let showAdd: Bool
+    let onAdd: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            // gutter: new-side number for added/context, blank for removed
+            ZStack {
+                if showAdd && (line.newNo != nil || line.oldNo != nil) {
+                    Button(action: onAdd) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 16, height: 16)
+                            .background(Color.accentColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(width: 22)
             Text(line.newNo.map(String.init) ?? "")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.tertiary)
-                .frame(width: 44, alignment: .trailing)
+                .frame(width: 40, alignment: .trailing)
                 .padding(.trailing, 8)
             marker
             text
@@ -287,5 +405,108 @@ struct DiffLineRow: View {
         case .hunk: return .purple.opacity(0.06)
         default: return .clear
         }
+    }
+}
+
+/// Inline "local comment" editor under the selected lines.
+private struct CommentEditorRow: View {
+    @Binding var text: String
+    let rangeLabel: String
+    let onAdd: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label("Local comment", systemImage: "text.bubble")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                Spacer()
+                Text("on lines \(rangeLabel)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+
+            TextEditor(text: $text)
+                .font(.callout)
+                .scrollContentBackground(.hidden)
+                .focused($focused)
+                .frame(minHeight: 44, maxHeight: 120)
+                .padding(.horizontal, 10)
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                Button("Comment", action: onAdd)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .onAppear { focused = true }
+    }
+}
+
+/// A saved comment rendered as a bubble under its anchor line.
+private struct CommentBubbleRow: View {
+    let comment: CodeComment
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "text.bubble.fill")
+                .foregroundStyle(Color.accentColor)
+                .font(.caption)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(comment.text)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                Text(comment.location)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(action: onDelete) {
+                Image(systemName: "xmark.circle")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.07))
+        .padding(.vertical, 2)
+    }
+}
+
+/// Inspector-host wrapper (kept for the narrow right-side presentation).
+struct DiffPanelView: View {
+    @Bindable var store: DiffStore
+    let workingDir: String
+
+    var body: some View {
+        ReviewSurface(store: store, compact: true)
+            .onAppear { store.setDirectory(workingDir) }
+            .onChange(of: workingDir) { _, dir in store.setDirectory(dir) }
+            .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
+                Task { await store.refresh() }
+            }
     }
 }
