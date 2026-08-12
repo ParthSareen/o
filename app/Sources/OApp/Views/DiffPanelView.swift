@@ -144,8 +144,6 @@ struct ReviewSurface: View {
     private func sectionRows(_ section: FileSection) -> some View {
         ForEach(Array(section.lines.enumerated()), id: \.offset) { index, line in
             let key = "\(section.path)#\(index)"
-            let isAnchor = draft.map { $0.phase == .anchored && $0.path == section.path
-                && lineAnchor(line) == $0.start } ?? false
             // + appears on hover; while anchored it appears on all numbered
             // rows as the "extend to here" affordance; hidden while editing
             let showAdd = draft.map { $0.phase != .editing } ?? true
@@ -153,7 +151,7 @@ struct ReviewSurface: View {
             DiffReviewLineRow(
                 line: line, path: section.path,
                 showAdd: showAdd,
-                isAnchor: isAnchor,
+                highlight: lineHighlight(section: section, line: line),
                 onAdd: { addTapped(section: section, line: line) }
             )
             .onHover { hovering in hoveredLine = hovering ? key : nil }
@@ -184,6 +182,39 @@ struct ReviewSurface: View {
 
     private func lineAnchor(_ line: DiffLine) -> Int? {
         line.newNo ?? line.oldNo
+    }
+
+    /// Visual emphasis for a line: anchor pop, live range preview while
+    /// hovering a candidate end, persistent range tint while editing, and a
+    /// marker for lines that already carry a comment.
+    private func lineHighlight(section: FileSection, line: DiffLine) -> DiffReviewLineRow.Highlight {
+        let oldSide = line.newNo == nil
+        if let n = lineAnchor(line) {
+            if let d = draft, d.path == section.path, d.oldSide == oldSide {
+                switch d.phase {
+                case .anchored:
+                    if n == d.start { return .anchor }
+                    // range preview: tint everything from the anchor to the
+                    // line currently hovered in this section
+                    if let hovered = hoveredLine,
+                       hovered.hasPrefix("\(section.path)#"),
+                       let hoverIdx = Int(hovered.split(separator: "#").last ?? ""),
+                       section.lines.indices.contains(hoverIdx) {
+                        let hoverLine = section.lines[hoverIdx]
+                        if let hoverN = lineAnchor(hoverLine), (hoverLine.newNo == nil) == oldSide {
+                            let lo = Swift.min(d.start, hoverN), hi = Swift.max(d.start, hoverN)
+                            if n >= lo && n <= hi { return .draftRange }
+                        }
+                    }
+                case .editing:
+                    if n >= d.start && n <= d.end { return .draftRange }
+                }
+            }
+            if store.comments.contains(where: {
+                $0.path == section.path && $0.oldSide == oldSide && n >= $0.startLine && n <= $0.endLine
+            }) { return .commented }
+        }
+        return .none
     }
 
     private func addTapped(section: FileSection, line: DiffLine) {
@@ -349,14 +380,20 @@ private struct FileSectionHeader: View {
 
 /// One diff line with a hover "+" affordance in the gutter for commenting.
 struct DiffReviewLineRow: View {
+    enum Highlight { case none, anchor, draftRange, commented }
+
     let line: DiffLine
     let path: String
     let showAdd: Bool
-    var isAnchor = false
+    var highlight: Highlight = .none
     let onAdd: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
+            // comment-range edge marker
+            Rectangle()
+                .fill(edgeColor)
+                .frame(width: 3)
             ZStack {
                 if showAdd && (line.newNo != nil || line.oldNo != nil) {
                     Button(action: onAdd) {
@@ -424,13 +461,26 @@ struct DiffReviewLineRow: View {
         }
     }
 
+    private var edgeColor: Color {
+        switch highlight {
+        case .anchor, .draftRange: return Color.accentColor
+        case .commented: return Color.accentColor.opacity(0.7)
+        case .none: return .clear
+        }
+    }
+
     private var background: Color {
-        if isAnchor { return Color.accentColor.opacity(0.10) }
-        switch line.kind {
-        case .added: return .green.opacity(0.13)
-        case .removed: return .red.opacity(0.13)
-        case .hunk: return .purple.opacity(0.06)
-        default: return .clear
+        switch highlight {
+        case .anchor: return Color.accentColor.opacity(0.22)
+        case .draftRange: return Color.accentColor.opacity(0.12)
+        case .commented: return Color.accentColor.opacity(0.06)
+        case .none:
+            switch line.kind {
+            case .added: return .green.opacity(0.13)
+            case .removed: return .red.opacity(0.13)
+            case .hunk: return .purple.opacity(0.06)
+            default: return .clear
+            }
         }
     }
 }
