@@ -21,6 +21,11 @@ const (
 	EventCompactionSkipped  EventType = "compaction_skipped"
 	EventRunFinished        EventType = "run_finished"
 	EventError              EventType = "error"
+	// EventSessionOpened is emitted once by pipe mode when a session is
+	// created or resumed, before any run events. It carries the session
+	// metadata and (for resumed sessions) the persisted message history so
+	// the UI can rebuild its transcript.
+	EventSessionOpened EventType = "session_opened"
 )
 
 // ToolStatus is the typed lifecycle state for a tool call, carried on
@@ -59,11 +64,20 @@ const (
 	CompactionTriggerDue        CompactionTrigger = "due"
 )
 
+// SkillInfo is a UI-facing summary of one catalog skill, carried on
+// session_opened events so frontends can render a slash-command palette.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
 type Event struct {
 	Type              EventType         `json:"type"`
 	RunID             string            `json:"runId,omitempty"`
 	ChatID            string            `json:"chatId,omitempty"`
 	Model             string            `json:"model,omitempty"`
+	// Name is the human-readable session name, set on session_opened events.
+	Name string `json:"name,omitempty"`
 	Status            RunStatus         `json:"status,omitempty"`
 	ToolStatus        ToolStatus        `json:"toolStatus,omitempty"`
 	CompactionTrigger CompactionTrigger `json:"compactionTrigger,omitempty"`
@@ -74,6 +88,9 @@ type Event struct {
 	Thinking          string            `json:"thinking,omitempty"`
 	ToolCalls         []api.ToolCall    `json:"toolCalls,omitempty"`
 	Messages          []api.Message    `json:"messages,omitempty"`
+	// Skills lists the skills available for /-invocation; set on
+	// session_opened events only.
+	Skills []SkillInfo `json:"skills,omitempty"`
 	Args              map[string]any    `json:"args,omitempty"`
 	Tokens            int               `json:"tokens,omitempty"`
 	Error             string            `json:"error,omitempty"`

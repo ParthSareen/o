@@ -24,6 +24,7 @@ type cliOptions struct {
 	multiModal          bool
 	contextWindowTokens int
 	headless            bool
+	pipe                bool
 	resume              bool
 	resumeID            string
 	listSessions        bool
@@ -40,6 +41,7 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.BoolVar(&opts.multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&opts.contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
 	fs.BoolVar(&opts.headless, "headless", false, "print the response and exit (prompt from args or stdin)")
+	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools and --rlm unless set explicitly")
 	fs.BoolVar(&opts.resume, "resume", false, "resume the most recent session")
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
@@ -61,6 +63,9 @@ func main() {
 		}
 	}
 	_ = fs.Parse(os.Args[1:])
+	if opts.pipe {
+		applyPipeDefaults(fs, opts)
+	}
 
 	model, prompt := "", ""
 	if fs.NArg() > 0 {
@@ -77,10 +82,11 @@ func main() {
 	}
 
 	// A positional prompt implies headless; explicit --headless with no
-	// positional prompt reads the prompt from stdin.
-	headless := opts.headless || prompt != ""
+	// positional prompt reads the prompt from stdin. In pipe mode a
+	// positional prompt is the first turn of the NDJSON session instead.
+	headless := opts.headless || (prompt != "" && !opts.pipe)
 
-	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.resume, opts.resumeID, opts.name, opts.rlm); err != nil {
+	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.pipe, opts.resume, opts.resumeID, opts.name, opts.rlm); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -183,7 +189,7 @@ AGENTS
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
 // headless addition.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, resume bool, resumeID string, name string, rlm bool) error {
+func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, pipe bool, resume bool, resumeID string, name string, rlm bool) error {
 	// Open the session store for persistence (non-fatal if it fails).
 	store, storeErr := sessionstore.Open()
 	if storeErr != nil {
@@ -213,6 +219,12 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		// Use the session's model unless overridden by a positional arg.
 		if model == "" {
 			model = sess.Model
+		} else if model != sess.Model {
+			// Persist an explicit override so the sidebar and future plain
+			// resumes reflect the chosen model.
+			if err := store.SetModel(sess.ID, model); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not save model choice: %v\n", err)
+			}
 		}
 		if model == "" {
 			model = config.LastModel()
@@ -255,6 +267,13 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 
 		if err := saveLastAgentModel(opts.Model); err != nil {
 			return err
+		}
+
+		if pipe {
+			if code := runPipeResume(ctx, client, &opts, store, sess, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
+				os.Exit(code)
+			}
+			return nil
 		}
 
 		if headless {
@@ -327,6 +346,13 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 
 	if err := saveLastAgentModel(opts.Model); err != nil {
 		return err
+	}
+
+	if pipe {
+		if code := runPipe(ctx, client, &opts, store, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
+			os.Exit(code)
+		}
+		return nil
 	}
 
 	if headless {

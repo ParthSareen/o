@@ -18,6 +18,7 @@ Most of the code is adapted from the ollama repo, with imports rewritten to
 | `cmd/launch/` | A trimmed shim: the spinner and the types that the TUI uses. The integration runners (claude, codex, …) are not included. |
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
+| `app/` | Native macOS app (SwiftUI). Bundles the agent core and talks to it over `o --pipe`. See `app/README.md`. |
 | `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
 | `types/model/` | Model capabilities and names |
@@ -45,9 +46,13 @@ o --name <text> [model]  # start a new session with a name
 ```
 
 Flags: `--system`, `--allow-all-tools` (no approval prompts), `--no-tools`,
-`--multimodal`, `--context-window`, `--headless`, `--resume`, `--resume-id`,
-`--list`, `--name`. Run `o --help` for the full usage text, which includes
-rules for headless use by agents.
+`--multimodal`, `--context-window`, `--headless`, `--pipe`, `--resume`,
+`--resume-id`, `--list`, `--name`. Run `o --help` for the full usage text,
+which includes rules for headless use by agents.
+
+`--pipe` speaks a machine-readable NDJSON protocol over stdio (prompt/cancel
+commands in, the full agent event stream out) for UI frontends like `app/`.
+It implies `--allow-all-tools` and `--rlm` unless you set them explicitly.
 
 ## The TUI
 
