@@ -263,12 +263,10 @@ struct DiffStoreTests {
             return
         }
         #expect(store.loaded)
-        // repo has at least README or tracked files; with dirty tree changes is non-empty,
-        // clean tree is also a valid state
-        if store.changes.isEmpty {
-            #expect(store.diffText == "")
-        } else {
-            #expect(store.changes.allSatisfy { !$0.path.isEmpty })
+        // clean tree is a valid state; dirty tree produces sections
+        #expect(store.sections.allSatisfy { !$0.path.isEmpty })
+        if !store.sections.isEmpty {
+            #expect(store.totalAdded + store.totalRemoved > 0)
         }
     }
 
@@ -277,7 +275,7 @@ struct DiffStoreTests {
         let tmp = NSTemporaryDirectory()
         store.setDirectory(tmp)
         await store.refresh()
-        #expect(!store.isRepo || store.changes.isEmpty) // /tmp may be inside a repo on some systems; both states safe
+        #expect(!store.isRepo || store.sections.isEmpty) // /tmp may be inside a repo on some systems; both states safe
     }
 }
 
@@ -309,5 +307,87 @@ struct InspectTests {
         let data = try JSONEncoder().encode(AgentCommand.inspect)
         let dict = try JSONSerialization.jsonObject(with: data) as? [String: String]
         #expect(dict == ["cmd": "inspect"])
+    }
+}
+
+struct DiffParsingTests {
+    let patch = """
+    diff --git a/api/client.go b/api/client.go
+    index 123..456 100644
+    --- a/api/client.go
+    +++ b/api/client.go
+    @@ -10,3 +10,4 @@ func f() {
+      context line
+    -old line
+    +new line
+    +another new line
+    diff --git a/deleted.txt b/deleted.txt
+    deleted file mode 100644
+    --- a/deleted.txt
+    +++ /dev/null
+    @@ -1,2 +0,0 @@
+    -gone
+    -also gone
+    """
+
+    @Test func sectionsHeaderAndThreading() {
+        let sections = DiffStore.parseDiffSections(patch, statuses: ["api/client.go": " M", "deleted.txt": " D"])
+        #expect(sections.count == 2)
+
+        let go = sections[0]
+        #expect(go.path == "api/client.go")
+        #expect(go.added == 2 && go.removed == 1)
+        // context at old/new 10; removed at old 11 (no newNo); added at new 11,12
+        let ctx = go.lines.first { $0.kind == .context }
+        #expect(ctx?.newNo == 10 && ctx?.oldNo == 10)
+        let del = go.lines.first { $0.kind == .removed }
+        #expect(del?.oldNo == 11 && del?.newNo == nil && del?.text == "old line")
+        let adds = go.lines.filter { $0.kind == .added }
+        #expect(adds.map(\.newNo) == [11, 12])
+
+        let delSec = sections[1]
+        #expect(delSec.added == 0 && delSec.removed == 2)
+        // meta noise (deleted file mode / index) is filtered out
+        #expect(!go.lines.contains { $0.text.hasPrefix("index ") })
+    }
+
+    @Test func hunkHeaderCountersResume() {
+        let multi = """
+        diff --git a/f.swift b/f.swift
+        @@ -1,2 +1,2 @@
+        -a
+        +b
+         keep
+        @@ -20,1 +20,2 @@
+        +x
+         tail
+        """
+        let s = DiffStore.parseDiffSections(multi, statuses: [:]).first!
+        let lines = s.lines.filter { $0.kind != .hunk }
+        #expect(lines.map(\.text) == ["a", "b", "keep", "x", "tail"])
+        #expect(lines.map(\.newNo) == [nil, 1, 2, 20, 21])
+    }
+}
+
+struct SyntaxHighlighterTests {
+    @Test func highlighterPreservesText() {
+        let line = "func main() { // say \"hi\" }"
+        #expect(String(DiffSyntax.highlight(line, path: "main.go").characters) == line)
+    }
+
+    @Test func keywordGetsSwiftUIColor() {
+        let rendered = DiffSyntax.highlight("return nil", path: "x.go")
+        var runs = rendered.runs.makeIterator()
+        var keywordColored = false
+        while let run = runs.next() {
+            let text = String(rendered[run.range].characters)
+            if text == "return" && run.attributes.foregroundColor != nil { keywordColored = true }
+        }
+        #expect(keywordColored)
+    }
+
+    @Test func plainLineKeepsContent() {
+        let text = "just some plain code"
+        #expect(String(DiffSyntax.highlight(text, path: "x.go").characters) == text)
     }
 }
