@@ -96,7 +96,7 @@ struct ToolCallRow: View {
                         .font(.system(.callout, design: .monospaced))
                         .fontWeight(.medium)
                     Text(summary)
-                        .font(.caption)
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -172,6 +172,8 @@ struct ToolCallRow: View {
     }
 
     private var summary: String {
+        // what actually ran: the invocation one-liner (query, command, path…)
+        if !tool.argsSummary.isEmpty { return tool.argsSummary }
         switch tool.status {
         case .running: return "running…"
         case .pending: return "queued"

@@ -65,7 +65,7 @@ const (
 	smallContextToolResultTokenWindow = 8192
 	tinyContextToolResultTokenWindow  = 4096
 	toolTruncationMarkerReserveTokens = 64
-	toolOutputFullOmissionPrefix      = "[tool output truncated: output omitted because the context is full;"
+	toolOutputFullOmissionPrefix      = "[tool output truncated: output omitted because the context is full]"
 )
 
 type toolOutputOverflow struct {

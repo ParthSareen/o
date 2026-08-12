@@ -200,6 +200,39 @@ final class SessionController {
         }
     }
 
+    /// Friendly one-line summary of a tool invocation for collapsed cards:
+    /// bash shows the command, web_search the query, file tools the path…
+    nonisolated static func toolSummary(name: String, args: JSONValue?) -> String {
+        guard case .object(let map) = args else { return "" }
+        func str(_ keys: String...) -> String? {
+            for key in keys {
+                if case .string(let s) = map[key], !s.isEmpty { return s }
+            }
+            return nil
+        }
+        var result: String
+        switch name {
+        case "bash":
+            result = str("command") ?? ""
+        case "web_search":
+            result = str("query").map { "\"\($0)\"" } ?? ""
+        case "web_fetch":
+            result = str("url") ?? ""
+        case "read_file", "read", "write_file", "write", "edit_file", "edit":
+            result = str("path", "file", "file_path") ?? ""
+        case "skill":
+            result = str("name").map { "/\($0)" } ?? ""
+        case "subagents":
+            result = str("query", "prompt", "description") ?? ""
+        default:
+            result = JSONValue.object(map).summary
+        }
+        if result.count > 96 {
+            result = String(result.prefix(93)) + "…"
+        }
+        return result
+    }
+
     /// Parse a leading `/skillname` (matching a catalog skill) out of the
     /// prompt. Unknown slash tokens are left as plain text.
     nonisolated static func splitSlashInvocation(_ input: String, skills: [SkillInfo]) -> (text: String, skill: String?) {
@@ -278,6 +311,9 @@ final class SessionController {
                 tool.callID = call.id
                 tool.name = call.function.name
                 tool.argsText = call.function.arguments?.pretty
+                if let args = call.function.arguments {
+                    tool.argsSummary = Self.toolSummary(name: tool.name, args: args)
+                }
                 appendBlock(.tool(tool), scope: scope)
             }
 
@@ -287,7 +323,10 @@ final class SessionController {
             mutateTool(id: ev.toolCallId ?? "", name: name, scope: scope) { tool in
                 tool.status = .running
                 tool.name = name
-                if let args = ev.args { tool.argsText = JSONValue.object(args).pretty }
+                if let args = ev.args {
+                    tool.argsText = JSONValue.object(args).pretty
+                    tool.argsSummary = Self.toolSummary(name: name, args: .object(args))
+                }
                 tool.workingDir = ev.workingDir
             }
 
@@ -545,6 +584,9 @@ final class SessionController {
                     tool.callID = call.id
                     tool.name = call.function.name
                     tool.argsText = call.function.arguments?.pretty
+                    if let args = call.function.arguments {
+                        tool.argsSummary = toolSummary(name: tool.name, args: args)
+                    }
                     tool.status = .pending // resolved when the tool result message arrives
                     blocks.append(.tool(tool))
                     if !call.id.isEmpty { toolIndexByCallID[call.id] = blocks.count - 1 }
