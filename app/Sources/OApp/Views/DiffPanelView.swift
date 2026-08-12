@@ -142,7 +142,10 @@ struct ReviewSurface: View {
 
     @ViewBuilder
     private func sectionRows(_ section: FileSection) -> some View {
-        ForEach(Array(section.lines.enumerated()), id: \.offset) { index, line in
+        // Identity MUST be the line's own UUID: id-by-offset causes rows to
+        // be reused across sections (per-section offsets collide), which
+        // renders other files' content under a section header.
+        ForEach(Array(section.lines.enumerated()), id: \.element.id) { index, line in
             let key = "\(section.path)#\(index)"
             // + only under the mouse cursor (the range preview tint already
             // shows what extending would cover); hidden while editing
