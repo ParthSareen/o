@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Right-side inspector: working-tree changes for the session's directory.
+/// Codex-style review pane: stacked per-file diff sections with syntax
+/// highlighting and line numbers, plus a filterable file tree on the right.
 struct DiffPanelView: View {
     @Bindable var store: DiffStore
     let workingDir: String
+    @State private var showFileTree = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,29 +16,43 @@ struct DiffPanelView: View {
         .onAppear { store.setDirectory(workingDir) }
         .onChange(of: workingDir) { _, dir in store.setDirectory(dir) }
         .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
-            // agent runs may have edited files
-            Task { await store.refresh() }
+            Task { await store.refresh() } // agent runs may have edited files
         }
     }
 
+    // MARK: header
+
     private var header: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Text("Changes").font(.headline)
-            Text(workingDir.isEmpty ? "" : URL(fileURLWithPath: workingDir).lastPathComponent)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if !store.branch.isEmpty {
+                Text(store.branch)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !store.sections.isEmpty {
+                Text("+\(store.totalAdded)").foregroundStyle(.green)
+                    .font(.caption.monospacedDigit())
+                Text("−\(store.totalRemoved)").foregroundStyle(.red)
+                    .font(.caption.monospacedDigit())
+            }
             Spacer()
-            Button {
-                Task { await store.refresh() }
-            } label: {
+            Button { Task { await store.refresh() } } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
             .help("Refresh")
+            Toggle(isOn: $showFileTree) {
+                Image(systemName: "sidebar.right")
+            }
+            .toggleStyle(.button)
+            .help(showFileTree ? "Hide files" : "Show files")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
     }
+
+    // MARK: content
 
     @ViewBuilder
     private var content: some View {
@@ -44,10 +60,16 @@ struct DiffPanelView: View {
             emptyState("No working directory yet")
         } else if store.loaded && !store.isRepo {
             emptyState("Not a git repository")
-        } else if store.loaded && store.changes.isEmpty {
+        } else if store.loaded && store.sections.isEmpty {
             emptyState("Working tree clean")
         } else {
-            split
+            HStack(spacing: 0) {
+                stackView
+                if showFileTree {
+                    Divider()
+                    fileTree
+                }
+            }
         }
     }
 
@@ -60,87 +82,210 @@ struct DiffPanelView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var split: some View {
-        VSplitView {
-            fileList
-                .frame(minHeight: 120)
-            DiffView(text: store.diffText, path: store.selection ?? "")
-                .frame(minHeight: 160)
-        }
-    }
+    // MARK: stacked diff (all files)
 
-    private var fileList: some View {
-        List(store.changes, selection: $store.selection) { change in
-            HStack(spacing: 6) {
-                statusBadge(change.status)
-                Text(change.path)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                Spacer()
-                if change.added > 0 { Text("+\(change.added)").foregroundStyle(.green) }
-                if change.removed > 0 { Text("−\(change.removed)").foregroundStyle(.red) }
+    private var stackView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    ForEach(store.filteredSections) { section in
+                        Section(header: FileSectionHeader(section: section)) {
+                            ForEach(Array(section.lines.enumerated()), id: \.offset) { _, line in
+                                DiffLineRow(line: line, path: section.path)
+                            }
+                            if section.truncated {
+                                Text("  … truncated …")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 4)
+                                    .padding(.horizontal, 8)
+                            }
+                            Color.clear.frame(height: 10)
+                        }
+                        .id(section.path)
+                    }
+                }
             }
-            .font(.caption2)
-            .tag(change.path)
+            .onAppear { scrollProxy = proxy }
+            .onDisappear { scrollProxy = nil }
         }
-        .listStyle(.plain)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func statusBadge(_ status: String) -> some View {
+    @State private var scrollProxy: ScrollViewProxy? = nil
+
+    // MARK: file tree (right column)
+
+    private var fileTree: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                TextField("Filter files…", text: $store.filter)
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+            }
+            .padding(6)
+            .background(Color.primary.opacity(0.04))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .padding(8)
+
+            List {
+                ForEach(store.groupedSections, id: \.dir) { group in
+                    Section {
+                        ForEach(group.files) { file in
+                            Button {
+                                withAnimation { scrollProxy?.scrollTo(file.path, anchor: .top) }
+                            } label: {
+                                FileTreeRow(file: file)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        Label(group.dir == "." ? "/" : group.dir, systemImage: "folder")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+        }
+        .frame(width: 210)
+    }
+}
+
+private struct FileTreeRow: View {
+    let file: FileSection
+
+    var body: some View {
+        HStack(spacing: 6) {
+            statusBadge
+            Text((file.path as NSString).lastPathComponent)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            counts
+        }
+        .padding(.vertical, 1)
+        .contentShape(Rectangle())
+    }
+
+    private var statusBadge: some View {
         let (label, color): (String, Color) = {
-            if status.contains("?") { return ("+", .green) }
-            if status.contains("M") { return ("M", .orange) }
-            if status.contains("A") { return ("A", .green) }
-            if status.contains("D") { return ("D", .red) }
-            if status.contains("R") { return ("R", .blue) }
-            return ("·", .secondary)
+            if file.status.contains("?") { return ("+", .green) }
+            if file.status.contains("A") { return ("+", .green) }
+            if file.status.contains("D") { return ("−", .red) }
+            if file.status.contains("R") { return ("→", .blue) }
+            return ("•", .orange)
         }()
         return Text(label)
             .font(.system(.caption2, design: .monospaced))
             .foregroundStyle(color)
-            .frame(width: 12)
+            .frame(width: 10)
+    }
+
+    @ViewBuilder
+    private var counts: some View {
+        HStack(spacing: 3) {
+            if file.added > 0 { Text("+\(file.added)").foregroundStyle(.green) }
+            if file.removed > 0 { Text("−\(file.removed)").foregroundStyle(.red) }
+        }
+        .font(.system(.caption2, design: .monospaced))
     }
 }
 
-struct DiffView: View {
-    let text: String
+private struct FileSectionHeader: View {
+    let section: FileSection
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(section.path)
+                .font(.system(.caption, design: .monospaced))
+                .fontWeight(.medium)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack(spacing: 4) {
+                if section.added > 0 { Text("+\(section.added)").foregroundStyle(.green) }
+                if section.removed > 0 { Text("−\(section.removed)").foregroundStyle(.red) }
+            }
+            .font(.system(.caption, design: .monospaced))
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+}
+
+struct DiffLineRow: View {
+    let line: DiffLine
     let path: String
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(text.split(separator: "\n", omittingEmptySubsequences: false).enumerated()),
-                        id: \.offset) { _, line in
-                    DiffLineRow(line: String(line))
-                }
+        HStack(spacing: 0) {
+            // gutter: new-side number for added/context, blank for removed
+            Text(line.newNo.map(String.init) ?? "")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .frame(width: 44, alignment: .trailing)
+                .padding(.trailing, 8)
+            marker
+            text
+            Spacer(minLength: 0)
+        }
+        .background(background)
+    }
+
+    private var marker: some View {
+        Text(markerText)
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(markerColor)
+            .frame(width: 14)
+    }
+
+    private var text: some View {
+        Group {
+            switch line.kind {
+            case .hunk:
+                Text(line.text)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.purple)
+            case .meta:
+                Text(line.text)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            case .added, .removed, .context:
+                Text(DiffSyntax.highlight(line.text, path: path))
+                    .font(.system(.caption, design: .monospaced))
             }
-            .padding(.vertical, 6)
         }
     }
-}
 
-private struct DiffLineRow: View {
-    let line: String
+    private var markerText: String {
+        switch line.kind {
+        case .added: return "+"
+        case .removed: return "−"
+        default: return " "
+        }
+    }
 
-    var body: some View {
-        Text(line.isEmpty ? " " : line)
-            .font(.system(.caption, design: .monospaced))
-            .foregroundStyle(foreground)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .background(background)
+    private var markerColor: Color {
+        switch line.kind {
+        case .added: return .green
+        case .removed: return .red
+        default: return .clear
+        }
     }
 
     private var background: Color {
-        if line.hasPrefix("+") && !line.hasPrefix("+++") { return .green.opacity(0.16) }
-        if line.hasPrefix("-") && !line.hasPrefix("---") { return .red.opacity(0.16) }
-        return .clear
-    }
-
-    private var foreground: Color {
-        if line.hasPrefix("@@") { return .purple }
-        if line.hasPrefix("diff ") || line.hasPrefix("index ") { return .secondary }
-        return .primary
+        switch line.kind {
+        case .added: return .green.opacity(0.13)
+        case .removed: return .red.opacity(0.13)
+        case .hunk: return .purple.opacity(0.06)
+        default: return .clear
+        }
     }
 }
