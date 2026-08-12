@@ -47,7 +47,9 @@ if [ -d "$ICON_SRC" ]; then
         --minimum-deployment-target 15.0 --app-icon o_icon \
         --output-partial-info-plist "$ICON_OUT/partial.plist" \
         --output-format human-readable-text "$ICON_SRC" >/dev/null
-    cp "$ICON_OUT/o_icon.icns" "$CONTENTS/Resources/AppIcon.icns"
+    # Names must match the .car asset ("o_icon"), which is also what
+    # CFBundleIconFile/CFBundleIconName in Info.plist point at.
+    cp "$ICON_OUT/o_icon.icns" "$CONTENTS/Resources/o_icon.icns"
     cp "$ICON_OUT/Assets.car" "$CONTENTS/Resources/Assets.car"
     rm -rf "$ICON_OUT"
 fi
