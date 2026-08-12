@@ -9,6 +9,7 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            Divider()
             if let error = list.loadError {
                 Text(error).font(.caption).foregroundStyle(.red).padding(8)
             }
@@ -37,6 +38,8 @@ struct SidebarView: View {
             .buttonStyle(.plain)
             .help("New chat in this window (⌘N for a new window)")
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     /// "New session" starts a fresh conversation in this window. An in-flight
@@ -52,6 +55,7 @@ struct SidebarView: View {
             ForEach(list.sessions) { session in
                 SessionRow(session: session, isCurrent: session.id == current.sessionID)
                     .tag(session.id)
+                    .listRowSeparator(.hidden)
                     .contextMenu { contextMenu(for: session) }
             }
         }
@@ -76,22 +80,27 @@ private struct SessionRow: View {
     let isCurrent: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                if isCurrent {
-                    Circle().fill(Color.accentColor).frame(width: 6, height: 6)
-                }
+        HStack(alignment: .top, spacing: 7) {
+            // constant-width live indicator: titles never shift when the
+            // current session changes
+            Circle()
+                .fill(isCurrent ? Color.green : Color.clear)
+                .frame(width: 6, height: 6)
+                .padding(.top, 5)
+
+            VStack(alignment: .leading, spacing: 2) {
                 Text(session.displayTitle)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                HStack(spacing: 6) {
+                    Text(session.model).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(compactRelativeAge(session.updatedAt))
+                        .foregroundStyle(.primary.opacity(0.45))
+                }
+                .font(.caption2)
+                .foregroundStyle(.primary.opacity(0.6))
             }
-            HStack(spacing: 6) {
-                Text(session.model).lineLimit(1)
-                Spacer()
-                Text(session.updatedAt, style: .relative)
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }

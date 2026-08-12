@@ -280,3 +280,15 @@ struct DiffStoreTests {
         #expect(!store.isRepo || store.changes.isEmpty) // /tmp may be inside a repo on some systems; both states safe
     }
 }
+
+struct UtilTests {
+    @Test func compactRelativeAges() {
+        let now = Date()
+        #expect(compactRelativeAge(now.addingTimeInterval(-5), now: now) == "now")
+        #expect(compactRelativeAge(now.addingTimeInterval(-4 * 60), now: now) == "4m")
+        #expect(compactRelativeAge(now.addingTimeInterval(-9 * 3600 - 120), now: now) == "9h")
+        #expect(compactRelativeAge(now.addingTimeInterval(-40 * 86400), now: now) == "40d")
+        // future-ish dates clamp to "now"
+        #expect(compactRelativeAge(now.addingTimeInterval(60), now: now) == "now")
+    }
+}
