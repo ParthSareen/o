@@ -534,3 +534,52 @@ struct TextScaleTests {
         s.resetTextScale()
     }
 }
+
+struct MarkdownParserTests {
+    @Test func headingsBulletsRulesAndCode() {
+        let md = """
+        ### Option A — recommended
+        Some **bold** and `code` words.
+
+        - first bullet
+          - nested bullet
+        1. ordered one
+        2. ordered two
+        > a quote
+        ---
+        ```go
+        func f() {}
+        ```
+        tail paragraph
+        """
+        let blocks = MarkdownText.Parser.blocks(md)
+        guard case .heading(let level, let text) = blocks[0] else { Issue.record("\(blocks)"); return }
+        #expect(level == 3 && text == "Option A — recommended")
+        guard case .paragraph(let p) = blocks[1] else { Issue.record("block1: \(blocks[1])"); return }
+        #expect(p.contains("**bold**")) // inline syntax preserved for the inline pass
+        #expect(blocks.count == 10)
+        guard case .bullet(let b1, let d1) = blocks[2], case .bullet(_, let d2) = blocks[3] else {
+            Issue.record("bullets: \(blocks)"); return
+        }
+        #expect(b1 == "first bullet" && d1 == 0 && d2 == 1)
+        guard case .numbered(let n, _) = blocks[4] else { Issue.record(); return }
+        #expect(n == 1)
+        guard case .quote = blocks[6], case .rule = blocks[7], case .code(let lang, let code) = blocks[blocks.count - 2],
+              case .paragraph = blocks[blocks.count - 1] else { Issue.record("\(blocks)"); return }
+        #expect(lang == "go" && code.contains("func f"))
+    }
+
+    @Test func inlineProducesBoldRuns() {
+        let a = MarkdownText.Parser.inline("plain and **bold** here")
+        var sawBold = false
+        for run in a.runs where String(a[run.range].characters) == "bold" {
+            if run.attributes.inlinePresentationIntent?.contains(.stronglyEmphasized) == true { sawBold = true }
+        }
+        #expect(sawBold)
+    }
+
+    @Test func hashWithoutSpaceIsNotHeading() {
+        let blocks = MarkdownText.Parser.blocks("#notheading")
+        guard case .paragraph = blocks.first else { Issue.record("\(blocks)"); return }
+    }
+}
