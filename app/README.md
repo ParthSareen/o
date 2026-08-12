@@ -6,9 +6,15 @@ spawns `o --pipe` (bundled) and drives the session over NDJSON on stdio.
 ## Build & run
 
 ```sh
-app/scripts/build-app.sh          # builds Go core + Swift shell -> app/build/O.app
-app/scripts/build-app.sh --run    # build and open
+app/scripts/build-app.sh            # builds Go core + Swift shell -> app/build/O.app
+app/scripts/build-app.sh --run      # build and open
+app/scripts/build-app.sh --install  # build and copy to /Applications
+app/scripts/build-app.sh --dmg      # build and package app/build/O-<version>.dmg
 ```
+
+The bundle is ad-hoc signed. A dmg/zip from it is fine to share with anyone
+who can right-click → Open; public distribution still needs a Developer ID
+certificate + notarization (not wired up).
 
 Dev loop without bundling:
 
