@@ -8,6 +8,17 @@ extension Optional where Wrapped == String {
     var nilIfEmpty: String? { (self?.isEmpty ?? true) ? nil : self }
 }
 
+/// "now" / "4m" / "9h" / "12d" — compact relative age for narrow sidebars.
+func compactRelativeAge(_ date: Date, now: Date = Date()) -> String {
+    let s = max(0, now.timeIntervalSince(date))
+    switch s {
+    case ..<60: return "now"
+    case ..<3600: return "\(Int(s / 60))m"
+    case ..<86400: return "\(Int(s / 3600))h"
+    default: return "\(Int(s / 86400))d"
+    }
+}
+
 /// Run a short-lived child process synchronously (background-thread callers
 /// only). Streams stdout while waiting so large output can't deadlock the
 /// pipe. Returns stdout text and exit code (-1 launch error, -2 timeout).
