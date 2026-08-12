@@ -47,6 +47,9 @@ OApp (SwiftUI)
   `{"cmd":"prompt","skill":"name","text":"..."}` (→ `RunOptions.SkillName`).
 - **Changes inspector** (toolbar toggle): `git status`/`git diff HEAD` of the
   session working directory, refreshed after every completed run.
+- **New chat mid-run doesn't kill the run**: the old process detaches — its
+  stdin closes, the run finishes and persists, then the process exits on its
+  own (`--pipe` treats stdin EOF as "finish, then exit").
 - **Working directory**: the folder toolbar button (or Settings default)
   respawns the session in that directory; sidebar resumes reuse the stored
   `working_dir` of the session.

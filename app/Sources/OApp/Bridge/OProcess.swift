@@ -130,6 +130,21 @@ actor OProcess {
         process?.terminate()
     }
 
+    /// Detach with the run in flight: closing stdin makes `o` finish the
+    /// current run (and persist its messages) before exiting. The actor keeps
+    /// itself alive until exit so the child is reaped and observers can be
+    /// notified. Callers must stop consuming `events`/`exits` first.
+    func detach() {
+        expectExit = true
+        stdinHandle?.closeFile()
+        stdinHandle = nil
+        Task { [self] in
+            for await _ in exits { }
+            // the run we let finish has been persisted by now
+            NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
+        }
+    }
+
     private func didTerminate() {
         let status = process?.terminationStatus ?? -1
         let code: Int32 = (process?.terminationReason == .exit) ? status : -1
