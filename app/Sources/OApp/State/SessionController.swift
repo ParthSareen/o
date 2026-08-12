@@ -373,6 +373,14 @@ final class SessionController {
             appendBlock(.error(id: UUID(), message: ev.error ?? "unknown error"), scope: scope)
             if scope == nil { phase = phase == .running ? .running : .idle }
 
+        case .sessionAssigned:
+            // fresh sessions are lazy: the store row appears on first prompt
+            if let id = ev.chatId, sessionID != id {
+                sessionID = id
+                if let n = ev.name, !n.isEmpty { sessionName = n }
+                onSessionOpened?(id)
+            }
+
         case .inspect:
             inspection = PromptInspection(
                 system: ev.system ?? "",

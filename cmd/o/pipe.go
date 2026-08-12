@@ -167,17 +167,13 @@ func runPipeSetup(ctx context.Context, client *api.Client, opts *agentTUIOptions
 func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt string, sess *sessionstore.Session, workingDir string, stdin io.Reader, stdout, stderr io.Writer, initialPrompt string) int {
 	sink := newPipeEventSink(stdout)
 
+	// Fresh sessions are lazy: no store row until the first prompt lands, so
+	// opening a window and walking away doesn't litter the sidebar with
+	// empty sessions.
 	var chatID, name string
 	var history []api.Message
 	if sess != nil {
 		chatID, name, history = sess.ID, sess.Name, sess.Messages
-	} else if store != nil {
-		created, err := store.CreateSession(opts.Model, workingDir, systemPrompt, opts.Name)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
-		} else {
-			chatID, name = created.ID, created.Name
-		}
 	}
 
 	// Pipe mode grants full tool access by default; approval prompts have no
@@ -315,6 +311,21 @@ func (r *pipeRunner) runTurn(ctx context.Context, cmds chan cmdMsg, c pipeComman
 	if text == "" {
 		// Skill-only invocation: leave a visible user message, like the TUI.
 		text = "/" + skill
+	}
+
+	// Lazily create the store row for fresh sessions on their first prompt.
+	if r.chatID == "" && r.store != nil {
+		created, err := r.store.CreateSession(r.opts.Model, r.session.WorkingDir, r.systemPrompt, r.opts.Name)
+		if err != nil {
+			fmt.Fprintf(r.stderr, "warning: could not create session: %v\n", err)
+		} else {
+			r.chatID = created.ID
+			_ = r.sink.Emit(coreagent.Event{
+				Type:   coreagent.EventSessionAssigned,
+				ChatID: r.chatID,
+				Name:   created.Name,
+			})
+		}
 	}
 
 	if r.store != nil && r.chatID != "" {

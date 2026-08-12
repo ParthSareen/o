@@ -708,3 +708,18 @@ struct MarkUnreadTests {
         #expect(!store.unreadIDs.contains("manual-2"))
     }
 }
+
+@MainActor
+struct SessionAssignedTests {
+    @Test func assignedEventSetsIDAndFiresHook() {
+        let c = SessionController()
+        var reported: String? = nil
+        c.onSessionOpened = { reported = $0 }
+        c.apply(event(#"{"type":"session_opened","model":"m","messages":[]}"#))
+        #expect(c.sessionID == nil) // lazy sessions open with no id
+        c.apply(event(#"{"type":"session_assigned","chatId":"late-1","name":"lazy"}"#))
+        #expect(c.sessionID == "late-1")
+        #expect(c.sessionName == "lazy")
+        #expect(reported == "late-1")
+    }
+}

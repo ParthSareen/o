@@ -153,20 +153,21 @@ struct MarkdownText: View {
 
     private struct BlockView: View {
         let block: Block
+        @Environment(\.chatTextScale) private var scale
 
         var body: some View {
             switch block {
             case .heading(let level, let text):
                 Text(Parser.inline(text))
-                    .font(Self.headingFont(level))
-                    .fontWeight(.semibold)
+                    .font(ChatFont.heading(level, scale))
                     .padding(.top, level <= 2 ? 6 : 3)
             case .bullet(let text, let depth):
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("•")
                         .foregroundStyle(.secondary)
                     Text(Parser.inline(text))
-                        .lineSpacing(2.5)
+                        .font(ChatFont.prose(scale))
+                        .lineSpacing(2.5 * scale)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.leading, CGFloat(depth) * 14 + 2)
@@ -176,7 +177,8 @@ struct MarkdownText: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                     Text(Parser.inline(text))
-                        .lineSpacing(2.5)
+                        .font(ChatFont.prose(scale))
+                        .lineSpacing(2.5 * scale)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             case .quote(let text):
@@ -185,7 +187,8 @@ struct MarkdownText: View {
                         .fill(Color.secondary.opacity(0.5))
                         .frame(width: 3)
                     Text(Parser.inline(text))
-                        .lineSpacing(2.5)
+                        .font(ChatFont.prose(scale))
+                        .lineSpacing(2.5 * scale)
                         .foregroundStyle(.secondary)
                 }
             case .paragraph(let text):
@@ -198,27 +201,18 @@ struct MarkdownText: View {
             }
         }
 
-        static func headingFont(_ level: Int) -> Font {
-            switch level {
-            case 1: return .title2
-            case 2: return .title3
-            case 3: return .headline
-            default: return .subheadline
-            }
-        }
     }
 
     private struct CodeBlockView: View {
         let language: String
         let code: String
-        private let highlighted: AttributedString
+        @Environment(\.chatTextScale) private var scale
 
-        init(language: String, code: String) {
-            self.language = language
-            self.code = code
-            // whole-block AttributedString so text selection stays contiguous
-            let font = Font.system(.body, design: .monospaced)
-            highlighted = code.split(separator: "\n", omittingEmptySubsequences: false)
+        // computed per render so scale changes take effect; one block's worth
+        // of lines is cheap
+        private var highlighted: AttributedString {
+            let font = ChatFont.mono(scale)
+            return code.split(separator: "\n", omittingEmptySubsequences: false)
                 .map { DiffSyntax.highlight(String($0), path: "snippet.\(language)", font: font) }
                 .reduce(into: AttributedString()) { acc, line in
                     if !acc.characters.isEmpty { acc.append(AttributedString("\n")) }
@@ -237,8 +231,8 @@ struct MarkdownText: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(highlighted)
-                        .font(.system(.body, design: .monospaced))
-                        .lineSpacing(1.5)
+                        .font(ChatFont.mono(scale))
+                        .lineSpacing(1.5 * scale)
                         .textSelection(.enabled)
                         .padding(8)
                 }

@@ -5,6 +5,7 @@ struct ComposerView: View {
     @Bindable var controller: SessionController
     let diffStore: DiffStore
     @State private var draft = ""
+    @Environment(\.chatTextScale) private var scale
     @State private var slashOpen = false
     @FocusState private var focused: Bool
 
@@ -86,14 +87,14 @@ struct ComposerView: View {
         ZStack(alignment: .topLeading) {
             if draft.isEmpty {
                 Text(placeholder)
-                    .font(.body)
+                    .font(ChatFont.prose(min(scale, 1.15)))
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 5)
                     .padding(.top, 6)
                     .allowsHitTesting(false)
             }
             TextEditor(text: $draft)
-                .font(.body)
+                .font(ChatFont.prose(min(scale, 1.15)))
                 .scrollContentBackground(.hidden)
                 .focused($focused)
                 .frame(minHeight: 24, maxHeight: 140)

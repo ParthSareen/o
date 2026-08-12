@@ -5,6 +5,8 @@ struct SidebarView: View {
     @Bindable var manager: SessionManager
     @State private var list = SessionListStore.shared
     @State private var selection: String? = nil
+    @State private var editing = false
+    @State private var trashSet: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,11 +15,16 @@ struct SidebarView: View {
             if let error = list.loadError {
                 Text(error).font(.caption).foregroundStyle(.red).padding(8)
             }
-            sessionList
+            if editing {
+                editList
+                editBar
+            } else {
+                sessionList
+            }
         }
         .onAppear { list.start() }
         .onChange(of: selection) { _, newValue in
-            guard let id = newValue, id != manager.active.sessionID else { return }
+            guard !editing, let id = newValue, id != manager.active.sessionID else { return }
             let dir = list.sessions.first(where: { $0.id == id })?.workingDir
             manager.switchTo(id, workingDir: dir.nilIfEmpty)
         }
@@ -38,17 +45,33 @@ struct SidebarView: View {
                     .padding(.vertical, 1)
                     .background(Color.accentColor)
                     .clipShape(Capsule())
-                    .help("\(list.unreadIDs.count) finished while away")
+                    .help("\(list.unreadIDs.count) unread")
             }
             Spacer()
-            Button {
-                selection = nil
-                manager.startNewChat()
-            } label: {
-                Image(systemName: "square.and.pencil")
+            if !editing {
+                Button {
+                    selection = nil
+                    manager.startNewChat()
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .buttonStyle(.plain)
+                .help("New chat in this window (⌘N for a new window)")
+                Menu {
+                    Button("Select…") { editing = true }
+                    Button("Delete Empty Sessions") { list.deleteEmptySessions() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 22)
+            } else {
+                Button("Done") {
+                    editing = false
+                    trashSet = []
+                }
+                .font(.callout)
             }
-            .buttonStyle(.plain)
-            .help("New chat in this window (⌘N for a new window)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -69,6 +92,46 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+    }
+
+    private var editList: some View {
+        List(selection: $trashSet) {
+            ForEach(list.sessions) { session in
+                SessionRow(
+                    session: session,
+                    isCurrent: false,
+                    isUnread: list.unreadIDs.contains(session.id),
+                    isRunning: list.runningIDs.contains(session.id)
+                )
+                .tag(session.id)
+                .listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private var editBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack {
+                Button("Select All") {
+                    trashSet = Set(list.sessions.map(\.id))
+                }
+                .font(.caption)
+                Spacer()
+                Button("Delete (\(trashSet.count))", role: .destructive) {
+                    for id in trashSet {
+                        manager.sessionDeleted(id)
+                        list.delete(id)
+                    }
+                    trashSet = []
+                }
+                .font(.caption)
+                .disabled(trashSet.isEmpty)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
     }
 
     @ViewBuilder

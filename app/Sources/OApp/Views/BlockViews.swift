@@ -23,9 +23,11 @@ struct BlockRow: View {
 
 struct UserMessageRow: View {
     let text: String
+    @Environment(\.chatTextScale) private var scale
 
     var body: some View {
         Text(text)
+            .font(ChatFont.prose(scale))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
@@ -47,6 +49,7 @@ struct AssistantRow: View {
 
 struct ThinkingRow: View {
     let text: String
+    @Environment(\.chatTextScale) private var scale
     @State private var expanded = false
 
     var body: some View {
@@ -61,9 +64,10 @@ struct ThinkingRow: View {
             .buttonStyle(.plain)
             if expanded {
                 Text(text)
-                    .font(.callout)
+                    .font(ChatFont.detail(scale))
                     .foregroundStyle(.secondary)
                     .italic()
+                    .lineSpacing(2.0 * scale)
                     .textSelection(.enabled)
             }
         }
@@ -73,6 +77,7 @@ struct ThinkingRow: View {
 
 struct ToolCallRow: View {
     let tool: ToolBlock
+    @Environment(\.chatTextScale) private var scale
     @State private var expanded = false
 
     var body: some View {
@@ -83,10 +88,10 @@ struct ToolCallRow: View {
                 HStack(spacing: 8) {
                     statusIcon
                     Text(tool.name)
-                        .font(.system(.callout, design: .monospaced))
+                        .font(ChatFont.mono(scale * 0.96))
                         .fontWeight(.medium)
                     Text(summary)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(ChatFont.detailMono(scale))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -174,11 +179,11 @@ struct ToolCallRow: View {
     private func detailSection(_ label: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.caption2)
+                .font(ChatFont.detail(scale * 0.9))
                 .foregroundStyle(.tertiary)
             ScrollView {
                 Text(text)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(ChatFont.detailMono(scale))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)

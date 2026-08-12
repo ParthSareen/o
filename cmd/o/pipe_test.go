@@ -462,3 +462,94 @@ func TestPipeInspectReportsPromptToolsMessages(t *testing.T) {
 	}
 	h.close(t)
 }
+
+func TestPipeFreshSessionIsLazyUntilFirstPrompt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store, err := sessionstore.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fc := &fakeClient{responses: [][]api.ChatResponse{textChunks("hi")}}
+	inR, inW := io.Pipe()
+	out := &lockedBuffer{}
+	codeCh := make(chan int, 1)
+	opts := &agentTUIOptions{Model: "test-model", AllowAllTools: true, Options: map[string]any{}}
+	go func() {
+		codeCh <- runPipeSession(context.Background(), fc, opts, store, nil, &coreagent.Registry{}, "system prompt", nil, t.TempDir(), inR, out, &lockedBuffer{}, "")
+	}()
+
+	// open emitted with no chat id, and no row in the store yet
+	deadline := time.Now().Add(3 * time.Second)
+	var opened coreagent.Event
+	for {
+		for _, ev := range out.events(t) {
+			if ev.Type == coreagent.EventSessionOpened {
+				opened = ev
+			}
+		}
+		if opened.Type != "" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if opened.ChatID != "" {
+		t.Fatalf("fresh session_opened must carry no chatId, got %q", opened.ChatID)
+	}
+	if metas, _ := store.ListSessions(10); len(metas) != 0 {
+		t.Fatalf("store must be empty before first prompt, got %d sessions", len(metas))
+	}
+
+	// first prompt: session_assigned with an id, row created
+	if _, err := inW.Write([]byte("{\"cmd\":\"prompt\",\"text\":\"hello\"}\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	var assigned coreagent.Event
+	for {
+		for _, ev := range out.events(t) {
+			if ev.Type == coreagent.EventSessionAssigned {
+				assigned = ev
+			}
+		}
+		if assigned.Type != "" || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if assigned.ChatID == "" {
+		t.Fatalf("expected session_assigned with chatId; events: %s", out.String())
+	}
+	if metas, _ := store.ListSessions(10); len(metas) != 1 || metas[0].ID != assigned.ChatID {
+		t.Fatalf("store sessions = %+v", metas)
+	}
+	inW.Close()
+	<-codeCh
+}
+
+func TestPipeEmptySessionsNeverPersist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store, err := sessionstore.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fc := &fakeClient{}
+	inR, inW := io.Pipe()
+	out := &lockedBuffer{}
+	codeCh := make(chan int, 1)
+	opts := &agentTUIOptions{Model: "test-model", AllowAllTools: true, Options: map[string]any{}}
+	go func() {
+		codeCh <- runPipeSession(context.Background(), fc, opts, store, nil, &coreagent.Registry{}, "system prompt", nil, t.TempDir(), inR, out, &lockedBuffer{}, "")
+	}()
+	// open and immediately walk away (stdin EOF, no prompt)
+	inW.Close()
+	<-codeCh
+	if metas, _ := store.ListSessions(10); len(metas) != 0 {
+		t.Fatalf("walked-away session must not persist; got %+v", metas)
+	}
+}

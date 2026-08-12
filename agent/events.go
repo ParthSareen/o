@@ -30,6 +30,10 @@ const (
 	// system prompt, tool list, and current message history — the same
 	// material the TUI's /prompt command shows.
 	EventInspect EventType = "inspect"
+	// EventSessionAssigned is emitted by pipe mode when a fresh session
+	// lazily gets its store row on the first prompt. UI frontends key
+	// sessions by id, and the id doesn't exist before then.
+	EventSessionAssigned EventType = "session_assigned"
 )
 
 // ToolInfo is a UI-facing summary of one registered tool, carried on

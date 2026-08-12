@@ -68,6 +68,7 @@ struct LiveRow: View {
     let icon: String
     let text: String
     let dimmed: Bool
+    @Environment(\.chatTextScale) private var scale
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -75,7 +76,8 @@ struct LiveRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             Text(text)
-                .lineSpacing(2.5)
+                .font(ChatFont.prose(scale))
+                .lineSpacing(2.5 * scale)
                 .foregroundStyle(dimmed ? .secondary : .primary)
                 .italic(dimmed)
                 .frame(maxWidth: .infinity, alignment: .leading)

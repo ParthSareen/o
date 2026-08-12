@@ -47,7 +47,9 @@ struct RootView: View {
     @ViewBuilder
     private var detail: some View {
         detailContent
-            .dynamicTypeSize(settings.dynamicTypeSize)
+            // explicit point-size scaling; dynamicTypeSize proved unreliable
+            // for the AttributedString-backed transcript
+            .environment(\.chatTextScale, settings.prefs.textScale)
     }
 
     @ViewBuilder

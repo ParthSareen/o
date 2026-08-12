@@ -135,6 +135,18 @@ final class SessionListStore {
         loadError = nil
     }
 
+    /// Delete sessions with zero messages (window-opened-but-never-prompted
+    /// strays from before lazy creation).
+    func deleteEmptySessions() {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+        sqlite3_exec(db, "DELETE FROM prompt_history WHERE session_id NOT IN (SELECT id FROM sessions)", nil, nil, nil)
+        sqlite3_exec(db, "DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM messages)", nil, nil, nil)
+        refresh()
+        unreadIDs = unreadIDs.filter { id in sessions.contains(where: { $0.id == id }) }
+    }
+
     func delete(_ id: String) {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { return }
