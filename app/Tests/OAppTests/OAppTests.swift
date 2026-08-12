@@ -292,3 +292,22 @@ struct UtilTests {
         #expect(compactRelativeAge(now.addingTimeInterval(60), now: now) == "now")
     }
 }
+
+@MainActor
+struct InspectTests {
+    @Test func decodesAndAppliesInspectEvent() {
+        let c = SessionController()
+        c.apply(event(#"{"type":"session_opened","chatId":"s1","model":"m","messages":[]}"#))
+        c.apply(event(#"{"type":"inspect","chatId":"s1","model":"m","workingDir":"/tmp","system":"SYS","tools":[{"name":"bash","description":"run shell"}],"messages":[{"role":"user","content":"hi"}]}"#))
+        guard let snap = c.inspection else { Issue.record("no inspection"); return }
+        #expect(snap.system == "SYS")
+        #expect(snap.tools.map(\.name) == ["bash"])
+        #expect(snap.messages.count == 1)
+    }
+
+    @Test func encodesInspectCommand() throws {
+        let data = try JSONEncoder().encode(AgentCommand.inspect)
+        let dict = try JSONSerialization.jsonObject(with: data) as? [String: String]
+        #expect(dict == ["cmd": "inspect"])
+    }
+}

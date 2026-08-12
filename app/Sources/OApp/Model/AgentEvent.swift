@@ -34,6 +34,12 @@ struct SkillInfo: Codable, Equatable, Sendable {
     var description: String? = nil
 }
 
+/// One registered tool from an inspect event.
+struct ToolInfo: Codable, Equatable, Sendable {
+    var name: String
+    var description: String? = nil
+}
+
 enum AgentEventType: String, Codable, Sendable {
     case sessionOpened = "session_opened"
     case messageDelta = "message_delta"
@@ -47,6 +53,7 @@ enum AgentEventType: String, Codable, Sendable {
     case compactionSkipped = "compaction_skipped"
     case runFinished = "run_finished"
     case error = "error"
+    case inspect = "inspect"
     case unknown
 }
 
@@ -71,6 +78,8 @@ struct AgentEvent: Decodable, Sendable {
     var error: String?
     var subagentId: String?
     var skills: [SkillInfo]?
+    var system: String?
+    var tools: [ToolInfo]?
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -95,13 +104,15 @@ struct AgentEvent: Decodable, Sendable {
         error = try c.decodeIfPresent(String.self, forKey: .error)
         subagentId = try c.decodeIfPresent(String.self, forKey: .subagentId)
         skills = try c.decodeIfPresent([SkillInfo].self, forKey: .skills)
+        system = try c.decodeIfPresent(String.self, forKey: .system)
+        tools = try c.decodeIfPresent([ToolInfo].self, forKey: .tools)
     }
 
     private enum CodingKeys: String, CodingKey {
         case type, runId, chatId, model, name, status, toolStatus
         case compactionTrigger, toolCallId, toolName, workingDir
         case content, thinking, toolCalls = "toolCalls", messages, args
-        case tokens, error, subagentId, skills
+        case tokens, error, subagentId, skills, system, tools
     }
 }
 
@@ -109,6 +120,7 @@ struct AgentEvent: Decodable, Sendable {
 enum AgentCommand: Encodable, Sendable {
     case prompt(text: String, skill: String? = nil)
     case cancel
+    case inspect
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -119,6 +131,8 @@ enum AgentCommand: Encodable, Sendable {
             if let skill { try c.encode(skill, forKey: .skill) }
         case .cancel:
             try c.encode("cancel", forKey: .cmd)
+        case .inspect:
+            try c.encode("inspect", forKey: .cmd)
         }
     }
 

@@ -122,6 +122,7 @@ type pipeRunner struct {
 	opts         *agentTUIOptions
 	store        *sessionstore.Store
 	session      *coreagent.Session
+	registry     *coreagent.Registry
 	sink         *pipeEventSink
 	stderr       io.Writer
 	chatID       string
@@ -205,6 +206,7 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 		opts:         opts,
 		store:        store,
 		session:      session,
+		registry:     registry,
 		sink:         sink,
 		stderr:       stderr,
 		chatID:       chatID,
@@ -269,8 +271,10 @@ func (r *pipeRunner) commandLoop(ctx context.Context, stdin io.Reader, initialPr
 				}
 			case "cancel":
 				// no run in flight; nothing to do
+			case "inspect":
+				r.emitInspect()
 			default:
-				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel)", m.cmd.Cmd))
+				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect)", m.cmd.Cmd))
 			}
 		}
 	}
@@ -366,10 +370,12 @@ loop:
 			switch m.cmd.Cmd {
 			case "cancel":
 				cancel()
+			case "inspect":
+				r.emitInspect()
 			case "prompt":
 				r.emitError("a run is already in progress; wait for run_finished or send cancel")
 			default:
-				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel)", m.cmd.Cmd))
+				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect)", m.cmd.Cmd))
 			}
 		case <-ctx.Done():
 			cancel()
@@ -395,6 +401,24 @@ loop:
 
 func (r *pipeRunner) emitError(msg string) {
 	_ = r.sink.Emit(coreagent.Event{Type: coreagent.EventError, Error: msg})
+}
+
+// emitInspect reports the session's system prompt, registered tools, and
+// current message history (what the TUI's /prompt command shows).
+func (r *pipeRunner) emitInspect() {
+	var tools []coreagent.ToolInfo
+	for _, t := range r.registry.Tools() {
+		tools = append(tools, coreagent.ToolInfo{Name: t.Function.Name, Description: t.Function.Description})
+	}
+	_ = r.sink.Emit(coreagent.Event{
+		Type:       coreagent.EventInspect,
+		ChatID:     r.chatID,
+		Model:      r.opts.Model,
+		WorkingDir: r.session.WorkingDir,
+		System:     r.systemPrompt,
+		Tools:      tools,
+		Messages:   r.history,
+	})
 }
 
 // applyPipeDefaults applies pipe-mode defaults: full tool access and RLM

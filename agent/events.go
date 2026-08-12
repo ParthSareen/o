@@ -26,7 +26,18 @@ const (
 	// metadata and (for resumed sessions) the persisted message history so
 	// the UI can rebuild its transcript.
 	EventSessionOpened EventType = "session_opened"
+	// EventInspect answers a pipe "inspect" command with the session's
+	// system prompt, tool list, and current message history — the same
+	// material the TUI's /prompt command shows.
+	EventInspect EventType = "inspect"
 )
+
+// ToolInfo is a UI-facing summary of one registered tool, carried on
+// session_inspect events.
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
 
 // ToolStatus is the typed lifecycle state for a tool call, carried on
 // Event.ToolStatus for tool events.
@@ -91,6 +102,10 @@ type Event struct {
 	// Skills lists the skills available for /-invocation; set on
 	// session_opened events only.
 	Skills []SkillInfo `json:"skills,omitempty"`
+	// System is the assembled system prompt; set on inspect events only.
+	System string `json:"system,omitempty"`
+	// Tools lists the registered tools; set on inspect events only.
+	Tools []ToolInfo `json:"tools,omitempty"`
 	Args              map[string]any    `json:"args,omitempty"`
 	Tokens            int               `json:"tokens,omitempty"`
 	Error             string            `json:"error,omitempty"`

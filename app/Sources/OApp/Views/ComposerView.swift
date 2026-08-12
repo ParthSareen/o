@@ -42,16 +42,17 @@ struct ComposerView: View {
         ZStack(alignment: .topLeading) {
             if draft.isEmpty {
                 Text(placeholder)
+                    .font(.body)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 5)
-                    .padding(.top, 8)
+                    .padding(.top, 6)
                     .allowsHitTesting(false)
             }
             TextEditor(text: $draft)
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .focused($focused)
-                .frame(minHeight: 38, maxHeight: 140)
+                .frame(minHeight: 24, maxHeight: 140)
                 .fixedSize(horizontal: false, vertical: true)
                 .onKeyPress(keys: [.return], phases: .down) { key in
                     guard key.modifiers.isEmpty else { return .ignored }
@@ -64,12 +65,14 @@ struct ComposerView: View {
                     return .ignored
                 }
         }
-        .padding(4)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                .stroke(focused ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.15),
+                        lineWidth: focused ? 1.5 : 1)
         )
         .popover(isPresented: $slashOpen, arrowEdge: .bottom) {
             SlashPalette(skills: filteredSkills) { skill in
