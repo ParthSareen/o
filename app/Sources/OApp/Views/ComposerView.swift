@@ -171,24 +171,10 @@ struct ComposerView: View {
         }
     }
 
+    @State private var modelPickerOpen = false
+
     private var modelMenu: some View {
-        Menu {
-            if SettingsStore.shared.availableModels.isEmpty {
-                Text("No models listed — is ollama up?")
-            } else {
-                ForEach(SettingsStore.shared.availableModels, id: \.self) { m in
-                    Button {
-                        selectModel(m)
-                    } label: {
-                        if m == controller.model {
-                            Label(m, systemImage: "checkmark")
-                        } else {
-                            Text(m)
-                        }
-                    }
-                }
-            }
-        } label: {
+        Button { modelPickerOpen = true } label: {
             HStack(spacing: 3) {
                 Text(controller.model.isEmpty ? "model…" : shortModelName(controller.model))
                     .font(.caption2)
@@ -201,9 +187,21 @@ struct ComposerView: View {
             .background(Color.primary.opacity(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 5))
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
         .disabled(controller.phase == .running || controller.phase == .starting)
         .help("Switch model (reloads this session)")
+        .popover(isPresented: $modelPickerOpen, arrowEdge: .top) {
+            ModelPicker(
+                models: SettingsStore.shared.availableModels,
+                current: controller.model,
+                fetchError: SettingsStore.shared.modelFetchError,
+                onSelect: { model in
+                    selectModel(model)
+                    modelPickerOpen = false
+                },
+                onCancel: { modelPickerOpen = false }
+            )
+        }
     }
 
     private func shortModelName(_ m: String) -> String {
@@ -341,5 +339,106 @@ struct SlashPalette: View {
         }
         .frame(minWidth: 300, idealWidth: 380)
         .presentationCompactAdaptation(.popover)
+    }
+}
+
+/// Type-to-filter model picker (Xcode-style): ⌘ search field on top, list of
+/// models, Enter picks the top match, Esc dismisses.
+struct ModelPicker: View {
+    let models: [String]
+    let current: String
+    let fetchError: String?
+    let onSelect: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var query = ""
+    @FocusState private var focused: Bool
+
+    private var filtered: [String] {
+        let q = query.lowercased()
+        guard !q.isEmpty else { return models }
+        return models.filter { $0.lowercased().contains(q) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Search models…", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .focused($focused)
+                    .onKeyPress(keys: [.return], phases: .down) { _ in
+                        guard let first = filtered.first else { return .handled }
+                        onSelect(first)
+                        return .handled
+                    }
+                    .onKeyPress(keys: [.escape], phases: .down) { _ in
+                        onCancel()
+                        return .handled
+                    }
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .padding(8)
+
+            Divider()
+
+            if models.isEmpty && query.isEmpty {
+                VStack(spacing: 4) {
+                    Text("No models listed")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if let fetchError {
+                        Text(fetchError)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(2)
+                    }
+                }
+                .padding(16)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filtered, id: \.self) { model in
+                            Button { onSelect(model) } label: {
+                                HStack(spacing: 6) {
+                                    if model == current {
+                                        Image(systemName: "checkmark")
+                                            .font(.caption2)
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                    Text(model)
+                                        .font(.callout)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    if filtered.count == 1 || (model == filtered.first && !query.isEmpty) {
+                                        Text("⏎").font(.caption2).foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if model != filtered.last { Divider().padding(.leading, 10) }
+                        }
+                        if filtered.isEmpty {
+                            Text("No match")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(12)
+                        }
+                    }
+                }
+                .frame(minHeight: 60, maxHeight: 300)
+            }
+        }
+        .frame(minWidth: 260, idealWidth: 300)
+        .presentationCompactAdaptation(.popover)
+        .onAppear { focused = true }
     }
 }
