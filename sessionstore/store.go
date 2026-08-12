@@ -297,6 +297,15 @@ func (s *Store) SetName(sessionID, name string) error {
 	return err
 }
 
+// SetModel updates the stored model for a session. Used when a session is
+// resumed against a different model so future plain resumes keep the choice.
+func (s *Store) SetModel(sessionID, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE sessions SET model = ?, updated_at = ? WHERE id = ?`, model, time.Now().Unix(), sessionID)
+	return err
+}
+
 // AppendMessages appends messages to a session starting at the current max
 // seq + 1. It updates the session's updated_at timestamp. This is append-only:
 // existing rows are never modified. If the session has no title, the first
