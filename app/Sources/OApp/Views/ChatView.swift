@@ -40,7 +40,7 @@ struct ChatView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            .padding(.leading, 26)
+                    
                             .id("working")
                         }
                         Color.clear.frame(height: 1).id("bottom")

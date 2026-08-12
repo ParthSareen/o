@@ -25,18 +25,13 @@ struct UserMessageRow: View {
     let text: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "person.fill")
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            Text(text)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color.accentColor.opacity(0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
+        Text(text)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.accentColor.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -44,14 +39,9 @@ struct AssistantRow: View {
     let text: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "sparkle")
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            MarkdownText(text)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        MarkdownText(text)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -77,7 +67,7 @@ struct ThinkingRow: View {
                     .textSelection(.enabled)
             }
         }
-        .padding(.leading, 26)
+
     }
 }
 
@@ -152,18 +142,18 @@ struct ToolCallRow: View {
         }
         .background(Color.primary.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.leading, 26)
     }
 
     private var statusIcon: some View {
+        // monochrome palette: blue = live, gray = settled, red = error
         let (name, color): (String, Color) = {
             switch tool.status {
-            case .pending: return ("circle.dotted", .secondary)
-            case .running: return ("circle.dotted", .orange)
-            case .done: return ("checkmark.circle.fill", .green)
+            case .pending: return ("circle.dotted", .secondary.opacity(0.6))
+            case .running: return ("circle.dotted", Color.accentColor)
+            case .done: return ("checkmark.circle", Color.primary.opacity(0.45))
             case .failed: return ("xmark.circle.fill", .red)
-            case .denied: return ("hand.raised.fill", .orange)
-            case .disabled, .skipped: return ("minus.circle", .secondary)
+            case .denied: return ("hand.raised", Color.primary.opacity(0.45))
+            case .disabled, .skipped: return ("minus.circle", .secondary.opacity(0.6))
             }
         }()
         return Image(systemName: name)
@@ -231,6 +221,6 @@ struct ErrorRow: View {
             .font(.callout)
             .foregroundStyle(.red)
             .textSelection(.enabled)
-            .padding(.leading, 26)
+    
     }
 }

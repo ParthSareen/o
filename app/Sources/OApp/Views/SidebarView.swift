@@ -99,14 +99,14 @@ private struct SessionRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 7) {
             // indicator column (constant width): spinner = running in bg,
-            // green = current in this window, blue = unread
+            // blue ring = current in this window, blue filled = unread
             Group {
                 if isRunning {
                     ProgressView()
                         .controlSize(.mini)
                         .frame(width: 10)
                 } else {
-                    Circle().fill(indicatorColor).frame(width: 6, height: 6)
+                    indicator
                 }
             }
             .frame(width: 10)
@@ -130,9 +130,14 @@ private struct SessionRow: View {
         .padding(.vertical, 2)
     }
 
-    private var indicatorColor: Color {
-        if isCurrent { return .green }
-        if isUnread { return .accentColor }
-        return .clear
+    @ViewBuilder
+    private var indicator: some View {
+        if isCurrent {
+            Circle().strokeBorder(Color.accentColor, lineWidth: 1.4).frame(width: 6, height: 6)
+        } else if isUnread {
+            Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+        } else {
+            Circle().fill(Color.clear).frame(width: 6, height: 6)
+        }
     }
 }
