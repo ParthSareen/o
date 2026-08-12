@@ -7,6 +7,7 @@ struct RootView: View {
     @State private var diffStore = DiffStore()
     @State private var showDiff = false
     @State private var showPrompt = false
+    @State private var reviewFullScreen = false
     @State private var booted = false
 
     var body: some View {
@@ -14,14 +15,10 @@ struct RootView: View {
             SidebarView(current: controller)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
         } detail: {
-            ChatView(controller: controller)
+            detail
         }
         .navigationTitle(title)
         .toolbar { toolbar }
-        .inspector(isPresented: $showDiff) {
-            DiffPanelView(store: diffStore, workingDir: controller.workingDir)
-                .inspectorColumnWidth(min: 320, ideal: 420, max: 640)
-        }
         .sheet(isPresented: $showPrompt) {
             PromptInspectorView(controller: controller)
         }
@@ -31,8 +28,27 @@ struct RootView: View {
             controller.start(spec)
             await SettingsStore.shared.reloadModels()
         }
+        .onChange(of: controller.workingDir) { _, dir in
+            diffStore.setDirectory(dir)
+        }
         .onDisappear {
             controller.stop()
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if reviewFullScreen {
+            ReviewSurface(store: diffStore, compact: false, onClose: { reviewFullScreen = false })
+                .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
+                    Task { await diffStore.refresh() }
+                }
+        } else {
+            ChatView(controller: controller, diffStore: diffStore)
+                .inspector(isPresented: $showDiff) {
+                    DiffPanelView(store: diffStore, workingDir: controller.workingDir)
+                        .inspectorColumnWidth(min: 340, ideal: 460, max: 720)
+                }
         }
     }
 
@@ -46,11 +62,25 @@ struct RootView: View {
                 Image(systemName: "doc.text.magnifyingglass")
             }
             .help("Prompt inspector (system prompt, tools, messages)")
-            Toggle(isOn: $showDiff) {
-                Image(systemName: "doc.badge.plus")
+
+            // side panel
+            Button {
+                if !reviewFullScreen { showDiff.toggle() }
+            } label: {
+                Label("Changes", systemImage: "checklist")
             }
-            .toggleStyle(.button)
-            .help("Working copy changes")
+            .help("Toggle changes panel")
+            .disabled(reviewFullScreen)
+
+            // full-screen review
+            Button {
+                reviewFullScreen = true
+                showDiff = false
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.forward")
+            }
+            .help("Review changes full screen")
+            .disabled(reviewFullScreen)
         }
     }
 
@@ -80,6 +110,7 @@ struct RootView: View {
     }
 
     private var title: String {
+        if reviewFullScreen { return "Review" }
         if !controller.sessionName.isEmpty { return controller.sessionName }
         if !controller.model.isEmpty { return controller.model }
         return "o"

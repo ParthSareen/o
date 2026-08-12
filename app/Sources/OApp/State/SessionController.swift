@@ -180,14 +180,17 @@ final class SessionController {
 
     // MARK: commands
 
-    func sendPrompt(_ text: String) {
+    func sendPrompt(_ text: String, wireSuffix: String? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, phase == .idle else { return }
         errorBanner = nil
         lastRunStatus = nil
         appendBlock(.userMessage(id: UUID(), text: trimmed), scope: nil)
         phase = .running
-        let (body, skill) = Self.splitSlashInvocation(trimmed, skills: skills)
+        // wire text may carry extra context (e.g. review comments) while the
+        // transcript shows just what the user typed
+        let wire = wireSuffix.map { trimmed + $0 } ?? trimmed
+        let (body, skill) = Self.splitSlashInvocation(wire, skills: skills)
         Task { [process] in
             do {
                 try await process?.send(.prompt(text: body, skill: skill))
