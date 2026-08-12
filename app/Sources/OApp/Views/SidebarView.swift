@@ -39,11 +39,12 @@ struct SidebarView: View {
         }
     }
 
-    /// "New session" restarts this window on a fresh conversation — the
-    /// current process is replaced. New *windows* stay under ⌘N.
+    /// "New session" starts a fresh conversation in this window. An in-flight
+    /// run isn't killed: its process detaches, finishes, persists, and exits.
+    /// New *windows* stay under ⌘N.
     private func startNewChat() {
         selection = nil
-        current.restart(with: .new)
+        current.startNewChat()
     }
 
     private var sessionList: some View {

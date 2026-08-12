@@ -111,6 +111,22 @@ final class SessionController {
         start(newSpec)
     }
 
+    /// "New chat": fresh session in this window. If a run is in flight it is
+    /// NOT killed — the old process detaches (stdin closes, the run finishes
+    /// and persists, then the process exits) while the window moves on.
+    func startNewChat() {
+        pumpTask?.cancel()
+        pumpTask = nil
+        exitTask?.cancel()
+        exitTask = nil
+        if let old = process {
+            let running = phase == .running
+            Task { running ? await old.detach() : await old.terminate() }
+        }
+        process = nil
+        start(.new)
+    }
+
     func stop() {
         tearDownProcess()
         flushTask?.cancel()
