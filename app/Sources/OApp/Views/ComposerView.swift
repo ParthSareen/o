@@ -164,6 +164,12 @@ struct ComposerView: View {
             textScaleControl
             workingDirLabel
             Spacer()
+            if copiedFlash {
+                Text("copied ✓")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+                    .transition(.opacity)
+            }
             if let tokens = controller.contextTokens {
                 Text("ctx \(tokens) tok")
                     .font(.caption2)
@@ -313,13 +319,35 @@ struct ComposerView: View {
     }
 
     private func send() {
-        let text = draft
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text == "/copy" {
+            copyLastResponse()
+            draft = ""
+            slashOpen = false
+            return
+        }
         let suffix = diffStore.promptAppendix()
         draft = ""
         slashOpen = false
         controller.sendPrompt(text, wireSuffix: suffix.isEmpty ? nil : suffix)
         if controller.phase == .running {
             diffStore.clearComments() // consumed by the prompt
+        }
+    }
+
+    // MARK: /copy
+
+    @State private var copiedFlash = false
+
+    /// Built-in slash command: copy the last assistant message (TUI parity).
+    private func copyLastResponse() {
+        guard let last = controller.lastAssistantText() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(last, forType: .string)
+        withAnimation { copiedFlash = true }
+        Task {
+            try? await Task.sleep(for: .milliseconds(1100))
+            await MainActor.run { withAnimation { copiedFlash = false } }
         }
     }
 }

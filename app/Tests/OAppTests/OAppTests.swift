@@ -723,3 +723,71 @@ struct SessionAssignedTests {
         #expect(reported == "late-1")
     }
 }
+
+@MainActor
+struct CopyCommandTests {
+    @Test func lastAssistantTextFindsLatestAnswer() {
+        let c = SessionController()
+        c.apply(event(#"{"type":"session_opened","chatId":"s1","model":"m","messages":[]}"#))
+        c.testingInjectUserTurn("q1")
+        for ev in [
+            #"{"type":"message_delta","content":"first answer"}"#,
+            #"{"type":"run_finished","status":"done"}"#,
+        ] { c.apply(event(ev)) }
+        // a second turn whose tool call lands between text and finish
+        c.testingInjectUserTurn("q2")
+        for ev in [
+            #"{"type":"message_delta","content":"second "}"#,
+            #"{"type":"tool_started","toolName":"bash","toolStatus":"running"}"#,
+            #"{"type":"tool_finished","toolName":"bash","toolStatus":"done"}"#,
+            #"{"type":"message_delta","content":"answer"}"#,
+            #"{"type":"run_finished","status":"done"}"#,
+        ] { c.apply(event(ev)) }
+        // tool calls split the reply into two pieces; /copy joins in order
+        #expect(c.lastAssistantText() == "second \n\nanswer")
+    }
+
+    @Test func lastAssistantFromBlocks() {
+        let messages: [AgentMessage] = [
+            AgentMessage(role: "user", content: "hi"),
+            AgentMessage(role: "assistant", content: "first answer"),
+            AgentMessage(role: "assistant", toolCalls: [AgentToolCall(id: "c1", function: .init(name: "bash"))]),
+            AgentMessage(role: "tool", content: "out", toolName: "bash", toolCallID: "c1"),
+            AgentMessage(role: "assistant", content: "final answer"),
+        ]
+        let blocks = SessionController.blocksFromHistory(messages)
+        let latest = blocks.reversed().compactMap { block -> String? in
+            if case .assistant(_, let text) = block { return text }
+            return nil
+        }.first
+        #expect(latest == "final answer")
+    }
+}
+
+struct FlattenTests {
+    @Test func textySegmentsMergeCodeStaysBoxed() {
+        let blocks = MarkdownText.Parser.blocks("""
+        ## Head
+
+        para **bold** text
+
+        - one
+        - two
+
+        ```go
+        zap()
+        ```
+
+        tail
+        """)
+        let segs = MarkdownText.segments(from: blocks)
+        #expect(segs.map { seg -> String in
+            switch seg { case .texty(let b): return "texty(\(b.count))"; case .codey(let l, _): return "code(\(l))" }
+        } == ["texty(4)", "code(go)", "texty(1)"])
+        guard case .texty(let first) = segs[0] else { Issue.record(); return }
+        let flat = String(MarkdownText.flatten(first, scale: 1.0).characters)
+        #expect(flat.contains("Head"))
+        #expect(flat.contains("\u{2022} one\n\u{2022} two")) // bullets contiguous
+        #expect(!flat.contains("**") && !flat.contains("##")) // markers gone
+    }
+}

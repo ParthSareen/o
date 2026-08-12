@@ -263,6 +263,19 @@ final class SessionController {
         Task { [process] in await process?.cancelRun() }
     }
 
+    /// Content of the latest completed assistant reply ("/copy"): text after
+    /// the last user message; tool cards may sit between text pieces, so all
+    /// assistant text from the final turn is joined in order.
+    func lastAssistantText() -> String? {
+        var pieces: [String] = []
+        for block in blocks.reversed() {
+            if case .assistant(_, let text) = block { pieces.append(text) }
+            if case .userMessage = block { break }
+        }
+        guard !pieces.isEmpty else { return nil }
+        return pieces.reversed().joined(separator: "\n\n")
+    }
+
     /// Test hook: performs sendPrompt's visible state changes without a live
     /// process, so reducer tests can drive apply(_:) deterministically.
     func testingInjectUserTurn(_ text: String) {

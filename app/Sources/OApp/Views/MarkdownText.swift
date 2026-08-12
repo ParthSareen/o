@@ -10,12 +10,97 @@ struct MarkdownText: View {
         self.blocks = Parser.blocks(text)
     }
 
+    @Environment(\.chatTextScale) private var scale
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .texty(let textBlocks):
+                    // All prose flattened into ONE AttributedString/Text so
+                    // text selection is contiguous across headings, bullets,
+                    // and paragraphs (per-view selection can't cross views).
+                    Text(Self.flatten(textBlocks, scale: scale))
+                        .lineSpacing(3.5 * scale)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                case .codey(let language, let code):
+                    CodeBlockView(language: language, code: code)
+                }
             }
         }
+    }
+
+    private var segments: [Segment] { Self.segments(from: blocks) }
+
+    // MARK: segments for selection-contiguous rendering
+
+    enum Segment: Equatable {
+        case texty([Block])
+        case codey(language: String, String)
+    }
+
+    static func segments(from blocks: [Block]) -> [Segment] {
+        var out: [Segment] = []
+        var pending: [Block] = []
+        for block in blocks {
+            if case .code(let lang, let code) = block {
+                if !pending.isEmpty { out.append(.texty(pending)); pending = [] }
+                out.append(.codey(language: lang, code))
+            } else {
+                pending.append(block)
+            }
+        }
+        if !pending.isEmpty { out.append(.texty(pending)) }
+        return out
+    }
+
+    /// Flatten prose blocks to one attributed run set: heading/bullet/quote
+    /// structure becomes fonts and glyphs, inline intent (bold/italic/code)
+    /// is preserved per fragment.
+    static func flatten(_ blocks: [Block], scale: Double) -> AttributedString {
+        var out = AttributedString()
+        for block in blocks {
+            var fragment: AttributedString
+            var trailing = "\n\n" // paragraphs & headings get air; list lines don\'t
+            switch block {
+            case .heading(let level, let text):
+                fragment = Parser.inline(text)
+                fragment.font = ChatFont.heading(level, scale)
+            case .bullet(let text, let depth):
+                var marker = AttributedString(String(repeating: "  ", count: depth) + "\u{2022} ")
+                marker.font = ChatFont.prose(scale)
+                fragment = Parser.inline(text)
+                if fragment.font == nil { fragment.font = ChatFont.prose(scale) }
+                fragment = marker + fragment
+                trailing = "\n"
+            case .numbered(let n, let text):
+                var marker = AttributedString("\(n). ")
+                marker.font = ChatFont.prose(scale)
+                fragment = Parser.inline(text)
+                if fragment.font == nil { fragment.font = ChatFont.prose(scale) }
+                fragment = marker + fragment
+                trailing = "\n"
+            case .quote(let text):
+                fragment = Parser.inline(text)
+                fragment.foregroundColor = .secondary
+                if fragment.font == nil { fragment.font = ChatFont.prose(scale) }
+                trailing = "\n"
+            case .paragraph(let text):
+                fragment = Parser.inline(text)
+                if fragment.font == nil { fragment.font = ChatFont.prose(scale) }
+            case .rule:
+                var hr = AttributedString("\u{2015}\u{2015}\u{2015}")
+                hr.font = ChatFont.prose(scale)
+                hr.foregroundColor = .secondary
+                fragment = hr
+            case .code:
+                continue // handled via segments
+            }
+            out.append(fragment)
+            out.append(AttributedString(trailing))
+        }
+        return out
     }
 
     // MARK: model
@@ -149,59 +234,6 @@ struct MarkdownText: View {
         }
     }
 
-    // MARK: block views
-
-    private struct BlockView: View {
-        let block: Block
-        @Environment(\.chatTextScale) private var scale
-
-        var body: some View {
-            switch block {
-            case .heading(let level, let text):
-                Text(Parser.inline(text))
-                    .font(ChatFont.heading(level, scale))
-                    .padding(.top, level <= 2 ? 6 : 3)
-            case .bullet(let text, let depth):
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("•")
-                        .foregroundStyle(.secondary)
-                    Text(Parser.inline(text))
-                        .font(ChatFont.prose(scale))
-                        .lineSpacing(3.5 * scale)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.leading, CGFloat(depth) * 14 + 2)
-            case .numbered(let n, let text):
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("\(n).")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                    Text(Parser.inline(text))
-                        .font(ChatFont.prose(scale))
-                        .lineSpacing(3.5 * scale)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            case .quote(let text):
-                HStack(alignment: .top, spacing: 8) {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.secondary.opacity(0.5))
-                        .frame(width: 3)
-                    Text(Parser.inline(text))
-                        .font(ChatFont.prose(scale))
-                        .lineSpacing(3.5 * scale)
-                        .foregroundStyle(.secondary)
-                }
-            case .paragraph(let text):
-                Text(Parser.inline(text))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            case .code(let language, let code):
-                CodeBlockView(language: language, code: code)
-            case .rule:
-                Divider().opacity(0.6)
-            }
-        }
-
-    }
 
     private struct CodeBlockView: View {
         let language: String
