@@ -493,3 +493,25 @@ struct DiffStoreContentAttributionTests {
         }
     }
 }
+
+struct ToolSummaryTests {
+    @Test func knownToolsPickTheRightField() {
+        #expect(SessionController.toolSummary(name: "web_search", args: .object(["query": .string("ollama news")])) == "\"ollama news\"")
+        #expect(SessionController.toolSummary(name: "web_fetch", args: .object(["url": .string("https://x.dev/y")])) == "https://x.dev/y")
+        #expect(SessionController.toolSummary(name: "bash", args: .object(["command": .string("ls -la"), "timeout": .number(30)])) == "ls -la")
+        #expect(SessionController.toolSummary(name: "edit_file", args: .object(["path": .string("a.go"), "old_text": .string("x")])) == "a.go")
+        #expect(SessionController.toolSummary(name: "skill", args: .object(["name": .string("release-notes")])) == "/release-notes")
+        #expect(SessionController.toolSummary(name: "subagents", args: .object(["query": .string("find uses"), "context": .string("…")])) == "find uses")
+    }
+
+    @Test func unknownToolsFallBackToCompactJSON() {
+        let s = SessionController.toolSummary(name: "mystery", args: .object(["a": .string("b")]))
+        #expect(s.contains("a: b"))
+    }
+
+    @Test func longSummariesTruncate() {
+        let long = String(repeating: "x", count: 200)
+        let s = SessionController.toolSummary(name: "bash", args: .object(["command": .string(long)]))
+        #expect(s.count == 94 && s.hasSuffix("…"))
+    }
+}
