@@ -650,3 +650,43 @@ struct SessionManagerTests {
         #expect(store.unreadIDs.isEmpty || !store.unreadIDs.contains("thread-x"))
     }
 }
+
+@MainActor
+struct UnreadVisibilityTests {
+    @Test func switchAwayThenFinishMarksUnread() {
+        let store = SessionListStore.shared
+        // user is on the session, then switches away (hidden), then the
+        // background run finishes -> unread
+        store.noteActiveSession("sess-a")
+        store.runStarted(sessionID: "sess-a")
+        store.noteSessionHidden("sess-a")
+        store.runFinished(sessionID: "sess-a")
+        #expect(store.unreadIDs.contains("sess-a"))
+        #expect(!store.runningIDs.contains("sess-a"))
+        store.noteActiveSession("sess-a") // cleanup
+    }
+
+    @Test func runningThenFinishWhileVisibleIsNotUnread() {
+        let store = SessionListStore.shared
+        store.noteActiveSession("sess-b")
+        store.runStarted(sessionID: "sess-b")
+        #expect(store.runningIDs.contains("sess-b"))
+        store.runFinished(sessionID: "sess-b")
+        #expect(!store.unreadIDs.contains("sess-b"))
+        #expect(!store.runningIDs.contains("sess-b"))
+    }
+
+    @Test func visibilityRefcountAcrossWindows() {
+        let store = SessionListStore.shared
+        store.noteActiveSession("sess-c") // window 1 shows it
+        store.noteActiveSession("sess-c") // window 2 too
+        store.noteSessionHidden("sess-c") // window 1 switches away
+        // still visible in window 2: finishing here should NOT be unread
+        store.runFinished(sessionID: "sess-c")
+        #expect(!store.unreadIDs.contains("sess-c"))
+        store.noteSessionHidden("sess-c") // last window leaves
+        store.runFinished(sessionID: "sess-c")
+        #expect(store.unreadIDs.contains("sess-c"))
+        store.noteActiveSession("sess-c") // cleanup
+    }
+}

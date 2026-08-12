@@ -60,7 +60,8 @@ struct SidebarView: View {
                 SessionRow(
                     session: session,
                     isCurrent: session.id == manager.active.sessionID,
-                    isUnread: list.unreadIDs.contains(session.id)
+                    isUnread: list.unreadIDs.contains(session.id),
+                    isRunning: list.runningIDs.contains(session.id)
                 )
                 .tag(session.id)
                 .listRowSeparator(.hidden)
@@ -88,15 +89,23 @@ private struct SessionRow: View {
     let session: SessionSummary
     let isCurrent: Bool
     let isUnread: Bool
+    let isRunning: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 7) {
-            // constant-width indicator column: green = live in this window,
-            // blue filled = finished while away (unread), empty otherwise
-            Circle()
-                .fill(indicatorColor)
-                .frame(width: 6, height: 6)
-                .padding(.top, 5)
+            // indicator column (constant width): spinner = running in bg,
+            // green = current in this window, blue = unread
+            Group {
+                if isRunning {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 10)
+                } else {
+                    Circle().fill(indicatorColor).frame(width: 6, height: 6)
+                }
+            }
+            .frame(width: 10)
+            .padding(.top, 4)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.displayTitle)

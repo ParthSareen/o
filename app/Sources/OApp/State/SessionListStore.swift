@@ -29,29 +29,38 @@ final class SessionListStore {
 
     /// Sessions that finished a run while not visible in any window.
     private(set) var unreadIDs: Set<String> = []
-    /// Session currently active in at least one window.
-    private var visibleIDs: Set<String> = []
+    /// Sessions with a run in flight right now (any window).
+    private(set) var runningIDs: Set<String> = []
+    /// Visibility refcounts (a session may be active in several windows).
+    private var visibleCounts: [String: Int] = [:]
 
     func noteActiveSession(_ id: String?) {
         if let id {
-            visibleIDs.insert(id)
+            visibleCounts[id, default: 0] += 1
             unreadIDs.remove(id)
         }
     }
 
-    /// Called by windows when one of their sessions finished a run.
+    /// A window stopped showing this session (switched away).
+    func noteSessionHidden(_ id: String?) {
+        guard let id, let count = visibleCounts[id] else { return }
+        if count > 1 { visibleCounts[id] = count - 1 } else { visibleCounts[id] = nil }
+    }
+
+    func runStarted(sessionID: String) {
+        runningIDs.insert(sessionID)
+    }
+
+    /// A run finished: mark unread only if the session isn't visible in any
+    /// window at that moment.
     func runFinished(sessionID: String) {
-        if !visibleIDs.contains(sessionID) {
+        runningIDs.remove(sessionID)
+        if visibleCounts[sessionID, default: 0] == 0 {
             unreadIDs.insert(sessionID)
         }
     }
 
     func refreshFromRun() { refresh() }
-
-    /// Stale-window housekeeping: drop visibility a window no longer shows.
-    func noteSessionHidden(_ id: String) {
-        visibleIDs.remove(id)
-    }
 
     private var observersStarted = false
 

@@ -69,6 +69,7 @@ final class SessionController {
     /// Hooks for SessionManager (background-runs + unread bookkeeping).
     var onSessionOpened: ((String) -> Void)? = nil
     var onRunFinished: (() -> Void)? = nil
+    var onRunStarted: (() -> Void)? = nil
 
     // MARK: lifecycle
 
@@ -180,6 +181,7 @@ final class SessionController {
         lastRunStatus = nil
         appendBlock(.userMessage(id: UUID(), text: trimmed), scope: nil)
         phase = .running
+        onRunStarted?()
         // wire text may carry extra context (e.g. review comments) while the
         // transcript shows just what the user typed
         let wire = wireSuffix.map { trimmed + $0 } ?? trimmed

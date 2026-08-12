@@ -43,11 +43,18 @@ final class SessionManager {
             // refresh listing (title/timestamp changed)
             SessionListStore.shared.refreshFromRun()
         }
+        controller.onRunStarted = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            if let id = self.keyAliases[ObjectIdentifier(controller)] ?? controller.sessionID {
+                SessionListStore.shared.runStarted(sessionID: id)
+            }
+        }
     }
 
     // MARK: switching (never kills a process)
 
     func switchTo(_ sessionID: String, workingDir: String? = nil) {
+        let outgoing = active.sessionID
         if let existing = live[sessionID] {
             active = existing
         } else {
@@ -60,17 +67,21 @@ final class SessionManager {
             // controller disconnects; the store guards against stale entries.
             active = controller
         }
+        // hidden sessions stop counting as visible so their finishes earn the
+        // unread dot; refcounts keep multi-window truth
+        SessionListStore.shared.noteSessionHidden(outgoing)
         SessionListStore.shared.noteActiveSession(sessionID)
     }
 
     func startNewChat() {
         // the in-flight session (if any) keeps its process running — this is
         // the whole point versus the old detach behavior
+        let outgoing = active.sessionID
         let controller = SessionController()
         wire(controller)
         controller.start(.new)
         active = controller
-        SessionListStore.shared.noteActiveSession(nil)
+        SessionListStore.shared.noteSessionHidden(outgoing)
     }
 
     /// Session selected row deleted from the store: tear down its live process.
