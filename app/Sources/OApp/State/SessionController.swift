@@ -5,6 +5,16 @@ extension Notification.Name {
     static let oSessionsChanged = Notification.Name("oSessionsChanged")
 }
 
+/// The /prompt view: what the model would see right now.
+struct PromptInspection: Equatable, Sendable {
+    var system: String
+    var tools: [ToolInfo]
+    var messages: [AgentMessage]
+    var model: String
+    var workingDir: String
+    var takenAt: Date
+}
+
 /// Which conversation a window hosts, and where/how to launch it.
 struct SessionSpec: Codable, Hashable, Sendable {
     var sessionID: String? = nil    // nil = new session
@@ -36,6 +46,8 @@ final class SessionController {
     private(set) var lastRunStatus: String? = nil
     var contextTokens: Int? = nil
     var errorBanner: String? = nil
+    /// Latest answer to an inspect command (/prompt view state).
+    private(set) var inspection: PromptInspection? = nil
 
     private struct PendingText {
         var assistant = ""
@@ -322,9 +334,24 @@ final class SessionController {
             appendBlock(.error(id: UUID(), message: ev.error ?? "unknown error"), scope: scope)
             if scope == nil { phase = phase == .running ? .running : .idle }
 
+        case .inspect:
+            inspection = PromptInspection(
+                system: ev.system ?? "",
+                tools: ev.tools ?? [],
+                messages: ev.messages ?? [],
+                model: ev.model ?? model,
+                workingDir: ev.workingDir ?? workingDir,
+                takenAt: Date()
+            )
+
         case .unknown:
             break // forward compatibility: ignore events we don't know
         }
+    }
+
+    /// Ask the agent for the /prompt snapshot (works mid-run too).
+    func requestInspection() {
+        Task { [process] in try? await process?.send(.inspect) }
     }
 
     private func applyError(_ message: String) {

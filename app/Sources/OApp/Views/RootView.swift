@@ -6,6 +6,7 @@ struct RootView: View {
     @State private var controller = SessionController()
     @State private var diffStore = DiffStore()
     @State private var showDiff = false
+    @State private var showPrompt = false
     @State private var booted = false
 
     var body: some View {
@@ -20,6 +21,9 @@ struct RootView: View {
         .inspector(isPresented: $showDiff) {
             DiffPanelView(store: diffStore, workingDir: controller.workingDir)
                 .inspectorColumnWidth(min: 320, ideal: 420, max: 640)
+        }
+        .sheet(isPresented: $showPrompt) {
+            PromptInspectorView(controller: controller)
         }
         .task {
             guard !booted else { return }
@@ -36,6 +40,12 @@ struct RootView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             workingDirButton
+            Button {
+                showPrompt = true
+            } label: {
+                Image(systemName: "doc.text.magnifyingglass")
+            }
+            .help("Prompt inspector (system prompt, tools, messages)")
             Toggle(isOn: $showDiff) {
                 Image(systemName: "doc.badge.plus")
             }

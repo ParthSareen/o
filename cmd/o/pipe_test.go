@@ -436,3 +436,29 @@ func TestPipeEmptyPromptRejected(t *testing.T) {
 	}
 	h.close(t)
 }
+
+func TestPipeInspectReportsPromptToolsMessages(t *testing.T) {
+	registry := &coreagent.Registry{}
+	registry.Register(&upperTool{})
+	fc := &fakeClient{responses: [][]api.ChatResponse{textChunks("answer one"), textChunks("answer two")}}
+	h := startPipe(t, fc, registry)
+
+	// while running: snapshot should contain the system prompt + tools
+	h.send(t, `{"cmd":"prompt","text":"first"}`)
+	h.waitForAfter(0, func(ev coreagent.Event) bool { return ev.Type == coreagent.EventRunFinished })
+	h.send(t, `{"cmd":"inspect"}`)
+	openCount := len(h.outBuf.events(t))
+	ev := h.waitFor(func(e coreagent.Event) bool { return e.Type == coreagent.EventInspect })
+	_ = openCount
+	if ev.System != "system prompt" {
+		t.Fatalf("system = %q", ev.System)
+	}
+	if len(ev.Tools) != 1 || ev.Tools[0].Name != "upper" {
+		t.Fatalf("tools = %+v", ev.Tools)
+	}
+	// history so far: user + assistant from turn 1
+	if len(ev.Messages) != 2 || ev.Messages[0].Role != "user" || ev.Messages[1].Content != "answer one" {
+		t.Fatalf("messages = %+v", ev.Messages)
+	}
+	h.close(t)
+}
