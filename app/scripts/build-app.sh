@@ -54,8 +54,21 @@ if [ -d "$ICON_SRC" ]; then
     rm -rf "$ICON_OUT"
 fi
 
-# Ad-hoc sign so Gatekeeper treats it consistently across launches.
-codesign --force --sign - "$APP_DIR" 2>/dev/null || true
+# Sign with a STABLE identity: ad-hoc signing changes the code hash every
+# build, which makes macOS re-prompt TCC ("o would like to access files…")
+# after each rebuild. Using the machine's Apple Development cert (or any cert
+# via O_SIGN_IDENTITY) makes the grant persist. Falls back to ad-hoc.
+IDENTITY="${O_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ]; then
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "Apple Development:"; then
+        IDENTITY="Apple Development"
+    else
+        IDENTITY="-"
+    fi
+fi
+echo "== signing (identity: $IDENTITY) =="
+codesign --force --sign "$IDENTITY" "$CONTENTS/Resources/o-core" 2>/dev/null || codesign --force --sign - "$CONTENTS/Resources/o-core"
+codesign --force --sign "$IDENTITY" "$APP_DIR" 2>/dev/null || codesign --force --sign - "$APP_DIR"
 echo "== $APP_DIR built =="
 
 if [ "$DO_INSTALL" = 1 ]; then
