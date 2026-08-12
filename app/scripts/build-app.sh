@@ -37,6 +37,21 @@ swift build -c release 2>&1 | tail -1
 cp "$ROOT/app/.build/release/OApp" "$CONTENTS/MacOS/OApp"
 cp "$ROOT/app/Info.plist" "$CONTENTS/Info.plist"
 
+# Icon: compile the Icon Composer source (app/Resources/o_icon.icon) with
+# actool into a classic icns + Assets.car for the liquid-glass look.
+ICON_SRC="$ROOT/app/Resources/o_icon.icon"
+if [ -d "$ICON_SRC" ]; then
+    echo "== compiling app icon =="
+    ICON_OUT="$(mktemp -d)"
+    xcrun actool --compile "$ICON_OUT" --platform macosx \
+        --minimum-deployment-target 15.0 --app-icon o_icon \
+        --output-partial-info-plist "$ICON_OUT/partial.plist" \
+        --output-format human-readable-text "$ICON_SRC" >/dev/null
+    cp "$ICON_OUT/o_icon.icns" "$CONTENTS/Resources/AppIcon.icns"
+    cp "$ICON_OUT/Assets.car" "$CONTENTS/Resources/Assets.car"
+    rm -rf "$ICON_OUT"
+fi
+
 # Ad-hoc sign so Gatekeeper treats it consistently across launches.
 codesign --force --sign - "$APP_DIR" 2>/dev/null || true
 echo "== $APP_DIR built =="
