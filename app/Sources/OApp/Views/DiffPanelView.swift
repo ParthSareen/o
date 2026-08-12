@@ -144,10 +144,9 @@ struct ReviewSurface: View {
     private func sectionRows(_ section: FileSection) -> some View {
         ForEach(Array(section.lines.enumerated()), id: \.offset) { index, line in
             let key = "\(section.path)#\(index)"
-            // + appears on hover; while anchored it appears on all numbered
-            // rows as the "extend to here" affordance; hidden while editing
-            let showAdd = draft.map { $0.phase != .editing } ?? true
-                && (hoveredLine == key || draft?.phase == .anchored)
+            // + only under the mouse cursor (the range preview tint already
+            // shows what extending would cover); hidden while editing
+            let showAdd = (draft?.phase ?? .anchored) != .editing && hoveredLine == key
             DiffReviewLineRow(
                 line: line, path: section.path,
                 showAdd: showAdd,
