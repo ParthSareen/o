@@ -11,7 +11,7 @@ struct MarkdownText: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 BlockView(block: block)
             }
@@ -167,7 +167,7 @@ struct MarkdownText: View {
                         .foregroundStyle(.secondary)
                     Text(Parser.inline(text))
                         .font(ChatFont.prose(scale))
-                        .lineSpacing(2.5 * scale)
+                        .lineSpacing(3.5 * scale)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.leading, CGFloat(depth) * 14 + 2)
@@ -178,7 +178,7 @@ struct MarkdownText: View {
                         .monospacedDigit()
                     Text(Parser.inline(text))
                         .font(ChatFont.prose(scale))
-                        .lineSpacing(2.5 * scale)
+                        .lineSpacing(3.5 * scale)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             case .quote(let text):
@@ -188,7 +188,7 @@ struct MarkdownText: View {
                         .frame(width: 3)
                     Text(Parser.inline(text))
                         .font(ChatFont.prose(scale))
-                        .lineSpacing(2.5 * scale)
+                        .lineSpacing(3.5 * scale)
                         .foregroundStyle(.secondary)
                 }
             case .paragraph(let text):

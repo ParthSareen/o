@@ -48,6 +48,9 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                 }
+                // selection lives on the container — dragging across blocks/
+                // messages then works (per-Text selection is single-view only)
+                .textSelection(.enabled)
                 .onChange(of: controller.blocks.count) { _, _ in
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
