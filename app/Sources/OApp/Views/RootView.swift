@@ -9,6 +9,7 @@ struct RootView: View {
     @State private var showPrompt = false
     @State private var reviewFullScreen = false
     @State private var booted = false
+    @State private var settings = SettingsStore.shared
 
     var body: some View {
         NavigationSplitView {
@@ -38,6 +39,13 @@ struct RootView: View {
 
     @ViewBuilder
     private var detail: some View {
+        detailContent
+            // ⌘+/⌘- text scale: detail content (chat, composer, review) only
+            .dynamicTypeSize(settings.dynamicTypeSize)
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
         if reviewFullScreen {
             ReviewSurface(store: diffStore, compact: false, onClose: { reviewFullScreen = false })
                 .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
