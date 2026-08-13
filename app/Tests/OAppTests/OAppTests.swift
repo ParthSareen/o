@@ -553,7 +553,7 @@ struct MarkdownParserTests {
         ```
         tail paragraph
         """
-        let blocks = MarkdownText.Parser.blocks(md)
+        let blocks = MarkdownParser.blocks(md)
         guard case .heading(let level, let text) = blocks[0] else { Issue.record("\(blocks)"); return }
         #expect(level == 3 && text == "Option A — recommended")
         guard case .paragraph(let p) = blocks[1] else { Issue.record("block1: \(blocks[1])"); return }
@@ -571,7 +571,7 @@ struct MarkdownParserTests {
     }
 
     @Test func inlineProducesBoldRuns() {
-        let a = MarkdownText.Parser.inline("plain and **bold** here")
+        let a = MarkdownParser.inline("plain and **bold** here")
         var sawBold = false
         for run in a.runs where String(a[run.range].characters) == "bold" {
             if run.attributes.inlinePresentationIntent?.contains(.stronglyEmphasized) == true { sawBold = true }
@@ -580,7 +580,7 @@ struct MarkdownParserTests {
     }
 
     @Test func hashWithoutSpaceIsNotHeading() {
-        let blocks = MarkdownText.Parser.blocks("#notheading")
+        let blocks = MarkdownParser.blocks("#notheading")
         guard case .paragraph = blocks.first else { Issue.record("\(blocks)"); return }
     }
 }
@@ -766,7 +766,7 @@ struct CopyCommandTests {
 
 struct FlattenTests {
     @Test func textySegmentsMergeCodeStaysBoxed() {
-        let blocks = MarkdownText.Parser.blocks("""
+        let blocks = MarkdownParser.blocks("""
         ## Head
 
         para **bold** text
@@ -780,14 +780,59 @@ struct FlattenTests {
 
         tail
         """)
-        let segs = MarkdownText.segments(from: blocks)
+        let segs = MdSegments.segments(from: blocks)
         #expect(segs.map { seg -> String in
-            switch seg { case .texty(let b): return "texty(\(b.count))"; case .codey(let l, _): return "code(\(l))" }
+            switch seg {
+            case .texty(let b): return "texty(\(b.count))"
+            case .codey(let l, _): return "code(\(l))"
+            case .tabley: return "tbl"
+            }
         } == ["texty(4)", "code(go)", "texty(1)"])
         guard case .texty(let first) = segs[0] else { Issue.record(); return }
-        let flat = String(MarkdownText.flatten(first, scale: 1.0).characters)
+        let flat = String(MdSegments.flatten(first, scale: 1.0).characters)
         #expect(flat.contains("Head"))
         #expect(flat.contains("\u{2022} one\n\u{2022} two")) // bullets contiguous
         #expect(!flat.contains("**") && !flat.contains("##")) // markers gone
+    }
+}
+
+struct MarkdownTableTests {
+    @Test func tableParsesHeaderSeparatorRows() {
+        let md = """
+        | Tool | OK | Mode |
+        | --- | --- | --- |
+        | **Claude** | yes | `claude` |
+        | Codex | yes | `codex --oss` |
+
+        after
+        """
+        let blocks = MarkdownParser.blocks(md)
+        guard case .table(let headers, let rows) = blocks[0] else {
+            Issue.record("blocks: \(blocks)"); return
+        }
+        #expect(headers == ["Tool", "OK", "Mode"])
+        #expect(rows.count == 2)
+        #expect(rows[0][0] == "**Claude**") // inline syntax kept for cell parse
+        #expect(rows[1][2] == "`codex --oss`")
+        guard case .paragraph = blocks[1] else { Issue.record(); return }
+    }
+
+    @Test func pipeLineWithoutSeparatorIsParagraph() {
+        let blocks = MarkdownParser.blocks("| not | a table |")
+        guard case .paragraph = blocks.first else { Issue.record("\(blocks)"); return }
+    }
+
+    @Test func tableIsOwnSegmentForLayout() {
+        let blocks = MarkdownParser.blocks("before\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter")
+        let segs = MdSegments.segments(from: blocks)
+        #expect(segs.map { seg -> String in
+            switch seg { case .texty: return "t"; case .codey: return "c"; case .tabley: return "tbl" }
+        } == ["t", "tbl", "t"])
+    }
+
+    @Test func ruggedTablePadsShortRows() {
+        let blocks = MarkdownParser.blocks("| a | b | c |\n|---|---|---|\n| only | two |")
+        guard case .table(let headers, let rows) = blocks.first else { Issue.record(); return }
+        #expect(headers.count == 3 && rows[0].count == 3 && rows[0][2] == "")
     }
 }
