@@ -17,6 +17,7 @@ struct ToolBlock: Equatable, Identifiable, Sendable {
     var callID: String = ""
     var name: String = ""
     var argsText: String? = nil       // pretty JSON
+    var argsSummary: String = ""      // friendly one-liner for the collapsed row
     var status: ToolRunStatus = .pending
     var result: String? = nil
     var errorText: String? = nil

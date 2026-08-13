@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChatView: View {
     let controller: SessionController
+    let diffStore: DiffStore
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,7 +21,7 @@ struct ChatView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(controller.blocks) { block in
                             BlockRow(block: block)
                                 .id(block.id)
@@ -39,7 +40,7 @@ struct ChatView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            .padding(.leading, 26)
+                    
                             .id("working")
                         }
                         Color.clear.frame(height: 1).id("bottom")
@@ -47,6 +48,9 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                 }
+                // selection lives on the container — dragging across blocks/
+                // messages then works (per-Text selection is single-view only)
+                .textSelection(.enabled)
                 .onChange(of: controller.blocks.count) { _, _ in
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
@@ -56,7 +60,7 @@ struct ChatView: View {
             }
 
             Divider()
-            ComposerView(controller: controller)
+            ComposerView(controller: controller, diffStore: diffStore)
         }
     }
 }
@@ -67,6 +71,7 @@ struct LiveRow: View {
     let icon: String
     let text: String
     let dimmed: Bool
+    @Environment(\.chatTextScale) private var scale
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -74,6 +79,8 @@ struct LiveRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             Text(text)
+                .font(ChatFont.prose(scale))
+                .lineSpacing(2.5 * scale)
                 .foregroundStyle(dimmed ? .secondary : .primary)
                 .italic(dimmed)
                 .frame(maxWidth: .infinity, alignment: .leading)

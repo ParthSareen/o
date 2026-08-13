@@ -3,32 +3,65 @@ import SwiftUI
 
 struct RootView: View {
     let spec: SessionSpec
-    @State private var controller = SessionController()
+    @State private var manager = SessionManager()
     @State private var diffStore = DiffStore()
     @State private var showDiff = false
+    @State private var showPrompt = false
+    @State private var reviewFullScreen = false
     @State private var booted = false
+    @State private var settings = SettingsStore.shared
+
+    private var controller: SessionController { manager.active }
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(current: controller)
+            SidebarView(manager: manager)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
         } detail: {
-            ChatView(controller: controller)
+            detail
         }
         .navigationTitle(title)
         .toolbar { toolbar }
-        .inspector(isPresented: $showDiff) {
-            DiffPanelView(store: diffStore, workingDir: controller.workingDir)
-                .inspectorColumnWidth(min: 320, ideal: 420, max: 640)
+        .sheet(isPresented: $showPrompt) {
+            PromptInspectorView(controller: controller)
         }
         .task {
             guard !booted else { return }
             booted = true
-            controller.start(spec)
+            manager.boot(spec)
             await SettingsStore.shared.reloadModels()
         }
+        .onChange(of: activeWorkingDir) { _, dir in
+            diffStore.setDirectory(dir)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .oSessionsChanged)) { _ in
+            Task { await diffStore.refresh() }
+        }
         .onDisappear {
-            controller.stop()
+            manager.stopAll()
+        }
+    }
+
+    private var activeWorkingDir: String { controller.workingDir }
+
+    @ViewBuilder
+    private var detail: some View {
+        detailContent
+            // explicit point-size scaling; dynamicTypeSize proved unreliable
+            // for the AttributedString-backed transcript
+            .environment(\.chatTextScale, settings.prefs.textScale)
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        if reviewFullScreen {
+            ReviewSurface(store: diffStore, compact: false, onClose: { reviewFullScreen = false })
+        } else {
+            ChatView(controller: controller, diffStore: diffStore)
+                .inspector(isPresented: $showDiff) {
+                    DiffPanelView(store: diffStore, workingDir: controller.workingDir)
+                        .inspectorColumnWidth(min: 340, ideal: 460, max: 720)
+                }
         }
     }
 
@@ -36,11 +69,29 @@ struct RootView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             workingDirButton
-            Toggle(isOn: $showDiff) {
-                Image(systemName: "doc.badge.plus")
+            Button {
+                showPrompt = true
+            } label: {
+                Image(systemName: "doc.text.magnifyingglass")
             }
-            .toggleStyle(.button)
-            .help("Working copy changes")
+            .help("Prompt inspector (system prompt, tools, messages)")
+
+            Button {
+                if !reviewFullScreen { showDiff.toggle() }
+            } label: {
+                Label("Changes", systemImage: "checklist")
+            }
+            .help("Toggle changes panel")
+            .disabled(reviewFullScreen)
+
+            Button {
+                reviewFullScreen = true
+                showDiff = false
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.forward")
+            }
+            .help("Review changes full screen")
+            .disabled(reviewFullScreen)
         }
     }
 
@@ -70,6 +121,7 @@ struct RootView: View {
     }
 
     private var title: String {
+        if reviewFullScreen { return "Review" }
         if !controller.sessionName.isEmpty { return controller.sessionName }
         if !controller.model.isEmpty { return controller.model }
         return "o"

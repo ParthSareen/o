@@ -5,6 +5,16 @@ extension Notification.Name {
     static let oSessionsChanged = Notification.Name("oSessionsChanged")
 }
 
+/// The /prompt view: what the model would see right now.
+struct PromptInspection: Equatable, Sendable {
+    var system: String
+    var tools: [ToolInfo]
+    var messages: [AgentMessage]
+    var model: String
+    var workingDir: String
+    var takenAt: Date
+}
+
 /// Which conversation a window hosts, and where/how to launch it.
 struct SessionSpec: Codable, Hashable, Sendable {
     var sessionID: String? = nil    // nil = new session
@@ -36,6 +46,8 @@ final class SessionController {
     private(set) var lastRunStatus: String? = nil
     var contextTokens: Int? = nil
     var errorBanner: String? = nil
+    /// Latest answer to an inspect command (/prompt view state).
+    private(set) var inspection: PromptInspection? = nil
 
     private struct PendingText {
         var assistant = ""
@@ -53,6 +65,11 @@ final class SessionController {
     private var exitTask: Task<Void, Never>?
     private var flushTask: Task<Void, Never>?
     private(set) var spec: SessionSpec = .new
+
+    /// Hooks for SessionManager (background-runs + unread bookkeeping).
+    var onSessionOpened: ((String) -> Void)? = nil
+    var onRunFinished: (() -> Void)? = nil
+    var onRunStarted: (() -> Void)? = nil
 
     // MARK: lifecycle
 
@@ -111,26 +128,15 @@ final class SessionController {
         start(newSpec)
     }
 
-    /// "New chat": fresh session in this window. If a run is in flight it is
-    /// NOT killed — the old process detaches (stdin closes, the run finishes
-    /// and persists, then the process exits) while the window moves on.
-    func startNewChat() {
-        pumpTask?.cancel()
-        pumpTask = nil
-        exitTask?.cancel()
-        exitTask = nil
-        if let old = process {
-            let running = phase == .running
-            Task { running ? await old.detach() : await old.terminate() }
-        }
-        process = nil
-        start(.new)
-    }
-
     func stop() {
         tearDownProcess()
         flushTask?.cancel()
         flushTask = nil
+    }
+
+    /// Terminate the child process and stop all tasks (window close / delete).
+    func stopAndTerminate() async {
+        stop()
     }
 
     private func tearDownProcess() {
@@ -168,14 +174,18 @@ final class SessionController {
 
     // MARK: commands
 
-    func sendPrompt(_ text: String) {
+    func sendPrompt(_ text: String, wireSuffix: String? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, phase == .idle else { return }
         errorBanner = nil
         lastRunStatus = nil
         appendBlock(.userMessage(id: UUID(), text: trimmed), scope: nil)
         phase = .running
-        let (body, skill) = Self.splitSlashInvocation(trimmed, skills: skills)
+        onRunStarted?()
+        // wire text may carry extra context (e.g. review comments) while the
+        // transcript shows just what the user typed
+        let wire = wireSuffix.map { trimmed + $0 } ?? trimmed
+        let (body, skill) = Self.splitSlashInvocation(wire, skills: skills)
         Task { [process] in
             do {
                 try await process?.send(.prompt(text: body, skill: skill))
@@ -183,6 +193,39 @@ final class SessionController {
                 self.applyError("failed to send prompt: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Friendly one-line summary of a tool invocation for collapsed cards:
+    /// bash shows the command, web_search the query, file tools the path…
+    nonisolated static func toolSummary(name: String, args: JSONValue?) -> String {
+        guard case .object(let map) = args else { return "" }
+        func str(_ keys: String...) -> String? {
+            for key in keys {
+                if case .string(let s) = map[key], !s.isEmpty { return s }
+            }
+            return nil
+        }
+        var result: String
+        switch name {
+        case "bash":
+            result = str("command") ?? ""
+        case "web_search":
+            result = str("query").map { "\"\($0)\"" } ?? ""
+        case "web_fetch":
+            result = str("url") ?? ""
+        case "read_file", "read", "write_file", "write", "edit_file", "edit":
+            result = str("path", "file", "file_path") ?? ""
+        case "skill":
+            result = str("name").map { "/\($0)" } ?? ""
+        case "subagents":
+            result = str("query", "prompt", "description") ?? ""
+        default:
+            result = JSONValue.object(map).summary
+        }
+        if result.count > 96 {
+            result = String(result.prefix(93)) + "…"
+        }
+        return result
     }
 
     /// Parse a leading `/skillname` (matching a catalog skill) out of the
@@ -220,6 +263,19 @@ final class SessionController {
         Task { [process] in await process?.cancelRun() }
     }
 
+    /// Content of the latest completed assistant reply ("/copy"): text after
+    /// the last user message; tool cards may sit between text pieces, so all
+    /// assistant text from the final turn is joined in order.
+    func lastAssistantText() -> String? {
+        var pieces: [String] = []
+        for block in blocks.reversed() {
+            if case .assistant(_, let text) = block { pieces.append(text) }
+            if case .userMessage = block { break }
+        }
+        guard !pieces.isEmpty else { return nil }
+        return pieces.reversed().joined(separator: "\n\n")
+    }
+
     /// Test hook: performs sendPrompt's visible state changes without a live
     /// process, so reducer tests can drive apply(_:) deterministically.
     func testingInjectUserTurn(_ text: String) {
@@ -242,6 +298,7 @@ final class SessionController {
             skills = ev.skills ?? []
             blocks = Self.blocksFromHistory(ev.messages ?? [])
             phase = .idle
+            if let chatId = ev.chatId { onSessionOpened?(chatId) }
             NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
 
         case .messageDelta:
@@ -263,6 +320,9 @@ final class SessionController {
                 tool.callID = call.id
                 tool.name = call.function.name
                 tool.argsText = call.function.arguments?.pretty
+                if let args = call.function.arguments {
+                    tool.argsSummary = Self.toolSummary(name: tool.name, args: args)
+                }
                 appendBlock(.tool(tool), scope: scope)
             }
 
@@ -272,7 +332,10 @@ final class SessionController {
             mutateTool(id: ev.toolCallId ?? "", name: name, scope: scope) { tool in
                 tool.status = .running
                 tool.name = name
-                if let args = ev.args { tool.argsText = JSONValue.object(args).pretty }
+                if let args = ev.args {
+                    tool.argsText = JSONValue.object(args).pretty
+                    tool.argsSummary = Self.toolSummary(name: name, args: .object(args))
+                }
                 tool.workingDir = ev.workingDir
             }
 
@@ -314,6 +377,7 @@ final class SessionController {
             if scope == nil {
                 phase = .idle
                 lastRunStatus = ev.status
+                onRunFinished?()
                 NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
             }
 
@@ -322,9 +386,32 @@ final class SessionController {
             appendBlock(.error(id: UUID(), message: ev.error ?? "unknown error"), scope: scope)
             if scope == nil { phase = phase == .running ? .running : .idle }
 
+        case .sessionAssigned:
+            // fresh sessions are lazy: the store row appears on first prompt
+            if let id = ev.chatId, sessionID != id {
+                sessionID = id
+                if let n = ev.name, !n.isEmpty { sessionName = n }
+                onSessionOpened?(id)
+            }
+
+        case .inspect:
+            inspection = PromptInspection(
+                system: ev.system ?? "",
+                tools: ev.tools ?? [],
+                messages: ev.messages ?? [],
+                model: ev.model ?? model,
+                workingDir: ev.workingDir ?? workingDir,
+                takenAt: Date()
+            )
+
         case .unknown:
             break // forward compatibility: ignore events we don't know
         }
+    }
+
+    /// Ask the agent for the /prompt snapshot (works mid-run too).
+    func requestInspection() {
+        Task { [process] in try? await process?.send(.inspect) }
     }
 
     private func applyError(_ message: String) {
@@ -515,6 +602,9 @@ final class SessionController {
                     tool.callID = call.id
                     tool.name = call.function.name
                     tool.argsText = call.function.arguments?.pretty
+                    if let args = call.function.arguments {
+                        tool.argsSummary = toolSummary(name: tool.name, args: args)
+                    }
                     tool.status = .pending // resolved when the tool result message arrives
                     blocks.append(.tool(tool))
                     if !call.id.isEmpty { toolIndexByCallID[call.id] = blocks.count - 1 }

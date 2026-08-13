@@ -27,10 +27,56 @@ final class SessionListStore {
     private(set) var sessions: [SessionSummary] = []
     private(set) var loadError: String? = nil
 
+    /// Sessions that finished a run while not visible in any window, or were
+    /// marked unread manually. Persisted in ui.json.
+    private(set) var unreadIDs: Set<String> = [] {
+        didSet {
+            if unreadIDs != oldValue, observersStarted {
+                SettingsStore.shared.prefs.unreadSessionIDs = Array(unreadIDs).sorted()
+            }
+        }
+    }
+    /// Sessions with a run in flight right now (any window).
+    private(set) var runningIDs: Set<String> = []
+    /// Visibility refcounts (a session may be active in several windows).
+    private var visibleCounts: [String: Int] = [:]
+
+    func noteActiveSession(_ id: String?) {
+        if let id {
+            visibleCounts[id, default: 0] += 1
+            unreadIDs.remove(id)
+        }
+    }
+
+    /// A window stopped showing this session (switched away).
+    func noteSessionHidden(_ id: String?) {
+        guard let id, let count = visibleCounts[id] else { return }
+        if count > 1 { visibleCounts[id] = count - 1 } else { visibleCounts[id] = nil }
+    }
+
+    func runStarted(sessionID: String) {
+        runningIDs.insert(sessionID)
+    }
+
+    /// A run finished: mark unread only if the session isn't visible in any
+    /// window at that moment.
+    func runFinished(sessionID: String) {
+        runningIDs.remove(sessionID)
+        if visibleCounts[sessionID, default: 0] == 0 {
+            unreadIDs.insert(sessionID)
+        }
+    }
+
+    func markUnread(_ id: String) { unreadIDs.insert(id) }
+    func markRead(_ id: String) { unreadIDs.remove(id) }
+
+    func refreshFromRun() { refresh() }
+
     private var observersStarted = false
 
     func start() {
         guard !observersStarted else { return }
+        unreadIDs = Set(SettingsStore.shared.prefs.unreadSessionIDs)
         observersStarted = true
         refresh()
         NotificationCenter.default.addObserver(
@@ -87,6 +133,18 @@ final class SessionListStore {
         }
         sessions = rows
         loadError = nil
+    }
+
+    /// Delete sessions with zero messages (window-opened-but-never-prompted
+    /// strays from before lazy creation).
+    func deleteEmptySessions() {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+        sqlite3_exec(db, "DELETE FROM prompt_history WHERE session_id NOT IN (SELECT id FROM sessions)", nil, nil, nil)
+        sqlite3_exec(db, "DELETE FROM sessions WHERE id NOT IN (SELECT DISTINCT session_id FROM messages)", nil, nil, nil)
+        refresh()
+        unreadIDs = unreadIDs.filter { id in sessions.contains(where: { $0.id == id }) }
     }
 
     func delete(_ id: String) {

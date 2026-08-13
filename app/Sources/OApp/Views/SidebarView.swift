@@ -2,25 +2,33 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(\.openWindow) private var openWindow
-    let current: SessionController
+    @Bindable var manager: SessionManager
     @State private var list = SessionListStore.shared
     @State private var selection: String? = nil
+    @State private var editing = false
+    @State private var trashSet: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            Divider()
             if let error = list.loadError {
                 Text(error).font(.caption).foregroundStyle(.red).padding(8)
             }
-            sessionList
+            if editing {
+                editList
+                editBar
+            } else {
+                sessionList
+            }
         }
         .onAppear { list.start() }
         .onChange(of: selection) { _, newValue in
-            guard let id = newValue, id != current.sessionID else { return }
+            guard !editing, let id = newValue, id != manager.active.sessionID else { return }
             let dir = list.sessions.first(where: { $0.id == id })?.workingDir
-            current.restart(with: SessionSpec(sessionID: id, workingDir: dir.nilIfEmpty))
+            manager.switchTo(id, workingDir: dir.nilIfEmpty)
         }
-        .onChange(of: current.sessionID) { _, newValue in
+        .onChange(of: manager.active.sessionID) { _, newValue in
             selection = newValue
         }
     }
@@ -28,34 +36,102 @@ struct SidebarView: View {
     private var header: some View {
         HStack {
             Text("Sessions").font(.headline)
-            Spacer()
-            Button {
-                startNewChat()
-            } label: {
-                Image(systemName: "square.and.pencil")
+            if !list.unreadIDs.isEmpty {
+                Text("\(list.unreadIDs.count)")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.accentColor)
+                    .clipShape(Capsule())
+                    .help("\(list.unreadIDs.count) unread")
             }
-            .buttonStyle(.plain)
-            .help("New chat in this window (⌘N for a new window)")
+            Spacer()
+            if !editing {
+                Button {
+                    selection = nil
+                    manager.startNewChat()
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .buttonStyle(.plain)
+                .help("New chat in this window (⌘N for a new window)")
+                Menu {
+                    Button("Select…") { editing = true }
+                    Button("Delete Empty Sessions") { list.deleteEmptySessions() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 22)
+            } else {
+                Button("Done") {
+                    editing = false
+                    trashSet = []
+                }
+                .font(.callout)
+            }
         }
-    }
-
-    /// "New session" starts a fresh conversation in this window. An in-flight
-    /// run isn't killed: its process detaches, finishes, persists, and exits.
-    /// New *windows* stay under ⌘N.
-    private func startNewChat() {
-        selection = nil
-        current.startNewChat()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var sessionList: some View {
         List(selection: $selection) {
             ForEach(list.sessions) { session in
-                SessionRow(session: session, isCurrent: session.id == current.sessionID)
-                    .tag(session.id)
-                    .contextMenu { contextMenu(for: session) }
+                SessionRow(
+                    session: session,
+                    isCurrent: session.id == manager.active.sessionID,
+                    isUnread: list.unreadIDs.contains(session.id),
+                    isRunning: list.runningIDs.contains(session.id)
+                )
+                .tag(session.id)
+                .listRowSeparator(.hidden)
+                .contextMenu { contextMenu(for: session) }
             }
         }
         .listStyle(.sidebar)
+    }
+
+    private var editList: some View {
+        List(selection: $trashSet) {
+            ForEach(list.sessions) { session in
+                SessionRow(
+                    session: session,
+                    isCurrent: false,
+                    isUnread: list.unreadIDs.contains(session.id),
+                    isRunning: list.runningIDs.contains(session.id)
+                )
+                .tag(session.id)
+                .listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private var editBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack {
+                Button("Select All") {
+                    trashSet = Set(list.sessions.map(\.id))
+                }
+                .font(.caption)
+                Spacer()
+                Button("Delete (\(trashSet.count))", role: .destructive) {
+                    for id in trashSet {
+                        manager.sessionDeleted(id)
+                        list.delete(id)
+                    }
+                    trashSet = []
+                }
+                .font(.caption)
+                .disabled(trashSet.isEmpty)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
     }
 
     @ViewBuilder
@@ -64,8 +140,14 @@ struct SidebarView: View {
             openWindow(value: SessionSpec(sessionID: session.id,
                                           workingDir: session.workingDir.nilIfEmpty))
         }
+        if list.unreadIDs.contains(session.id) {
+            Button("Mark as Read") { list.markRead(session.id) }
+        } else {
+            Button("Mark as Unread") { list.markUnread(session.id) }
+        }
         Divider()
         Button("Delete", role: .destructive) {
+            manager.sessionDeleted(session.id)
             list.delete(session.id)
         }
     }
@@ -74,25 +156,51 @@ struct SidebarView: View {
 private struct SessionRow: View {
     let session: SessionSummary
     let isCurrent: Bool
+    let isUnread: Bool
+    let isRunning: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                if isCurrent {
-                    Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+        HStack(alignment: .top, spacing: 7) {
+            // indicator column (constant width): spinner = running in bg,
+            // blue ring = current in this window, blue filled = unread
+            Group {
+                if isRunning {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 10)
+                } else {
+                    indicator
                 }
+            }
+            .frame(width: 10)
+            .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 2) {
                 Text(session.displayTitle)
+                    .fontWeight(isUnread ? .semibold : .regular)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                HStack(spacing: 6) {
+                    Text(session.model).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(compactRelativeAge(session.updatedAt))
+                        .foregroundStyle(.primary.opacity(0.45))
+                }
+                .font(.caption2)
+                .foregroundStyle(.primary.opacity(0.6))
             }
-            HStack(spacing: 6) {
-                Text(session.model).lineLimit(1)
-                Spacer()
-                Text(session.updatedAt, style: .relative)
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var indicator: some View {
+        if isCurrent {
+            Circle().strokeBorder(Color.accentColor, lineWidth: 1.4).frame(width: 6, height: 6)
+        } else if isUnread {
+            Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+        } else {
+            Circle().fill(Color.clear).frame(width: 6, height: 6)
+        }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 struct UIPreferences: Codable, Equatable {
     var allowAllTools: Bool = true
@@ -7,6 +8,8 @@ struct UIPreferences: Codable, Equatable {
     var defaultSystemPrompt: String = ""
     var selectedModel: String = ""        // empty = o's last model
     var defaultWorkingDir: String = ""    // empty = home directory
+    var textScale: Double = 1.1           // 0.7…1.6, ⌘+/⌘- steps of 0.1 (default slightly larger)
+    var unreadSessionIDs: [String] = []   // persisted unread sidebar markers
 }
 
 /// App preferences at ~/.o/ui.json, applied to every new session process.
@@ -22,6 +25,30 @@ final class SettingsStore {
     var availableModels: [String] = []
     var modelFetchError: String? = nil
 
+    // MARK: text scale (⌘+ / ⌘-)
+
+    static let defaultTextScale = 1.1
+
+    func increaseTextScale() { prefs.textScale = min(1.6, (prefs.textScale * 10 + 1).rounded() / 10) }
+    func decreaseTextScale() { prefs.textScale = max(0.7, (prefs.textScale * 10 - 1).rounded() / 10) }
+    func resetTextScale() { prefs.textScale = Self.defaultTextScale }
+
+    /// Maps the scale onto DynamicTypeSize steps: every styled font in the
+    /// detail content (body, caption, monospaced variants) follows.
+    var dynamicTypeSize: DynamicTypeSize {
+        switch prefs.textScale {
+        case ..<0.75: return .xSmall
+        case ..<0.85: return .small
+        case ..<0.95: return .medium
+        case ..<1.05: return .large
+        case ..<1.15: return .xLarge
+        case ..<1.25: return .xxLarge
+        case ..<1.35: return .xxxLarge
+        case ..<1.45: return .accessibility1
+        default: return .accessibility2
+        }
+    }
+
     private init() { load() }
 
     private var prefsURL: URL {
@@ -32,6 +59,8 @@ final class SettingsStore {
         guard let data = try? Data(contentsOf: prefsURL),
               let decoded = try? JSONDecoder().decode(UIPreferences.self, from: data) else { return }
         prefs = decoded
+        // one-time migration: the original 1.0 default read small in chat
+        if prefs.textScale == 1.0 { prefs.textScale = Self.defaultTextScale }
     }
 
     private func save() {

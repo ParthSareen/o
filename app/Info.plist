@@ -28,6 +28,12 @@
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>o runs agent sessions whose tools read and write files in the working directory you choose.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>o runs agent sessions whose tools read and write files in the working directory you choose.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>o runs agent sessions whose tools read and write files in the working directory you choose.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

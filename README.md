@@ -19,6 +19,7 @@ Most of the code is adapted from the ollama repo, with imports rewritten to
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
 | `app/` | Native macOS app (SwiftUI). Bundles the agent core and talks to it over `o --pipe`. See `app/README.md`. |
+| `.agents/skills/` | Project skills. `update-o` runs the full build/test/package/install/ship loop for the app + CLI. |
 | `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
 | `types/model/` | Model capabilities and names |

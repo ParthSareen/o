@@ -257,18 +257,16 @@ struct DiffStoreTests {
             .replacingOccurrences(of: "/app", with: "") // tests run from package dir
         let store = DiffStore()
         store.setDirectory(repo)
-        await store.refresh()
+        await store.waitUntilLoaded()
         guard store.isRepo else {
             // non-git environment (e.g. CI tarball): nothing to assert
             return
         }
         #expect(store.loaded)
-        // repo has at least README or tracked files; with dirty tree changes is non-empty,
-        // clean tree is also a valid state
-        if store.changes.isEmpty {
-            #expect(store.diffText == "")
-        } else {
-            #expect(store.changes.allSatisfy { !$0.path.isEmpty })
+        // clean tree is a valid state; dirty tree produces sections
+        #expect(store.sections.allSatisfy { !$0.path.isEmpty })
+        if !store.sections.isEmpty {
+            #expect(store.totalAdded + store.totalRemoved > 0)
         }
     }
 
@@ -276,7 +274,565 @@ struct DiffStoreTests {
         let store = DiffStore()
         let tmp = NSTemporaryDirectory()
         store.setDirectory(tmp)
-        await store.refresh()
-        #expect(!store.isRepo || store.changes.isEmpty) // /tmp may be inside a repo on some systems; both states safe
+        await store.waitUntilLoaded()
+        #expect(!store.isRepo || store.sections.isEmpty) // /tmp may be inside a repo on some systems; both states safe
+    }
+}
+
+struct UtilTests {
+    @Test func compactRelativeAges() {
+        let now = Date()
+        #expect(compactRelativeAge(now.addingTimeInterval(-5), now: now) == "now")
+        #expect(compactRelativeAge(now.addingTimeInterval(-4 * 60), now: now) == "4m")
+        #expect(compactRelativeAge(now.addingTimeInterval(-9 * 3600 - 120), now: now) == "9h")
+        #expect(compactRelativeAge(now.addingTimeInterval(-40 * 86400), now: now) == "40d")
+        // future-ish dates clamp to "now"
+        #expect(compactRelativeAge(now.addingTimeInterval(60), now: now) == "now")
+    }
+}
+
+@MainActor
+struct InspectTests {
+    @Test func decodesAndAppliesInspectEvent() {
+        let c = SessionController()
+        c.apply(event(#"{"type":"session_opened","chatId":"s1","model":"m","messages":[]}"#))
+        c.apply(event(#"{"type":"inspect","chatId":"s1","model":"m","workingDir":"/tmp","system":"SYS","tools":[{"name":"bash","description":"run shell"}],"messages":[{"role":"user","content":"hi"}]}"#))
+        guard let snap = c.inspection else { Issue.record("no inspection"); return }
+        #expect(snap.system == "SYS")
+        #expect(snap.tools.map(\.name) == ["bash"])
+        #expect(snap.messages.count == 1)
+    }
+
+    @Test func encodesInspectCommand() throws {
+        let data = try JSONEncoder().encode(AgentCommand.inspect)
+        let dict = try JSONSerialization.jsonObject(with: data) as? [String: String]
+        #expect(dict == ["cmd": "inspect"])
+    }
+}
+
+struct DiffParsingTests {
+    let patch = """
+    diff --git a/api/client.go b/api/client.go
+    index 123..456 100644
+    --- a/api/client.go
+    +++ b/api/client.go
+    @@ -10,3 +10,4 @@ func f() {
+      context line
+    -old line
+    +new line
+    +another new line
+    diff --git a/deleted.txt b/deleted.txt
+    deleted file mode 100644
+    --- a/deleted.txt
+    +++ /dev/null
+    @@ -1,2 +0,0 @@
+    -gone
+    -also gone
+    """
+
+    @Test func sectionsHeaderAndThreading() {
+        let sections = DiffStore.parseDiffSections(patch, statuses: ["api/client.go": " M", "deleted.txt": " D"])
+        #expect(sections.count == 2)
+
+        let go = sections[0]
+        #expect(go.path == "api/client.go")
+        #expect(go.added == 2 && go.removed == 1)
+        // context at old/new 10; removed at old 11 (no newNo); added at new 11,12
+        let ctx = go.lines.first { $0.kind == .context }
+        #expect(ctx?.newNo == 10 && ctx?.oldNo == 10)
+        let del = go.lines.first { $0.kind == .removed }
+        #expect(del?.oldNo == 11 && del?.newNo == nil && del?.text == "old line")
+        let adds = go.lines.filter { $0.kind == .added }
+        #expect(adds.map(\.newNo) == [11, 12])
+
+        let delSec = sections[1]
+        #expect(delSec.added == 0 && delSec.removed == 2)
+        // meta noise (deleted file mode / index) is filtered out
+        #expect(!go.lines.contains { $0.text.hasPrefix("index ") })
+    }
+
+    @Test func hunkHeaderCountersResume() {
+        let multi = """
+        diff --git a/f.swift b/f.swift
+        @@ -1,2 +1,2 @@
+        -a
+        +b
+         keep
+        @@ -20,1 +20,2 @@
+        +x
+         tail
+        """
+        let s = DiffStore.parseDiffSections(multi, statuses: [:]).first!
+        let lines = s.lines.filter { $0.kind != .hunk }
+        #expect(lines.map(\.text) == ["a", "b", "keep", "x", "tail"])
+        #expect(lines.map(\.newNo) == [nil, 1, 2, 20, 21])
+    }
+}
+
+struct SyntaxHighlighterTests {
+    @Test func highlighterPreservesText() {
+        let line = "func main() { // say \"hi\" }"
+        #expect(String(DiffSyntax.highlight(line, path: "main.go").characters) == line)
+    }
+
+    @Test func keywordGetsSwiftUIColor() {
+        let rendered = DiffSyntax.highlight("return nil", path: "x.go")
+        var runs = rendered.runs.makeIterator()
+        var keywordColored = false
+        while let run = runs.next() {
+            let text = String(rendered[run.range].characters)
+            if text == "return" && run.attributes.foregroundColor != nil { keywordColored = true }
+        }
+        #expect(keywordColored)
+    }
+
+    @Test func plainLineKeepsContent() {
+        let text = "just some plain code"
+        #expect(String(DiffSyntax.highlight(text, path: "x.go").characters) == text)
+    }
+}
+
+struct DiffEdgeCaseTests {
+    @Test func binaryDetection() {
+        let text = Data("hello\nworld\n".utf8)
+        #expect(!DiffStore.isLikelyBinary(text))
+        var binary = Data([0x7f, 0x45, 0x4c, 0x46])  // ELF magic
+        binary.append(0x00)
+        #expect(DiffStore.isLikelyBinary(binary))
+        let undecodable = Data([0xff, 0xfe, 0xfd, 0xfc, 0xfb])
+        #expect(DiffStore.isLikelyBinary(undecodable))
+    }
+
+    @Test func binaryPatchLineIsMeta() {
+        let patch = """
+        diff --git a/data.bin b/data.bin
+        index 111..222 100644
+        Binary files a/data.bin and b/data.bin differ
+        """
+        let sections = DiffStore.parseDiffSections(patch, statuses: [:])
+        #expect(sections.count == 1)
+        #expect(sections[0].lines.count == 1)
+        #expect(sections[0].lines[0].kind == .meta)
+        #expect(sections[0].lines[0].text.contains("binary"))
+    }
+}
+
+@MainActor
+struct ReviewCommentTests {
+    @Test func promptAppendixFormatsLocationSnippetText() {
+        let store = DiffStore()
+        #expect(store.promptAppendix() == "") // empty when no comments
+
+        store.addComment(CodeComment(
+            id: UUID(), path: "agent/session.go", startLine: 646, endLine: 648,
+            snippet: "for _, tc := range …\n    if tc…", text: "can we avoid the copy here?"))
+        let appendix = store.promptAppendix()
+        #expect(appendix.contains("agent/session.go:646-648"))
+        #expect(appendix.contains("```"))
+        #expect(appendix.contains("can we avoid the copy here?"))
+    }
+
+    @Test func removeAndClearComments() {
+        let store = DiffStore()
+        let c = CodeComment(id: UUID(), path: "a.go", startLine: 1, endLine: 1, snippet: "", text: "t1")
+        store.addComment(c)
+        store.addComment(CodeComment(id: UUID(), path: "b.go", startLine: 2, endLine: 5, snippet: "", text: "t2"))
+        #expect(store.comments.count == 2)
+        store.removeComment(c.id)
+        #expect(store.comments.count == 1)
+        store.clearComments()
+        #expect(store.comments.isEmpty)
+        #expect(store.promptAppendix() == "")
+    }
+
+    @Test func locationStringShape() {
+        let single = CodeComment(id: UUID(), path: "x/y.swift", startLine: 7, endLine: 7, snippet: "", text: "")
+        #expect(single.location == "x/y.swift:7")
+        let range = CodeComment(id: UUID(), path: "x/y.swift", startLine: 7, endLine: 9, snippet: "", text: "")
+        #expect(range.location == "x/y.swift:7-9")
+    }
+}
+
+@MainActor
+struct DiffStoreContentAttributionTests {
+    /// Regression guard: every untracked section must contain ONLY its own
+    /// file's content (view identity collisions once bled other files in).
+    @Test func untrackedSectionsCarryOwnContent() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("odiff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dir = tmp.path
+
+        _ = runProcessForOutput("/usr/bin/git", ["init", "-q"], cwd: dir)
+
+        let fm = FileManager.default
+        let markers: [String: String] = [
+            "alpha.md": "ALPHA_ONLY_MARKER_001\nalpha body",
+            "beta.md": "BETA_ONLY_MARKER_002\nbeta body",
+        ]
+        for (name, body) in markers {
+            try body.write(to: tmp.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        _ = fm // silence
+
+        let store = DiffStore()
+        store.setDirectory(dir)
+        await store.waitUntilLoaded()
+        #expect(store.isRepo)
+        #expect(store.sections.count == 2)
+
+        for section in store.sections {
+            let marker = markers.keys.contains(section.path) ? markers[section.path]! : ""
+            let own = section.lines.filter { $0.kind == .added }.map(\.text)
+            #expect(own.contains(where: { $0.contains(marker.components(separatedBy: "\n").first!) }),
+                    "section \(section.path) missing its own content")
+            let other = markers.first(where: { $0.key != section.path })!.value.components(separatedBy: "\n").first!
+            #expect(!own.contains(where: { $0.contains(other) }),
+                    "section \(section.path) contains another file's content")
+        }
+    }
+}
+
+struct ToolSummaryTests {
+    @Test func knownToolsPickTheRightField() {
+        #expect(SessionController.toolSummary(name: "web_search", args: .object(["query": .string("ollama news")])) == "\"ollama news\"")
+        #expect(SessionController.toolSummary(name: "web_fetch", args: .object(["url": .string("https://x.dev/y")])) == "https://x.dev/y")
+        #expect(SessionController.toolSummary(name: "bash", args: .object(["command": .string("ls -la"), "timeout": .number(30)])) == "ls -la")
+        #expect(SessionController.toolSummary(name: "edit_file", args: .object(["path": .string("a.go"), "old_text": .string("x")])) == "a.go")
+        #expect(SessionController.toolSummary(name: "skill", args: .object(["name": .string("release-notes")])) == "/release-notes")
+        #expect(SessionController.toolSummary(name: "subagents", args: .object(["query": .string("find uses"), "context": .string("…")])) == "find uses")
+    }
+
+    @Test func unknownToolsFallBackToCompactJSON() {
+        let s = SessionController.toolSummary(name: "mystery", args: .object(["a": .string("b")]))
+        #expect(s.contains("a: b"))
+    }
+
+    @Test func longSummariesTruncate() {
+        let long = String(repeating: "x", count: 200)
+        let s = SessionController.toolSummary(name: "bash", args: .object(["command": .string(long)]))
+        #expect(s.count == 94 && s.hasSuffix("…"))
+    }
+}
+
+@MainActor
+struct TextScaleTests {
+    @Test func stepsClampAndMap() {
+        let s = SettingsStore.shared
+        s.resetTextScale()
+        #expect(s.prefs.textScale == 1.1)
+        #expect(s.dynamicTypeSize == .xLarge)
+        s.increaseTextScale(); #expect(s.dynamicTypeSize == .xxLarge)
+        s.increaseTextScale(); s.increaseTextScale(); s.increaseTextScale(); s.increaseTextScale()
+        #expect(s.prefs.textScale == 1.6) // clamped
+        #expect(s.dynamicTypeSize == .accessibility2)
+        s.resetTextScale()
+        s.decreaseTextScale(); s.decreaseTextScale(); #expect(s.dynamicTypeSize == .medium)
+        s.decreaseTextScale(); s.decreaseTextScale()
+        #expect(s.prefs.textScale == 0.7) // clamped
+        #expect(s.dynamicTypeSize == .xSmall)
+        s.resetTextScale()
+    }
+}
+
+struct MarkdownParserTests {
+    @Test func headingsBulletsRulesAndCode() {
+        let md = """
+        ### Option A — recommended
+        Some **bold** and `code` words.
+
+        - first bullet
+          - nested bullet
+        1. ordered one
+        2. ordered two
+        > a quote
+        ---
+        ```go
+        func f() {}
+        ```
+        tail paragraph
+        """
+        let blocks = MarkdownParser.blocks(md)
+        guard case .heading(let level, let text) = blocks[0] else { Issue.record("\(blocks)"); return }
+        #expect(level == 3 && text == "Option A — recommended")
+        guard case .paragraph(let p) = blocks[1] else { Issue.record("block1: \(blocks[1])"); return }
+        #expect(p.contains("**bold**")) // inline syntax preserved for the inline pass
+        #expect(blocks.count == 10)
+        guard case .bullet(let b1, let d1) = blocks[2], case .bullet(_, let d2) = blocks[3] else {
+            Issue.record("bullets: \(blocks)"); return
+        }
+        #expect(b1 == "first bullet" && d1 == 0 && d2 == 1)
+        guard case .numbered(let n, _) = blocks[4] else { Issue.record(); return }
+        #expect(n == 1)
+        guard case .quote = blocks[6], case .rule = blocks[7], case .code(let lang, let code) = blocks[blocks.count - 2],
+              case .paragraph = blocks[blocks.count - 1] else { Issue.record("\(blocks)"); return }
+        #expect(lang == "go" && code.contains("func f"))
+    }
+
+    @Test func inlineProducesBoldRuns() {
+        let a = MarkdownParser.inline("plain and **bold** here")
+        var sawBold = false
+        for run in a.runs where String(a[run.range].characters) == "bold" {
+            if run.attributes.inlinePresentationIntent?.contains(.stronglyEmphasized) == true { sawBold = true }
+        }
+        #expect(sawBold)
+    }
+
+    @Test func hashWithoutSpaceIsNotHeading() {
+        let blocks = MarkdownParser.blocks("#notheading")
+        guard case .paragraph = blocks.first else { Issue.record("\(blocks)"); return }
+    }
+}
+
+struct ChatCodeHighlightTests {
+    @Test func fenceLanguageDrivesColors() {
+        // swift keyword colored
+        let swiftLine = DiffSyntax.highlight("let x = 1 // ok", path: "snippet.swift")
+        var keywordColored = false
+        var commentDimmed = false
+        for run in swiftLine.runs {
+            let t = String(swiftLine[run.range].characters)
+            if t == "let" && run.attributes.foregroundColor != nil { keywordColored = true }
+            if t.contains("// ok") && run.attributes.foregroundColor == .secondary { commentDimmed = true }
+        }
+        #expect(keywordColored && commentDimmed)
+    }
+
+    @Test func shellFenceUsesHashComments() {
+        let line = DiffSyntax.highlight("export PATH=$PATH # setup", path: "snippet.sh")
+        var hashDimmed = false
+        for run in line.runs where String(line[run.range].characters).contains("# setup") {
+            if run.attributes.foregroundColor == .secondary { hashDimmed = true }
+        }
+        #expect(hashDimmed)
+    }
+}
+
+@MainActor
+struct SessionManagerTests {
+    @Test func switchingThreadsRetainsLiveControllers() {
+        let manager = SessionManager()
+        let first = SessionController()
+        let second = SessionController()
+        manager.testingRegister(first, id: "s1")
+        manager.testingRegister(second, id: "s2")
+
+        manager.switchTo("s1")
+        #expect(manager.active === first)
+        manager.switchTo("s2")
+        #expect(manager.active === second)
+        // back to s1: same instance — its process (if any) is untouched
+        manager.switchTo("s1")
+        #expect(manager.active === first)
+    }
+
+    @Test func finishWhileHiddenMarksUnread() {
+        let store = SessionListStore.shared
+        store.noteActiveSession("visible-1")
+        store.runFinished(sessionID: "visible-1")
+        #expect(!store.unreadIDs.contains("visible-1"))
+
+        store.runFinished(sessionID: "hidden-9")
+        #expect(store.unreadIDs.contains("hidden-9"))
+
+        // opening the unread session clears it
+        store.noteActiveSession("hidden-9")
+        #expect(!store.unreadIDs.contains("hidden-9"))
+    }
+
+    @Test func hiddenThenFinishedThenReadAgain() {
+        let store = SessionListStore.shared
+        store.runFinished(sessionID: "thread-x")
+        #expect(store.unreadIDs.contains("thread-x"))
+        store.noteSessionHidden("thread-x")
+        #expect(store.unreadIDs.contains("thread-x")) // hiding doesn't clear by itself
+        store.noteActiveSession("thread-x")
+        #expect(store.unreadIDs.isEmpty || !store.unreadIDs.contains("thread-x"))
+    }
+}
+
+@MainActor
+struct UnreadVisibilityTests {
+    @Test func switchAwayThenFinishMarksUnread() {
+        let store = SessionListStore.shared
+        // user is on the session, then switches away (hidden), then the
+        // background run finishes -> unread
+        store.noteActiveSession("sess-a")
+        store.runStarted(sessionID: "sess-a")
+        store.noteSessionHidden("sess-a")
+        store.runFinished(sessionID: "sess-a")
+        #expect(store.unreadIDs.contains("sess-a"))
+        #expect(!store.runningIDs.contains("sess-a"))
+        store.noteActiveSession("sess-a") // cleanup
+    }
+
+    @Test func runningThenFinishWhileVisibleIsNotUnread() {
+        let store = SessionListStore.shared
+        store.noteActiveSession("sess-b")
+        store.runStarted(sessionID: "sess-b")
+        #expect(store.runningIDs.contains("sess-b"))
+        store.runFinished(sessionID: "sess-b")
+        #expect(!store.unreadIDs.contains("sess-b"))
+        #expect(!store.runningIDs.contains("sess-b"))
+    }
+
+    @Test func visibilityRefcountAcrossWindows() {
+        let store = SessionListStore.shared
+        store.noteActiveSession("sess-c") // window 1 shows it
+        store.noteActiveSession("sess-c") // window 2 too
+        store.noteSessionHidden("sess-c") // window 1 switches away
+        // still visible in window 2: finishing here should NOT be unread
+        store.runFinished(sessionID: "sess-c")
+        #expect(!store.unreadIDs.contains("sess-c"))
+        store.noteSessionHidden("sess-c") // last window leaves
+        store.runFinished(sessionID: "sess-c")
+        #expect(store.unreadIDs.contains("sess-c"))
+        store.noteActiveSession("sess-c") // cleanup
+    }
+}
+
+@MainActor
+struct MarkUnreadTests {
+    @Test func manualUnreadRoundTripsAndViewingClears() {
+        let store = SessionListStore.shared
+        store.markUnread("manual-1")
+        #expect(store.unreadIDs.contains("manual-1"))
+        // viewing the session clears it (same rule as automatic unread)
+        store.noteActiveSession("manual-1")
+        #expect(!store.unreadIDs.contains("manual-1"))
+        store.noteSessionHidden("manual-1")
+
+        store.markUnread("manual-2")
+        store.markRead("manual-2")
+        #expect(!store.unreadIDs.contains("manual-2"))
+    }
+}
+
+@MainActor
+struct SessionAssignedTests {
+    @Test func assignedEventSetsIDAndFiresHook() {
+        let c = SessionController()
+        var reported: String? = nil
+        c.onSessionOpened = { reported = $0 }
+        c.apply(event(#"{"type":"session_opened","model":"m","messages":[]}"#))
+        #expect(c.sessionID == nil) // lazy sessions open with no id
+        c.apply(event(#"{"type":"session_assigned","chatId":"late-1","name":"lazy"}"#))
+        #expect(c.sessionID == "late-1")
+        #expect(c.sessionName == "lazy")
+        #expect(reported == "late-1")
+    }
+}
+
+@MainActor
+struct CopyCommandTests {
+    @Test func lastAssistantTextFindsLatestAnswer() {
+        let c = SessionController()
+        c.apply(event(#"{"type":"session_opened","chatId":"s1","model":"m","messages":[]}"#))
+        c.testingInjectUserTurn("q1")
+        for ev in [
+            #"{"type":"message_delta","content":"first answer"}"#,
+            #"{"type":"run_finished","status":"done"}"#,
+        ] { c.apply(event(ev)) }
+        // a second turn whose tool call lands between text and finish
+        c.testingInjectUserTurn("q2")
+        for ev in [
+            #"{"type":"message_delta","content":"second "}"#,
+            #"{"type":"tool_started","toolName":"bash","toolStatus":"running"}"#,
+            #"{"type":"tool_finished","toolName":"bash","toolStatus":"done"}"#,
+            #"{"type":"message_delta","content":"answer"}"#,
+            #"{"type":"run_finished","status":"done"}"#,
+        ] { c.apply(event(ev)) }
+        // tool calls split the reply into two pieces; /copy joins in order
+        #expect(c.lastAssistantText() == "second \n\nanswer")
+    }
+
+    @Test func lastAssistantFromBlocks() {
+        let messages: [AgentMessage] = [
+            AgentMessage(role: "user", content: "hi"),
+            AgentMessage(role: "assistant", content: "first answer"),
+            AgentMessage(role: "assistant", toolCalls: [AgentToolCall(id: "c1", function: .init(name: "bash"))]),
+            AgentMessage(role: "tool", content: "out", toolName: "bash", toolCallID: "c1"),
+            AgentMessage(role: "assistant", content: "final answer"),
+        ]
+        let blocks = SessionController.blocksFromHistory(messages)
+        let latest = blocks.reversed().compactMap { block -> String? in
+            if case .assistant(_, let text) = block { return text }
+            return nil
+        }.first
+        #expect(latest == "final answer")
+    }
+}
+
+struct FlattenTests {
+    @Test func textySegmentsMergeCodeStaysBoxed() {
+        let blocks = MarkdownParser.blocks("""
+        ## Head
+
+        para **bold** text
+
+        - one
+        - two
+
+        ```go
+        zap()
+        ```
+
+        tail
+        """)
+        let segs = MdSegments.segments(from: blocks)
+        #expect(segs.map { seg -> String in
+            switch seg {
+            case .texty(let b): return "texty(\(b.count))"
+            case .codey(let l, _): return "code(\(l))"
+            case .tabley: return "tbl"
+            }
+        } == ["texty(4)", "code(go)", "texty(1)"])
+        guard case .texty(let first) = segs[0] else { Issue.record(); return }
+        let flat = String(MdSegments.flatten(first, scale: 1.0).characters)
+        #expect(flat.contains("Head"))
+        #expect(flat.contains("\u{2022} one\n\u{2022} two")) // bullets contiguous
+        #expect(!flat.contains("**") && !flat.contains("##")) // markers gone
+    }
+}
+
+struct MarkdownTableTests {
+    @Test func tableParsesHeaderSeparatorRows() {
+        let md = """
+        | Tool | OK | Mode |
+        | --- | --- | --- |
+        | **Claude** | yes | `claude` |
+        | Codex | yes | `codex --oss` |
+
+        after
+        """
+        let blocks = MarkdownParser.blocks(md)
+        guard case .table(let headers, let rows) = blocks[0] else {
+            Issue.record("blocks: \(blocks)"); return
+        }
+        #expect(headers == ["Tool", "OK", "Mode"])
+        #expect(rows.count == 2)
+        #expect(rows[0][0] == "**Claude**") // inline syntax kept for cell parse
+        #expect(rows[1][2] == "`codex --oss`")
+        guard case .paragraph = blocks[1] else { Issue.record(); return }
+    }
+
+    @Test func pipeLineWithoutSeparatorIsParagraph() {
+        let blocks = MarkdownParser.blocks("| not | a table |")
+        guard case .paragraph = blocks.first else { Issue.record("\(blocks)"); return }
+    }
+
+    @Test func tableIsOwnSegmentForLayout() {
+        let blocks = MarkdownParser.blocks("before\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter")
+        let segs = MdSegments.segments(from: blocks)
+        #expect(segs.map { seg -> String in
+            switch seg { case .texty: return "t"; case .codey: return "c"; case .tabley: return "tbl" }
+        } == ["t", "tbl", "t"])
+    }
+
+    @Test func ruggedTablePadsShortRows() {
+        let blocks = MarkdownParser.blocks("| a | b | c |\n|---|---|---|\n| only | two |")
+        guard case .table(let headers, let rows) = blocks.first else { Issue.record(); return }
+        #expect(headers.count == 3 && rows[0].count == 3 && rows[0][2] == "")
     }
 }
