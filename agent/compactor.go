@@ -26,6 +26,25 @@ const (
 	defaultCompactionThreshold           = 0.8
 	compactOnlySummaryContextTokens      = 16000
 
+	// defaultCompactionChopHistoryTokens is the estimated conversation-history
+	// size above which tool exchanges in the archive are chopped down before
+	// building the summarization prompt. A summarization request at this scale
+	// is a guaranteed cache miss on the entire history, so shipping raw tool
+	// outputs and oversized arguments is disproportionately expensive for
+	// content the summary cannot preserve anyway.
+	defaultCompactionChopHistoryTokens = 300_000
+
+	// compactionChoppedToolCallArgumentRunes caps each string tool-call
+	// argument kept in a chopped archive. Short arguments (paths, commands)
+	// survive intact so the summary can still name what ran; long arguments
+	// (file bodies, patches) are cut to a head plus marker.
+	compactionChoppedToolCallArgumentRunes = 200
+
+	// compactionChopNotice is prepended to the summarization prompt when the
+	// archive was chopped, so the model reads omission markers as intentional
+	// redaction instead of missing data.
+	compactionChopNotice = "Note: tool outputs and long tool-call arguments in the archived messages were omitted to keep this prompt small. Markers show what was removed; tools are still identified by name and call ID. Summarize what each tool call aimed to do and accomplished rather than quoting raw output."
+
 	maxCompactionSummaryRunes = 16 * 1024
 
 	compactionSystemPrompt = "Summarize the archived part of an Ollama agent conversation. Preserve user goals, decisions, files, commands, tool results, and unresolved tasks needed to continue. Omit private reasoning and return only the summary."
@@ -51,6 +70,11 @@ type CompactionOptions struct {
 	ContextWindowTokens int
 	KeepUserTurns       int
 	Threshold           float64
+	// ChopToolExchangeHistoryTokens is the estimated history size in tokens
+	// above which tool exchanges in the archive are chopped before
+	// summarization. Zero uses the default; a negative value disables
+	// chopping entirely.
+	ChopToolExchangeHistoryTokens int
 }
 
 type CompactionRequest struct {
@@ -82,6 +106,11 @@ type CompactionResult struct {
 	Due       bool
 	Summary   string
 	Reason    string
+	// Chopped reports that the summarization prompt was built from a chopped
+	// archive (tool exchanges omitted) because the history exceeded the chop
+	// threshold. The resulting history is not affected either way: kept
+	// suffix messages are preserved verbatim.
+	Chopped bool
 }
 
 type SimpleCompactor struct {
@@ -115,14 +144,20 @@ func (c *SimpleCompactor) MaybeCompact(ctx context.Context, req CompactionReques
 		return result, nil
 	}
 
-	summary, err := c.summarize(ctx, req, previousSummary, archive)
+	var chopped bool
+	if limit := c.chopHistoryTokens(); limit >= 0 && estimateMessagesTokens(req.Messages) > limit {
+		archive, chopped = chopArchiveToolExchanges(archive)
+		result.Chopped = chopped
+	}
+
+	summary, err := c.summarize(ctx, req, previousSummary, archive, chopped)
 	if err != nil {
 		result.Reason = err.Error()
 		return result, err
 	}
 	summary = truncateCompactionSummary(strings.TrimSpace(summary))
 	if summary == "" {
-		summary, err = c.summarizeEmptyFallback(ctx, req, previousSummary, archive)
+		summary, err = c.summarizeEmptyFallback(ctx, req, previousSummary, archive, chopped)
 		if err != nil {
 			result.Reason = err.Error()
 			return result, err
@@ -207,6 +242,18 @@ func (c *SimpleCompactor) ShouldCompact(req CompactionRequest) (CompactionTrigge
 	return trigger, due
 }
 
+// chopHistoryTokens resolves the history size above which archive tool
+// exchanges are chopped. A negative configured value disables chopping.
+func (c *SimpleCompactor) chopHistoryTokens() int {
+	if c.Options.ChopToolExchangeHistoryTokens < 0 {
+		return -1
+	}
+	if c.Options.ChopToolExchangeHistoryTokens > 0 {
+		return c.Options.ChopToolExchangeHistoryTokens
+	}
+	return defaultCompactionChopHistoryTokens
+}
+
 func (c *SimpleCompactor) keepUserTurns(options map[string]any) int {
 	contextWindow := c.contextWindowTokens(options)
 	if contextWindow > 0 && contextWindow < compactOnlySummaryContextTokens {
@@ -235,10 +282,13 @@ func ResolveCompactionThreshold(configured float64) float64 {
 	return defaultCompactionThreshold
 }
 
-func (c *SimpleCompactor) summarize(ctx context.Context, req CompactionRequest, previousSummary string, archive []api.Message) (string, error) {
+func (c *SimpleCompactor) summarize(ctx context.Context, req CompactionRequest, previousSummary string, archive []api.Message, chopped bool) (string, error) {
 	body, err := compactionPrompt(previousSummary, archive, c.compactionPromptBodyBudgetTokens(req.Options))
 	if err != nil {
 		return "", err
+	}
+	if chopped {
+		body = compactionChopNotice + "\n\n" + body
 	}
 
 	chatReq := &api.ChatRequest{
@@ -277,10 +327,10 @@ func (c *SimpleCompactor) summarize(ctx context.Context, req CompactionRequest, 
 	return summary.String(), nil
 }
 
-func (c *SimpleCompactor) summarizeEmptyFallback(ctx context.Context, req CompactionRequest, previousSummary string, archive []api.Message) (string, error) {
+func (c *SimpleCompactor) summarizeEmptyFallback(ctx context.Context, req CompactionRequest, previousSummary string, archive []api.Message, chopped bool) (string, error) {
 	retry := req
 	retry.Think = &api.ThinkValue{Value: false}
-	summary, err := c.summarize(ctx, retry, previousSummary, archive)
+	summary, err := c.summarize(ctx, retry, previousSummary, archive, chopped)
 	if err == nil {
 		return summary, nil
 	}
@@ -291,7 +341,7 @@ func (c *SimpleCompactor) summarizeEmptyFallback(ctx context.Context, req Compac
 		return "", nil
 	}
 	retry.Think = nil
-	return c.summarize(ctx, retry, previousSummary, archive)
+	return c.summarize(ctx, retry, previousSummary, archive, chopped)
 }
 
 func isUnsupportedCompactionThinkError(err error) bool {
@@ -533,6 +583,53 @@ func largestCompactionContentMessage(messages []api.Message) int {
 		}
 	}
 	return idx
+}
+
+// chopArchiveToolExchanges returns a copy of archive with tool result bodies
+// fully omitted and oversized string tool-call arguments truncated to a head
+// plus marker. Tool names and call IDs are retained so the summarizer can
+// still report which tools ran; message roles and assistant prose are
+// untouched. The chopped copy is used only for the summarization prompt —
+// the resulting history keeps its suffix verbatim — and the input messages
+// are never mutated. The second return value reports whether anything was
+// actually chopped, so callers can note the redaction in the prompt.
+func chopArchiveToolExchanges(archive []api.Message) ([]api.Message, bool) {
+	chopped := make([]api.Message, len(archive))
+	didChop := false
+	for i, msg := range archive {
+		if IsCompactionToolResult(msg) || isCompactionToolCall(msg) {
+			chopped[i] = msg
+			continue
+		}
+		if msg.Role == "tool" && strings.TrimSpace(msg.Content) != "" {
+			msg.Content = truncateToolResultContentTo(msg.Content, 0)
+			didChop = true
+		}
+		if len(msg.ToolCalls) > 0 {
+			calls := make([]api.ToolCall, len(msg.ToolCalls))
+			for j, call := range msg.ToolCalls {
+				calls[j] = call
+				if call.Function.Arguments.Len() == 0 {
+					continue
+				}
+				args := api.NewToolCallFunctionArguments()
+				for key, value := range call.Function.Arguments.All() {
+					if s, ok := value.(string); ok && len([]rune(s)) > compactionChoppedToolCallArgumentRunes {
+						value = Truncate(s, TruncateConfig{
+							MaxRunes: compactionChoppedToolCallArgumentRunes,
+							Label:    "tool argument",
+						})
+						didChop = true
+					}
+					args.Set(key, value)
+				}
+				calls[j].Function.Arguments = args
+			}
+			msg.ToolCalls = calls
+		}
+		chopped[i] = msg
+	}
+	return chopped, didChop
 }
 
 func splitCompactionMessages(messages []api.Message, keepUserTurns int) (prefix []api.Message, previousSummary string, archive []api.Message, suffix []api.Message, keptUserTurns int, ok bool) {

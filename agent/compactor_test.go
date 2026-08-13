@@ -771,3 +771,216 @@ func TestSimpleCompactorCarriesPreviousToolSummaryAndPlacesNewSummaryBeforeKeptS
 		t.Fatalf("kept suffix = %#v", result.Messages)
 	}
 }
+func TestSimpleCompactorChopsToolExchangesForHugeHistory(t *testing.T) {
+	bigToolOutput := strings.Repeat("t", 40000)
+	bigArg := strings.Repeat("a", 40000)
+	client := &fakeClient{
+		responses: [][]api.ChatResponse{{
+			{Message: api.Message{Role: "assistant", Content: "summary"}},
+		}},
+	}
+	compactor := &SimpleCompactor{Client: client, Options: CompactionOptions{
+		ChopToolExchangeHistoryTokens: 1,
+	}}
+
+	oldArgs := api.NewToolCallFunctionArguments()
+	oldArgs.Set("path", "/tmp/big.txt")
+	oldArgs.Set("content", bigArg)
+	recentArgs := api.NewToolCallFunctionArguments()
+	recentArgs.Set("path", "/tmp/recent.txt")
+	recentArgs.Set("content", "recent file body")
+
+	messages := []api.Message{
+		{Role: "system", Content: "stay pinned"},
+		{Role: "user", Content: "old request"},
+		{Role: "assistant", ToolCalls: []api.ToolCall{{ID: "call-1", Function: api.ToolCallFunction{Name: "write", Arguments: oldArgs}}}},
+		{Role: "tool", ToolName: "write", ToolCallID: "call-1", Content: bigToolOutput},
+		{Role: "user", Content: "keep one"},
+		{Role: "assistant", ToolCalls: []api.ToolCall{{ID: "call-2", Function: api.ToolCallFunction{Name: "write", Arguments: recentArgs}}}},
+		{Role: "tool", ToolName: "write", ToolCallID: "call-2", Content: "recent tool output"},
+		{Role: "user", Content: "keep two"},
+		{Role: "assistant", Content: "recent answer two"},
+		{Role: "user", Content: "keep three"},
+		{Role: "assistant", Content: "recent answer three"},
+	}
+
+	result, err := compactor.MaybeCompact(context.Background(), CompactionRequest{
+		ChatID:   "chat-1",
+		Model:    "model",
+		Messages: messages,
+		Force:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Compacted {
+		t.Fatal("expected compaction")
+	}
+	if !result.Chopped {
+		t.Fatal("expected archive to be chopped")
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("summary requests = %d, want 1", len(client.requests))
+	}
+	body := client.requests[0].Messages[1].Content
+	if !strings.HasPrefix(body, compactionChopNotice) {
+		t.Fatalf("chopped prompt should start with the chop notice: %.120q", body)
+	}
+	if !strings.Contains(body, "[tool output truncated: output omitted") {
+		t.Fatal("chopped prompt should contain the tool output omission marker")
+	}
+	if !strings.Contains(body, "[tool argument truncated:") {
+		t.Fatal("chopped prompt should contain the tool argument truncation marker")
+	}
+	if strings.Contains(body, bigToolOutput) || strings.Contains(body, bigArg) {
+		t.Fatal("chopped prompt should not contain archived tool exchanges in full")
+	}
+	if !strings.Contains(body, "write") {
+		t.Fatal("chopped prompt should still identify tools by name")
+	}
+	if !strings.Contains(body, "/tmp/big.txt") {
+		t.Fatal("chopped prompt should keep short tool arguments like paths")
+	}
+
+	// The kept suffix must be verbatim, and the caller's history must be
+	// untouched by chopping.
+	foundRecentToolOutput := false
+	for _, msg := range result.Messages {
+		if msg.Content == "recent tool output" {
+			foundRecentToolOutput = true
+		}
+	}
+	if !foundRecentToolOutput {
+		t.Fatalf("kept suffix should retain the recent tool output verbatim: %#v", result.Messages)
+	}
+	if messages[3].Content != bigToolOutput {
+		t.Fatal("chopping must not mutate the request messages")
+	}
+	arg, _ := messages[2].ToolCalls[0].Function.Arguments.Get("content")
+	if arg != bigArg {
+		t.Fatal("chopping must not mutate the request tool call arguments")
+	}
+}
+
+func TestSimpleCompactorKeepsToolExchangesBelowChopThreshold(t *testing.T) {
+	client := &fakeClient{
+		responses: [][]api.ChatResponse{{
+			{Message: api.Message{Role: "assistant", Content: "summary"}},
+		}},
+	}
+	compactor := &SimpleCompactor{Client: client}
+
+	readArgs := api.NewToolCallFunctionArguments()
+	readArgs.Set("path", "/tmp/small.txt")
+
+	messages := []api.Message{
+		{Role: "system", Content: "stay pinned"},
+		{Role: "user", Content: "old request"},
+		{Role: "assistant", ToolCalls: []api.ToolCall{{ID: "call-1", Function: api.ToolCallFunction{Name: "read", Arguments: readArgs}}}},
+		{Role: "tool", ToolName: "read", ToolCallID: "call-1", Content: "small tool output"},
+		{Role: "user", Content: "keep one"},
+		{Role: "assistant", Content: "recent answer one"},
+		{Role: "user", Content: "keep two"},
+		{Role: "assistant", Content: "recent answer two"},
+		{Role: "user", Content: "keep three"},
+		{Role: "assistant", Content: "recent answer three"},
+	}
+
+	result, err := compactor.MaybeCompact(context.Background(), CompactionRequest{
+		ChatID:   "chat-1",
+		Model:    "model",
+		Messages: messages,
+		Force:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Compacted {
+		t.Fatal("expected compaction")
+	}
+	if result.Chopped {
+		t.Fatal("small history should not be chopped")
+	}
+	body := client.requests[0].Messages[1].Content
+	if strings.HasPrefix(body, compactionChopNotice) {
+		t.Fatal("chop notice should be absent below the threshold")
+	}
+	if !strings.Contains(body, "small tool output") {
+		t.Fatal("prompt should contain the archived tool output verbatim")
+	}
+}
+
+func TestChopArchiveToolExchanges(t *testing.T) {
+	bigOutput := strings.Repeat("x", 10000)
+	bigArg := strings.Repeat("b", 10000)
+	writeArgs := api.NewToolCallFunctionArguments()
+	writeArgs.Set("path", "/tmp/file.txt")
+	writeArgs.Set("content", bigArg)
+
+	summaryPair := CompactionSummaryMessages("earlier summary", false)
+	archive := append(append([]api.Message(nil), summaryPair...),
+		api.Message{Role: "assistant", Content: "prose", ToolCalls: []api.ToolCall{{ID: "call-1", Function: api.ToolCallFunction{Name: "write", Arguments: writeArgs}}}},
+		api.Message{Role: "tool", ToolName: "write", ToolCallID: "call-1", Content: bigOutput},
+		api.Message{Role: "user", Content: "plain user text"},
+	)
+
+	chopped, didChop := chopArchiveToolExchanges(archive)
+	if !didChop {
+		t.Fatal("expected chopping")
+	}
+	// Compaction's own summary pair is never chopped.
+	if chopped[0].ToolCalls[0].Function.Name != CompactionToolName {
+		t.Fatalf("summary pair assistant message changed: %#v", chopped[0])
+	}
+	if chopped[1].Content != summaryPair[1].Content {
+		t.Fatalf("summary pair tool result changed: %#v", chopped[1])
+	}
+	// Tool result bodies become omission markers.
+	if !strings.HasPrefix(chopped[3].Content, toolOutputFullOmissionPrefix) {
+		t.Fatalf("chopped tool result = %.80q", chopped[3].Content)
+	}
+	if chopped[3].ToolName != "write" || chopped[3].ToolCallID != "call-1" {
+		t.Fatalf("chopped tool result lost identity: %#v", chopped[3])
+	}
+	// Oversized string arguments truncate; short ones and prose survive.
+	arg, _ := chopped[2].ToolCalls[0].Function.Arguments.Get("content")
+	choppedArg, ok := arg.(string)
+	if !ok || !strings.Contains(choppedArg, "[tool argument truncated:") || len(choppedArg) >= len(bigArg) {
+		t.Fatalf("chopped argument = %.80q", arg)
+	}
+	path, _ := chopped[2].ToolCalls[0].Function.Arguments.Get("path")
+	if path != "/tmp/file.txt" {
+		t.Fatalf("short argument changed: %#v", path)
+	}
+	if chopped[2].Content != "prose" || chopped[4].Content != "plain user text" {
+		t.Fatal("prose should survive chopping")
+	}
+	// No mutation of the input.
+	if archive[3].Content != bigOutput {
+		t.Fatal("input archive was mutated")
+	}
+	orig, _ := archive[2].ToolCalls[0].Function.Arguments.Get("content")
+	if orig != bigArg {
+		t.Fatal("input tool call arguments were mutated")
+	}
+
+	plain := []api.Message{{Role: "user", Content: "hello"}}
+	if _, didChop := chopArchiveToolExchanges(plain); didChop {
+		t.Fatal("archive without tool exchanges should not report chopping")
+	}
+}
+
+func TestChopHistoryTokensResolver(t *testing.T) {
+	c := &SimpleCompactor{}
+	if got := c.chopHistoryTokens(); got != defaultCompactionChopHistoryTokens {
+		t.Fatalf("default chop history tokens = %d, want %d", got, defaultCompactionChopHistoryTokens)
+	}
+	c.Options.ChopToolExchangeHistoryTokens = 42
+	if got := c.chopHistoryTokens(); got != 42 {
+		t.Fatalf("configured chop history tokens = %d, want 42", got)
+	}
+	c.Options.ChopToolExchangeHistoryTokens = -1
+	if got := c.chopHistoryTokens(); got != -1 {
+		t.Fatalf("disabled chop history tokens = %d, want -1", got)
+	}
+}
