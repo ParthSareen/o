@@ -45,6 +45,15 @@ struct EventDecodeTests {
 }
 
 struct JSONValueTests {
+
+    @Test func encodesSetCommands() throws {
+        let compact = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentCommand.compact)) as? [String: String]
+        #expect(compact == ["cmd": "compact"])
+        let think = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentCommand.setThink("high"))) as? [String: String]
+        #expect(think == ["cmd": "set_think", "value": "high"])
+        let tools = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AgentCommand.setTools(on: false))) as? [String: String]
+        #expect(tools == ["cmd": "set_tools", "value": "off"])
+    }
     @Test func prettyPrintsObject() {
         let value = event(#"{"type":"tool_started","toolName":"bash","args":{"command":"ls -la","timeout":30}}"#).args
         let pretty = JSONValue.object(value ?? [:]).pretty
@@ -216,11 +225,20 @@ struct SlashAndSpecTests {
         #expect(text == "/nope hi")
     }
 
-    @Test func plainTextUnaffected() {
+    @Test func midLineSkillParses() {
+        // TUI parity: a /skill token anywhere in the prompt invokes the skill,
+        // and the surrounding text rides along as the skill's argument.
         let skills = [SkillInfo(name: "greet")]
-        let (text, skill) = SessionController.splitSlashInvocation("hello /greet", skills: skills)
+        let (text, skill) = SessionController.splitSlashInvocation("hello /greet again", skills: skills)
+        #expect(skill == "greet")
+        #expect(text == "hello again")
+    }
+
+    @Test func slashInsideURLStaysPlainText() {
+        let skills = [SkillInfo(name: "greet")]
+        let (text, skill) = SessionController.splitSlashInvocation("see https://x.com/greet", skills: skills)
         #expect(skill == nil)
-        #expect(text == "hello /greet")
+        #expect(text == "see https://x.com/greet")
     }
 
     @Test func promptCommandEncodesSkill() throws {

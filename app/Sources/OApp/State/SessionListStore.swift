@@ -93,8 +93,35 @@ final class SessionListStore {
         }
     }
 
-    private var dbPath: String {
-        NSHomeDirectory() + "/.o/sessions.db"
+    private var dbPath: String { Self.dbPath }
+    nonisolated static let dbPath = NSHomeDirectory() + "/.o/sessions.db"
+
+    /// Recent prompts for ↑ recall in the composer, most recent first — same
+    /// query shape as the TUI (session-scoped plus global entries).
+    nonisolated static func recentPrompts(sessionID: String?, limit: Int = 50) -> [String] {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_close(db) }
+        let sql: String
+        if sessionID != nil {
+            sql = "SELECT prompt FROM prompt_history WHERE session_id = ? OR session_id IS NULL ORDER BY id DESC LIMIT ?"
+        } else {
+            sql = "SELECT prompt FROM prompt_history ORDER BY id DESC LIMIT ?"
+        }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        if let sessionID { sqlite3_bind_text(stmt, 1, (sessionID as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        sqlite3_bind_int(stmt, sessionID == nil ? 1 : 2, Int32(limit))
+        var out: [String] = []
+        var last: String? = nil
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let c = sqlite3_column_text(stmt, 0) else { continue }
+            let prompt = String(cString: c)
+            if prompt != last { out.append(prompt) }   // consecutive dupes add noise
+            last = prompt
+        }
+        return out
     }
 
     func refresh() {

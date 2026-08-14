@@ -122,6 +122,9 @@ enum AgentCommand: Encodable, Sendable {
     case prompt(text: String, skill: String? = nil)
     case cancel
     case inspect
+    case compact
+    case setThink(String)
+    case setTools(on: Bool)
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -134,8 +137,16 @@ enum AgentCommand: Encodable, Sendable {
             try c.encode("cancel", forKey: .cmd)
         case .inspect:
             try c.encode("inspect", forKey: .cmd)
+        case .compact:
+            try c.encode("compact", forKey: .cmd)
+        case .setThink(let value):
+            try c.encode("set_think", forKey: .cmd)
+            try c.encode(value, forKey: .value)
+        case .setTools(let on):
+            try c.encode("set_tools", forKey: .cmd)
+            try c.encode(on ? "on" : "off", forKey: .value)
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case cmd, text, skill }
+    private enum CodingKeys: String, CodingKey { case cmd, text, skill, value }
 }

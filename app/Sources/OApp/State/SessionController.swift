@@ -46,6 +46,10 @@ final class SessionController {
     private(set) var lastRunStatus: String? = nil
     var contextTokens: Int? = nil
     var errorBanner: String? = nil
+    /// Tool availability for the current process; toggled via the composer /tools.
+    private(set) var toolsEnabled = true
+    /// Recent prompts (most recent first), for ↑ recall in the composer.
+    private(set) var promptHistory: [String] = []
     /// Latest answer to an inspect command (/prompt view state).
     private(set) var inspection: PromptInspection? = nil
 
@@ -185,6 +189,9 @@ final class SessionController {
         // wire text may carry extra context (e.g. review comments) while the
         // transcript shows just what the user typed
         let wire = wireSuffix.map { trimmed + $0 } ?? trimmed
+        if promptHistory.first != trimmed {
+            promptHistory.insert(trimmed, at: 0)
+        }
         let (body, skill) = Self.splitSlashInvocation(wire, skills: skills)
         Task { [process] in
             do {
@@ -228,16 +235,30 @@ final class SessionController {
         return result
     }
 
-    /// Parse a leading `/skillname` (matching a catalog skill) out of the
-    /// prompt. Unknown slash tokens are left as plain text.
+    /// Parse a `/skillname` token (matching a catalog skill) out of the
+    /// prompt — anywhere in the string, like the TUI. Unknown slash tokens
+    /// are left as plain text.
     nonisolated static func splitSlashInvocation(_ input: String, skills: [SkillInfo]) -> (text: String, skill: String?) {
-        guard input.hasPrefix("/") else { return (input, nil) }
-        let parts = input.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        guard let first = parts.first else { return (input, nil) }
-        let token = String(first.dropFirst())
-        guard skills.contains(where: { $0.name == token }) else { return (input, nil) }
-        let rest = parts.count > 1 ? String(parts[1]) : ""
-        return (rest, token)
+        var search = input.startIndex
+        while search < input.endIndex {
+            guard let slashAt = input.range(of: "/", range: search..<input.endIndex)?.lowerBound else { break }
+            // the slash must open a whitespace-delimited token
+            guard slashAt == input.startIndex || input[input.index(before: slashAt)] == " " else {
+                search = input.index(after: slashAt)
+                continue
+            }
+            let tokenEnd = input[slashAt...].firstIndex(where: { $0 == " " || $0 == "\n" }) ?? input.endIndex
+            let name = String(input[input.index(after: slashAt)..<tokenEnd])
+            if !name.isEmpty, skills.contains(where: { $0.name == name }) {
+                var text = input
+                text.removeSubrange(slashAt..<tokenEnd)
+                let cleaned = text.replacingOccurrences(of: "  ", with: " ")
+                    .trimmingCharacters(in: .whitespaces)
+                return (cleaned, name)
+            }
+            search = tokenEnd
+        }
+        return (input, nil)
     }
 
     /// Respawn this window's process against a different model. History is
@@ -263,6 +284,27 @@ final class SessionController {
         Task { [process] in await process?.cancelRun() }
     }
 
+    /// On-demand history compaction (TUI /compact). Progress and the result
+    /// surface as compaction events in the transcript.
+    func compactHistory() {
+        guard phase == .idle else { return }
+        Task { [process] in try? await process?.send(.compact) }
+    }
+
+    /// Thinking-mode override for subsequent turns (TUI /think).
+    func setThink(_ value: String) {
+        Task { [process] in try? await process?.send(.setThink(value)) }
+    }
+
+    /// Toggle tool availability (TUI /tools).
+    func toggleTools() {
+        toolsEnabled.toggle()
+        Task { [process, toolsEnabled] in try? await process?.send(.setTools(on: toolsEnabled)) }
+    }
+
+    private func refreshPromptHistory() {
+        promptHistory = SessionListStore.recentPrompts(sessionID: sessionID)
+    }
     /// Content of the latest completed assistant reply ("/copy"): text after
     /// the last user message; tool cards may sit between text pieces, so all
     /// assistant text from the final turn is joined in order.
@@ -298,6 +340,7 @@ final class SessionController {
             skills = ev.skills ?? []
             blocks = Self.blocksFromHistory(ev.messages ?? [])
             phase = .idle
+            refreshPromptHistory()
             if let chatId = ev.chatId { onSessionOpened?(chatId) }
             NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
 
@@ -391,6 +434,7 @@ final class SessionController {
             if let id = ev.chatId, sessionID != id {
                 sessionID = id
                 if let n = ev.name, !n.isEmpty { sessionName = n }
+                refreshPromptHistory()
                 onSessionOpened?(id)
             }
 

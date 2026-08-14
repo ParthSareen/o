@@ -6,11 +6,11 @@ package main
 //
 // Wire format — one JSON object per line.
 //
-// Commands (frontend -> o, stdin):
-//
 //	{"cmd":"prompt","text":"..."}   run one agent turn
 //	{"cmd":"cancel"}                cancel the in-flight run
-//
+//	{"cmd":"compact"}               compact the current history (TUI /compact)
+//	{"cmd":"set_think","value":..}  thinking mode: auto|on|off|low|medium|high|max
+//	{"cmd":"set_tools","value":..}  tools on|off (TUI /tools)
 // Events (o -> frontend, stdout): the agent.Event stream (message_delta,
 // thinking_delta, tool_call_detected/started/finished, compaction_*,
 // run_finished, error), preceded by a single session_opened event that
@@ -29,6 +29,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ type pipeCommand struct {
 	Cmd   string `json:"cmd"`
 	Text  string `json:"text,omitempty"`
 	Skill string `json:"skill,omitempty"` // activate a catalog skill for this turn ("/name" in the TUI)
+	Value string `json:"value,omitempty"` // argument for set_think / set_tools
 }
 
 // cmdMsg is a parsed command line or a read error.
@@ -123,6 +125,7 @@ type pipeRunner struct {
 	store        *sessionstore.Store
 	session      *coreagent.Session
 	registry     *coreagent.Registry
+	catalog      *coreagent.SkillCatalog
 	sink         *pipeEventSink
 	stderr       io.Writer
 	chatID       string
@@ -203,13 +206,13 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 		store:        store,
 		session:      session,
 		registry:     registry,
+		catalog:      catalog,
 		sink:         sink,
 		stderr:       stderr,
 		chatID:       chatID,
 		systemPrompt: systemPrompt,
 		history:      history,
 	}
-
 	var skills []coreagent.SkillInfo
 	if catalog != nil {
 		for _, s := range catalog.List() {
@@ -269,8 +272,16 @@ func (r *pipeRunner) commandLoop(ctx context.Context, stdin io.Reader, initialPr
 				// no run in flight; nothing to do
 			case "inspect":
 				r.emitInspect()
+			case "compact":
+				if !r.runManualCompaction(ctx, cmds) {
+					return 0
+				}
+			case "set_think":
+				r.setThink(m.cmd.Value)
+			case "set_tools":
+				r.setTools(m.cmd.Value)
 			default:
-				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect)", m.cmd.Cmd))
+				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect|compact|set_think|set_tools)", m.cmd.Cmd))
 			}
 		}
 	}
@@ -383,10 +394,16 @@ loop:
 				cancel()
 			case "inspect":
 				r.emitInspect()
+			case "set_think":
+				r.setThink(m.cmd.Value)
+			case "set_tools":
+				r.setTools(m.cmd.Value)
 			case "prompt":
 				r.emitError("a run is already in progress; wait for run_finished or send cancel")
+			case "compact":
+				r.emitError("wait for the current response to finish before compacting")
 			default:
-				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect)", m.cmd.Cmd))
+				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect|compact|set_think|set_tools)", m.cmd.Cmd))
 			}
 		case <-ctx.Done():
 			cancel()
@@ -443,4 +460,158 @@ func applyPipeDefaults(fs *flag.FlagSet, opts *cliOptions) {
 	if !seen["rlm"] {
 		opts.rlm = true
 	}
+}
+
+// runManualCompaction compacts the in-memory history on demand (the TUI's
+// /compact). It honors cancel while running. Returns false when stdin hit EOF
+// or the process is shutting down.
+func (r *pipeRunner) runManualCompaction(ctx context.Context, cmds chan cmdMsg) bool {
+	compactor := r.session.Compactor
+	if compactor == nil {
+		_ = r.sink.Emit(coreagent.Event{
+			Type:              coreagent.EventCompactionSkipped,
+			CompactionTrigger: coreagent.CompactionTriggerForce,
+			Content:           coreagent.CompactionSkippedMessage("compaction is unavailable"),
+		})
+		return true
+	}
+
+	messages := slices.Clone(r.history)
+	var tools api.Tools
+	if !r.session.DisableTools {
+		tools = r.registry.Tools()
+	}
+	budget := coreagent.NewPromptBudget(
+		compactor.ContextWindowTokens(r.opts.Options),
+		coreagent.ResolveCompactionThreshold(compactor.Threshold()),
+		r.systemPrompt,
+		tools,
+		r.opts.Format,
+	)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type compactResult struct {
+		res coreagent.CompactionResult
+		err error
+	}
+	done := make(chan compactResult, 1)
+	_ = r.sink.Emit(coreagent.Event{Type: coreagent.EventCompactionStarted, CompactionTrigger: coreagent.CompactionTriggerForce})
+	go func() {
+		res, err := compactor.MaybeCompact(runCtx, coreagent.CompactionRequest{
+			ChatID:    r.chatID,
+			Model:     r.opts.Model,
+			Messages:  messages,
+			Options:   r.opts.Options,
+			KeepAlive: r.opts.KeepAlive,
+			Force:     true,
+			Budget:    budget,
+			Progress: func(p coreagent.CompactionProgress) {
+				_ = r.sink.Emit(coreagent.Event{Type: coreagent.EventCompactionProgress, Tokens: p.Tokens})
+			},
+		})
+		done <- compactResult{res, err}
+	}()
+
+	eof := false
+	var result compactResult
+loop:
+	for {
+		select {
+		case result = <-done:
+			break loop
+		case m, ok := <-cmds:
+			if !ok {
+				eof = true
+				cmds = nil
+				continue
+			}
+			if m.err != nil {
+				r.emitError("invalid command: " + m.err.Error())
+				continue
+			}
+			switch m.cmd.Cmd {
+			case "cancel":
+				cancel()
+			case "inspect":
+				r.emitInspect()
+			default:
+				r.emitError("compaction in progress; send cancel to abort")
+			}
+		case <-ctx.Done():
+			cancel()
+			cmds = nil
+		}
+	}
+
+	if result.err == nil && result.res.Compacted {
+		r.history = result.res.Messages
+		_ = r.sink.Emit(coreagent.Event{
+			Type:              coreagent.EventCompacted,
+			CompactionTrigger: coreagent.CompactionTriggerForce,
+			Content:           result.res.Summary,
+		})
+		return true
+	}
+	reason := result.res.Reason
+	if result.err != nil {
+		reason = result.err.Error()
+	}
+	_ = r.sink.Emit(coreagent.Event{
+		Type:              coreagent.EventCompactionSkipped,
+		CompactionTrigger: coreagent.CompactionTriggerForce,
+		Content:           coreagent.CompactionSkippedMessage(reason),
+	})
+	return !eof && ctx.Err() == nil
+}
+
+// setThink applies a thinking-mode override (the TUI's /think) for subsequent
+// turns. A run already in flight keeps its original setting.
+func (r *pipeRunner) setThink(value string) {
+	think, err := parsePipeThinkValue(value)
+	if err != nil {
+		r.emitError(err.Error())
+		return
+	}
+	r.opts.Think = think
+}
+
+// parsePipeThinkValue mirrors the TUI's /think argument parsing.
+func parsePipeThinkValue(value string) (*api.ThinkValue, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto", "default", "unset":
+		return nil, nil
+	case "on", "true", "think", "thinking":
+		return &api.ThinkValue{Value: true}, nil
+	case "off", "false", "nothink", "no-think":
+		return &api.ThinkValue{Value: false}, nil
+	case "low", "medium", "high", "max":
+		return &api.ThinkValue{Value: strings.ToLower(strings.TrimSpace(value))}, nil
+	default:
+		return nil, fmt.Errorf("invalid think value %q (want auto|on|off|low|medium|high|max)", value)
+	}
+}
+
+// setTools toggles tool availability (the TUI's /tools) and regenerates the
+// system prompt to match, same as the TUI does.
+func (r *pipeRunner) setTools(value string) {
+	var disable bool
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on":
+		disable = false
+	case "off":
+		disable = true
+	default:
+		r.emitError(fmt.Sprintf("invalid tools value %q (want on|off)", value))
+		return
+	}
+	r.session.DisableTools = disable
+	r.opts.ToolsDisabled = disable
+	r.systemPrompt = agentSystemPromptWithWorkingDir(
+		r.opts.Model,
+		r.opts.System,
+		agentSkillSystemContext(r.catalog, r.registry, disable),
+		r.session.WorkingDir,
+	)
 }

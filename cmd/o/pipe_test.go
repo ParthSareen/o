@@ -553,3 +553,128 @@ func TestPipeEmptySessionsNeverPersist(t *testing.T) {
 		t.Fatalf("walked-away session must not persist; got %+v", metas)
 	}
 }
+
+func TestPipeSetThinkAppliesToNextRun(t *testing.T) {
+	fc := &fakeClient{responses: [][]api.ChatResponse{textChunks("one"), textChunks("two"), textChunks("three")}}
+	h := startPipe(t, fc, &coreagent.Registry{})
+
+	h.promptAndWait(t, "first")
+	if fc.requests[0].Think != nil {
+		t.Fatalf("default think = %#v, want nil", fc.requests[0].Think)
+	}
+
+	h.send(t, `{"cmd":"set_think","value":"high"}`)
+	h.promptAndWait(t, "second")
+	think := fc.requests[1].Think
+	if think == nil || think.Value != "high" {
+		t.Fatalf("think after set_think high = %#v", think)
+	}
+
+	h.send(t, `{"cmd":"set_think","value":"off"}`)
+	h.promptAndWait(t, "third")
+	if think := fc.requests[2].Think; think == nil || think.Value != false {
+		t.Fatalf("think after set_think off = %#v", think)
+	}
+
+	h.send(t, `{"cmd":"set_think","value":"bogus"}`)
+	h.waitFor(func(ev coreagent.Event) bool {
+		return ev.Type == coreagent.EventError && strings.Contains(ev.Error, "invalid think value")
+	})
+	h.close(t)
+}
+
+func TestPipeSetToolsTogglesRequestTools(t *testing.T) {
+	registry := &coreagent.Registry{}
+	registry.Register(&upperTool{})
+	fc := &fakeClient{responses: [][]api.ChatResponse{textChunks("one"), textChunks("two"), textChunks("three")}}
+	h := startPipe(t, fc, registry)
+
+	h.promptAndWait(t, "first")
+	if got := len(fc.requests[0].Tools); got != 1 {
+		t.Fatalf("tools on default request = %d, want 1", got)
+	}
+
+	h.send(t, `{"cmd":"set_tools","value":"off"}`)
+	h.promptAndWait(t, "second")
+	if got := len(fc.requests[1].Tools); got != 0 {
+		t.Fatalf("tools after set_tools off = %d, want 0", got)
+	}
+
+	h.send(t, `{"cmd":"set_tools","value":"on"}`)
+	h.promptAndWait(t, "third")
+	if got := len(fc.requests[2].Tools); got != 1 {
+		t.Fatalf("tools after set_tools on = %d, want 1", got)
+	}
+
+	h.send(t, `{"cmd":"set_tools","value":"bogus"}`)
+	h.waitFor(func(ev coreagent.Event) bool {
+		return ev.Type == coreagent.EventError && strings.Contains(ev.Error, "invalid tools value")
+	})
+	h.close(t)
+}
+
+func TestPipeManualCompaction(t *testing.T) {
+	// three turns so the default keep-user-turns window leaves something to archive
+	fc := &fakeClient{responses: [][]api.ChatResponse{
+		textChunks("one"), textChunks("two"), textChunks("three"),
+		textChunks("the summary"),
+	}}
+	h := startPipe(t, fc, &coreagent.Registry{})
+	h.promptAndWait(t, "turn 1")
+	h.promptAndWait(t, "turn 2")
+	h.promptAndWait(t, "turn 3")
+
+	h.send(t, `{"cmd":"compact"}`)
+	started := h.waitFor(func(ev coreagent.Event) bool {
+		return ev.Type == coreagent.EventCompactionStarted
+	})
+	if started.CompactionTrigger != coreagent.CompactionTriggerForce {
+		t.Fatalf("compaction trigger = %q, want force", started.CompactionTrigger)
+	}
+	done := h.waitFor(func(ev coreagent.Event) bool { return ev.Type == coreagent.EventCompacted })
+	if !strings.Contains(done.Content, "the summary") {
+		t.Fatalf("compacted summary = %q", done.Content)
+	}
+
+	// next run must go out on the compacted history, not the pre-compaction one
+	fc.responses = append(fc.responses, textChunks("four"))
+	h.promptAndWait(t, "turn 4")
+	last := fc.requests[len(fc.requests)-1]
+	var sawSummaryPair bool
+	for _, m := range last.Messages {
+		if m.ToolCallID == coreagent.CompactionToolCallID {
+			sawSummaryPair = true
+		}
+	}
+	if !sawSummaryPair {
+		t.Fatalf("post-compaction request lacks the summary tool pair: %+v", last.Messages)
+	}
+	h.close(t)
+}
+
+func TestPipeManualCompactionNothingToCompact(t *testing.T) {
+	fc := &fakeClient{responses: [][]api.ChatResponse{textChunks("one")}}
+	h := startPipe(t, fc, &coreagent.Registry{})
+
+	// no turns yet — nothing to archive
+	h.send(t, `{"cmd":"compact"}`)
+	ev := h.waitFor(func(ev coreagent.Event) bool {
+		return ev.Type == coreagent.EventCompactionSkipped
+	})
+	if ev.Content != "nothing to compact" {
+		t.Fatalf("skipped content = %q", ev.Content)
+	}
+
+	// the pipe stays usable afterwards
+	evs := h.promptAndWait(t, "still works")
+	var deltas string
+	for _, e := range evs {
+		if e.Type == coreagent.EventMessageDelta {
+			deltas += e.Content
+		}
+	}
+	if deltas != "one" {
+		t.Fatalf("deltas = %q", deltas)
+	}
+	h.close(t)
+}
