@@ -32,7 +32,7 @@ struct UserMessageRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(Color.accentColor.opacity(0.12))
+            .background(Color.primary.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -59,7 +59,7 @@ struct ThinkingRow: View {
             } label: {
                 Label("thinking", systemImage: expanded ? "chevron.down" : "chevron.right")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             if expanded {
@@ -86,6 +86,10 @@ struct ToolCallRow: View {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
                     statusIcon
                     Text(tool.name)
                         .font(ChatFont.mono(scale * 0.96))
@@ -101,12 +105,9 @@ struct ToolCallRow: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 7)
+                .padding(.vertical, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -117,9 +118,6 @@ struct ToolCallRow: View {
                         Label(dir, systemImage: "folder")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                    }
-                    if let args = tool.argsText {
-                        detailSection("arguments", text: args)
                     }
                     if let result = tool.result {
                         detailSection("result", text: result)
@@ -154,7 +152,7 @@ struct ToolCallRow: View {
         let (name, color): (String, Color) = {
             switch tool.status {
             case .pending: return ("circle.dotted", .secondary.opacity(0.6))
-            case .running: return ("circle.dotted", Color.accentColor)
+            case .running: return ("circle.dotted", Color.primary.opacity(0.7))
             case .done: return ("checkmark.circle", Color.primary.opacity(0.45))
             case .failed: return ("xmark.circle.fill", .red)
             case .denied: return ("hand.raised", Color.primary.opacity(0.45))
@@ -181,14 +179,11 @@ struct ToolCallRow: View {
             Text(label)
                 .font(ChatFont.detail(scale * 0.9))
                 .foregroundStyle(.tertiary)
-            ScrollView {
-                Text(text)
-                    .font(ChatFont.detailMono(scale))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxHeight: 220)
+            Text(text)
+                .font(ChatFont.detailMono(scale))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

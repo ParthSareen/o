@@ -40,10 +40,10 @@ struct SidebarView: View {
                 Text("\(list.unreadIDs.count)")
                     .font(.caption2)
                     .fontWeight(.semibold)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.background)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1)
-                    .background(Color.accentColor)
+                    .background(Color.primary)
                     .clipShape(Capsule())
                     .help("\(list.unreadIDs.count) unread")
             }
@@ -61,10 +61,12 @@ struct SidebarView: View {
                     Button("Select…") { editing = true }
                     Button("Delete Empty Sessions") { list.deleteEmptySessions() }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: "ellipsis")
+                        .padding(.horizontal, 6)
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 22)
+                .menuIndicator(.hidden)
+                .fixedSize()
             } else {
                 Button("Done") {
                     editing = false
@@ -92,6 +94,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .tint(.gray)
     }
 
     private var editList: some View {
@@ -108,6 +111,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .tint(.gray)
     }
 
     private var editBar: some View {
@@ -196,9 +200,9 @@ private struct SessionRow: View {
     @ViewBuilder
     private var indicator: some View {
         if isCurrent {
-            Circle().strokeBorder(Color.accentColor, lineWidth: 1.4).frame(width: 6, height: 6)
+            Circle().strokeBorder(Color.primary, lineWidth: 1.4).frame(width: 6, height: 6)
         } else if isUnread {
-            Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+            Circle().fill(Color.primary).frame(width: 6, height: 6)
         } else {
             Circle().fill(Color.clear).frame(width: 6, height: 6)
         }

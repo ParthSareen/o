@@ -33,7 +33,10 @@ go build -trimpath -ldflags "-s -w" -o "$CONTENTS/Resources/o-core" ./cmd/o
 
 echo "== building app shell (swift, release) =="
 cd "$ROOT/app"
-swift build -c release 2>&1 | tail -1
+BUILD_LOG=$(mktemp)
+trap 'rm -f "$BUILD_LOG"' EXIT
+swift build -c release >"$BUILD_LOG" 2>&1 || { cat "$BUILD_LOG"; exit 1; }
+tail -1 "$BUILD_LOG"
 cp "$ROOT/app/.build/release/OApp" "$CONTENTS/MacOS/OApp"
 cp "$ROOT/app/Info.plist" "$CONTENTS/Info.plist"
 

@@ -81,9 +81,9 @@ extension EnvironmentValues {
 /// Chat-area fonts, multiplied by the scale environment value.
 enum ChatFont {
     static func prose(_ scale: Double) -> Font { .system(size: 13.5 * scale) }
-    static func mono(_ scale: Double) -> Font { .system(size: 12.5 * scale, design: .monospaced) }
+    static func mono(_ scale: Double) -> Font { .system(size: 13.5 * scale, design: .monospaced) }
     static func detail(_ scale: Double) -> Font { .system(size: 11.5 * scale) }
-    static func detailMono(_ scale: Double) -> Font { .system(size: 11 * scale, design: .monospaced) }
+    static func detailMono(_ scale: Double) -> Font { .system(size: 11.5 * scale, design: .monospaced) }
     static func heading(_ level: Int, _ scale: Double) -> Font {
         let base: Double = switch level {
         case 1: 20.5

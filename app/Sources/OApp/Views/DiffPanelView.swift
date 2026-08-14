@@ -163,7 +163,7 @@ struct ReviewSurface: View {
             if let d = draft, d.phase == .anchored, d.path == section.path, lineAnchor(line) == d.start {
                 Text("＋ again on this line for a single-line comment, or ＋ on another line to set the range · esc to cancel")
                     .font(.caption2)
-                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                    .foregroundStyle(.secondary)
                     .padding(.leading, 70)
                     .padding(.vertical, 2)
             }
@@ -401,9 +401,9 @@ struct DiffReviewLineRow: View {
                     Button(action: onAdd) {
                         Image(systemName: "plus")
                             .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.primary)
                             .frame(width: 16, height: 16)
-                            .background(Color.accentColor)
+                            .background(Color.primary.opacity(0.1))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                     .buttonStyle(.plain)
@@ -465,17 +465,17 @@ struct DiffReviewLineRow: View {
 
     private var edgeColor: Color {
         switch highlight {
-        case .anchor, .draftRange: return Color.accentColor
-        case .commented: return Color.accentColor.opacity(0.7)
+        case .anchor, .draftRange: return Color.primary
+        case .commented: return Color.primary.opacity(0.5)
         case .none: return .clear
         }
     }
 
     private var background: Color {
         switch highlight {
-        case .anchor: return Color.accentColor.opacity(0.22)
-        case .draftRange: return Color.accentColor.opacity(0.12)
-        case .commented: return Color.accentColor.opacity(0.06)
+        case .anchor: return Color.primary.opacity(0.16)
+        case .draftRange: return Color.primary.opacity(0.09)
+        case .commented: return Color.primary.opacity(0.05)
         case .none:
             switch line.kind {
             case .added: return .green.opacity(0.13)
@@ -553,7 +553,7 @@ private struct CommentBubbleRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "text.bubble.fill")
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(.secondary)
                 .font(.caption)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
@@ -574,7 +574,7 @@ private struct CommentBubbleRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.accentColor.opacity(0.07))
+        .background(Color.primary.opacity(0.05))
         .padding(.vertical, 2)
     }
 }

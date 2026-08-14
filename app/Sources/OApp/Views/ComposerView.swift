@@ -10,10 +10,9 @@ struct ComposerView: View {
     @FocusState private var focused: Bool
 
     private var slashQuery: String? {
-        guard draft.hasPrefix("/") else { return nil }
-        let token = draft.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            .first.map(String.init) ?? draft
-        guard !token.contains(" ") else { return nil }
+        // trailing whitespace-delimited token, so skills complete mid-line too
+        guard let token = draft.split(whereSeparator: \.isWhitespace).last,
+              token.hasPrefix("/") else { return nil }
         return String(token.dropFirst())
     }
 
@@ -29,16 +28,62 @@ struct ComposerView: View {
             if !diffStore.comments.isEmpty {
                 commentChips
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                editor
-                actionButton
-            }
-            statusBar
+            card
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
+        .padding(.leading, 16)
+        .padding(.trailing, 20)
+        .padding(.bottom, 16)
         .onAppear { focused = true }
         .onChange(of: slashQuery) { _, q in slashOpen = q != nil && !filteredSkills.isEmpty }
+    }
+
+    /// The bordered composer card: editor on top, control row below.
+    private var card: some View {
+        VStack(spacing: 6) {
+            editor
+            controlRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(focused ? Color.primary.opacity(0.45) : Color.primary.opacity(0.15),
+                        lineWidth: focused ? 1.5 : 1)
+        )
+        .popover(isPresented: $slashOpen, attachmentAnchor: .point(.topLeading), arrowEdge: .bottom) {
+            SlashPalette(skills: filteredSkills) { skill in
+                insertSkill(skill)
+                focused = true
+            }
+        }
+    }
+
+    private var controlRow: some View {
+        HStack(spacing: 10) {
+            modelMenu
+            Spacer()
+            if let note = noteFlash {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+                    .lineLimit(1)
+            } else if copiedFlash {
+                Text("copied ✓")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
+            if controller.phase == .running, let tokens = controller.contextTokens {
+                Text("ctx \(tokens) tok")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            phaseLabel
+            actionButton
+        }
     }
 
     /// Staged review comments — they ride with the next prompt.
@@ -46,7 +91,7 @@ struct ComposerView: View {
         HStack(spacing: 6) {
             Image(systemName: "text.bubble.fill")
                 .font(.caption2)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(diffStore.comments) { comment in
@@ -63,7 +108,7 @@ struct ComposerView: View {
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.accentColor.opacity(0.10))
+                        .background(Color.primary.opacity(0.06))
                         .clipShape(Capsule())
                     }
                 }
@@ -107,31 +152,41 @@ struct ComposerView: View {
                 }
                 .onKeyPress(keys: [.escape], phases: .down) { _ in
                     if slashOpen { slashOpen = false; return .handled }
+                    // TUI parity: Esc cancels an in-flight run
+                    if controller.phase == .running { controller.cancelRun(); return .handled }
                     return .ignored
                 }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(focused ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.15),
-                        lineWidth: focused ? 1.5 : 1)
-        )
-        .popover(isPresented: $slashOpen, arrowEdge: .bottom) {
-            SlashPalette(skills: filteredSkills) { skill in
-                insertSkill(skill)
-                focused = true
-            }
+                .onKeyPress(keys: [.upArrow], phases: .down) { _ in recallHistory(older: true) }
+                .onKeyPress(keys: [.downArrow], phases: .down) { _ in recallHistory(older: false) }
         }
     }
 
     private func insertSkill(_ skill: SkillInfo?) {
         slashOpen = false
         guard let skill else { return }
-        let rest = draft.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        draft = "/\(skill.name) " + (rest.count > 1 ? String(rest[1]) : "")
+        guard let range = draft.range(of: #"/[^\s]*$"#, options: .regularExpression) else { return }
+        draft.replaceSubrange(range, with: "/\(skill.name) ")
+    }
+
+    // MARK: prompt history (TUI parity: ↑/↓ recall once the draft is empty)
+
+    @State private var historyIndex: Int? = nil
+    @State private var historySavedDraft = ""
+
+    private func recallHistory(older: Bool) -> KeyPress.Result {
+        let history = controller.promptHistory
+        guard !history.isEmpty, draft.isEmpty || historyIndex != nil else { return .ignored }
+        var index = (historyIndex ?? -1) + (older ? 1 : -1)
+        if index < 0 {
+            historyIndex = nil
+            draft = historySavedDraft
+            return .handled
+        }
+        index = min(index, history.count - 1)
+        if historyIndex == nil { historySavedDraft = draft }
+        historyIndex = index
+        draft = history[index]
+        return .handled
     }
 
     @ViewBuilder
@@ -143,7 +198,6 @@ struct ComposerView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.red)
             .help("Cancel run")
-            .padding(.bottom, 6)
         } else {
             Button(action: send) {
                 Image(systemName: "arrow.up.circle.fill").font(.title2)
@@ -151,60 +205,10 @@ struct ComposerView: View {
             .buttonStyle(.plain)
             .disabled(sendDisabled)
             .help("Send (Return)")
-            .padding(.bottom, 6)
         }
     }
 
-    // MARK: status bar
 
-    private var statusBar: some View {
-        HStack(spacing: 10) {
-            modelMenu
-            skillsButton
-            textScaleControl
-            workingDirLabel
-            Spacer()
-            if copiedFlash {
-                Text("copied ✓")
-                    .font(.caption2)
-                    .foregroundStyle(Color.accentColor)
-                    .transition(.opacity)
-            }
-            if let tokens = controller.contextTokens {
-                Text("ctx \(tokens) tok")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            phaseLabel
-        }
-    }
-
-    /// Always-reachable text size control (the ⌘ shortcuts ride the menu).
-    private var textScaleControl: some View {
-        HStack(spacing: 0) {
-            Button {
-                SettingsStore.shared.decreaseTextScale()
-            } label: {
-                Text("A−").font(.caption2)
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Smaller text (⌘-)")
-            Button {
-                SettingsStore.shared.increaseTextScale()
-            } label: {
-                Text("A+").font(.caption2)
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Bigger text (⌘+)")
-        }
-        .foregroundStyle(.secondary)
-        .background(Color.primary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 5))
-    }
 
     @State private var modelPickerOpen = false
 
@@ -248,37 +252,7 @@ struct ComposerView: View {
         controller.switchModel(m)
     }
 
-    private var skillsButton: some View {
-        Button {
-            draft = "/"
-            slashOpen = !controller.skills.isEmpty
-            focused = true
-        } label: {
-            Text("/")
-                .font(.caption2)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.05))
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-        }
-        .buttonStyle(.plain)
-        .help("Skills palette")
-    }
 
-    private var workingDirLabel: some View {
-        Group {
-            if !controller.workingDir.isEmpty {
-                Text(controller.workingDir.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(controller.workingDir)
-            }
-        }
-    }
 
     private var placeholder: String {
         switch controller.phase {
@@ -302,8 +276,6 @@ struct ComposerView: View {
             case .idle:
                 if let status = controller.lastRunStatus, status != "done" {
                     Label(status, systemImage: "exclamationmark.circle")
-                } else {
-                    Label("ready", systemImage: "circle")
                 }
             case .running:
                 HStack(spacing: 4) {
@@ -320,18 +292,45 @@ struct ComposerView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text == "/copy" {
+        let parts = text.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        let command = parts.first.map(String.init) ?? ""
+        let arg = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
+        switch command {
+        case "/copy":
             copyLastResponse()
-            draft = ""
-            slashOpen = false
-            return
+        case "/compact":
+            // progress and result surface as a compaction row in the transcript
+            controller.compactHistory()
+        case "/think":
+            if arg.isEmpty {
+                flashNote("usage: /think auto|on|off|low|medium|high|max")
+            } else {
+                controller.setThink(arg)
+                flashNote("think \(arg)")
+            }
+        case "/tools":
+            controller.toggleTools()
+            flashNote(controller.toolsEnabled ? "tools on" : "tools off")
+        default:
+            let suffix = diffStore.promptAppendix()
+            controller.sendPrompt(text, wireSuffix: suffix.isEmpty ? nil : suffix)
+            if controller.phase == .running {
+                diffStore.clearComments() // consumed by the prompt
+            }
         }
-        let suffix = diffStore.promptAppendix()
         draft = ""
         slashOpen = false
-        controller.sendPrompt(text, wireSuffix: suffix.isEmpty ? nil : suffix)
-        if controller.phase == .running {
-            diffStore.clearComments() // consumed by the prompt
+        historyIndex = nil
+    }
+
+    @State private var noteFlash: String? = nil
+
+    /// Brief control-row confirmation for stateless slash commands (/think, /tools).
+    private func flashNote(_ text: String) {
+        withAnimation { noteFlash = text }
+        Task {
+            try? await Task.sleep(for: .seconds(1.8))
+            await MainActor.run { withAnimation { noteFlash = nil } }
         }
     }
 
@@ -466,7 +465,7 @@ struct ModelPicker: View {
                                     if model == current {
                                         Image(systemName: "checkmark")
                                             .font(.caption2)
-                                            .foregroundStyle(Color.accentColor)
+                                            .foregroundStyle(.primary)
                                     }
                                     Text(model)
                                         .font(.callout)

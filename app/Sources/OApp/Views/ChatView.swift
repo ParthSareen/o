@@ -19,47 +19,39 @@ struct ChatView: View {
                 .background(Color.red.opacity(0.08))
             }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(controller.blocks) { block in
-                            BlockRow(block: block)
-                                .id(block.id)
-                        }
-                        if !controller.liveThinking.isEmpty && controller.liveAssistant.isEmpty {
-                            LiveRow(icon: "brain", text: controller.liveThinking, dimmed: true)
-                                .id("live-thinking")
-                        }
-                        if !controller.liveAssistant.isEmpty {
-                            LiveRow(icon: "sparkle", text: controller.liveAssistant, dimmed: false)
-                                .id("live-assistant")
-                        } else if controller.phase == .running {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("o is working…")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                    
-                            .id("working")
-                        }
-                        Color.clear.frame(height: 1).id("bottom")
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(controller.blocks) { block in
+                        BlockRow(block: block)
+                            .id(block.id)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    if !controller.liveThinking.isEmpty && controller.liveAssistant.isEmpty {
+                        LiveRow(icon: "brain", text: controller.liveThinking, dimmed: true)
+                            .id("live-thinking")
+                    }
+                    if !controller.liveAssistant.isEmpty {
+                        LiveRow(icon: "sparkle", text: controller.liveAssistant, dimmed: false)
+                            .id("live-assistant")
+                    } else if controller.phase == .running {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("o is working…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .id("working")
+                    }
                 }
-                // selection lives on the container — dragging across blocks/
-                // messages then works (per-Text selection is single-view only)
-                .textSelection(.enabled)
-                .onChange(of: controller.blocks.count) { _, _ in
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-                .onChange(of: controller.liveAssistant) { _, _ in
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
             }
+            // selection lives on the container — dragging across blocks/
+            // messages then works (per-Text selection is single-view only)
+            .textSelection(.enabled)
+            // stays pinned to the tail while scrolled to the bottom; scrolling
+            // up during a run no longer fights the stream
+            .defaultScrollAnchor(.bottom)
 
-            Divider()
             ComposerView(controller: controller, diffStore: diffStore)
         }
     }

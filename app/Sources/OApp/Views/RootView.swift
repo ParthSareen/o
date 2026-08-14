@@ -50,6 +50,13 @@ struct RootView: View {
             // explicit point-size scaling; dynamicTypeSize proved unreliable
             // for the AttributedString-backed transcript
             .environment(\.chatTextScale, settings.prefs.textScale)
+            // ⌘. cancels the in-flight run (window-scoped, per-window controller)
+            .background(
+                Button("") { controller.cancelRun() }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .hidden()
+                    .accessibilityHidden(true)
+            )
     }
 
     @ViewBuilder
@@ -58,6 +65,7 @@ struct RootView: View {
             ReviewSurface(store: diffStore, compact: false, onClose: { reviewFullScreen = false })
         } else {
             ChatView(controller: controller, diffStore: diffStore)
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
                 .inspector(isPresented: $showDiff) {
                     DiffPanelView(store: diffStore, workingDir: controller.workingDir)
                         .inspectorColumnWidth(min: 340, ideal: 460, max: 720)
@@ -88,7 +96,7 @@ struct RootView: View {
                 reviewFullScreen = true
                 showDiff = false
             } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.forward")
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
             }
             .help("Review changes full screen")
             .disabled(reviewFullScreen)
