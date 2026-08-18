@@ -196,7 +196,7 @@ func (t *RLMQuery) executeWithTools(ctx context.Context, toolCtx agent.ToolConte
 		}},
 		Options:      t.Options,
 		Think:        t.Think,
-		MaxToolRounds: 20,
+		MaxToolRounds: 300,
 	}
 	if t.KeepAlive != nil {
 		runOpts.KeepAlive = t.KeepAlive
