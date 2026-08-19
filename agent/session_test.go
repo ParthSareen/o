@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -985,7 +986,8 @@ func TestSessionLocalToolLoopStopsAtDefaultRoundCap(t *testing.T) {
 		Model:       "test:local",
 		NewMessages: []api.Message{{Role: "user", Content: "keep going"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "tool round limit reached after 100 rounds") {
+	wantErr := fmt.Sprintf("tool round limit reached after %d rounds", defaultMaxToolRounds)
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("error = %v, want default tool round limit", err)
 	}
 	if client.calls != defaultMaxToolRounds+1 {
