@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -29,6 +30,11 @@ type Session struct {
 	ApprovalState    *ApprovalState
 	WorkingDir       string
 	Compactor        Compactor
+	// Background, when set, is drained for finished background tasks at run
+	// boundaries: completions are injected into the conversation so the
+	// model sees (and can react to) them. Root sessions only — RLM child
+	// sessions must leave this nil so only the root run consumes notices.
+	Background BackgroundSource
 }
 
 type RunOptions struct {
@@ -91,6 +97,13 @@ const (
 	toolExecutionCanceled toolExecutionStop = "canceled"
 )
 
+// maxBackgroundContinuations caps how many times a single run can extend
+// itself to report background task completions. Each completion is reported
+// exactly once so continuations terminate on their own; the cap only guards
+// against pathological crash-loops, and anything still buffered past the
+// cap surfaces at the next run's start drain.
+const maxBackgroundContinuations = 8
+
 const toolExecutionDisabledMessage = "Tool execution disabled."
 
 type runPhase int
@@ -127,10 +140,11 @@ type run struct {
 
 	toolBatch *toolBatchResult
 
-	consecutiveModelErrors int
-	toolRounds             int
-	maxToolRounds          int
-	compactionSkipNotified bool
+	consecutiveModelErrors  int
+	toolRounds              int
+	maxToolRounds           int
+	backgroundContinuations int
+	compactionSkipNotified  bool
 
 	finish runFinish
 }
@@ -185,6 +199,14 @@ func (s *Session) Run(ctx context.Context, opts RunOptions) (*RunResult, error) 
 			s.emit(newErrorEvent(newEventMetadata(runID, opts), err.Error()))
 			return nil, err
 		}
+	}
+
+	// Idle drain: report background tasks that finished while no run was
+	// active, ahead of the new turn so the model sees them in context.
+	if notice := s.backgroundNotice(); notice != "" {
+		messages = append(messages, api.Message{Role: "user", Content: notice})
+		// Best-effort: a dropped render must not fail the run.
+		_ = s.emit(newBackgroundTasks(newEventMetadata(runID, opts), notice))
 	}
 
 	r := &run{
@@ -383,9 +405,25 @@ func (r *run) runCompactionStep(ctx context.Context) error {
 	if r.toolBatch == nil {
 		if r.canceled {
 			r.finishCanceled()
-		} else {
-			r.finishDone()
+			return nil
 		}
+		// End-of-run drain: report tasks that completed during the run and
+		// take one more model step so the model can react, rather than
+		// leaving the completion invisible until the next turn. The drain
+		// reports each completion once and continuations are capped, so this
+		// terminates; anything past the cap stays buffered for the next run's
+		// start drain.
+		if r.backgroundContinuations < maxBackgroundContinuations {
+			if notice := r.session.backgroundNotice(); notice != "" {
+				r.messages = append(r.messages, api.Message{Role: "user", Content: notice})
+				_ = r.session.emit(newBackgroundTasks(newEventMetadata(r.runID, r.opts), notice))
+				r.backgroundContinuations++
+				r.assistant = api.Message{}
+				r.phase = runPhaseModel
+				return nil
+			}
+		}
+		r.finishDone()
 		return nil
 	}
 
@@ -418,6 +456,66 @@ func (r *run) finishRun(ctx context.Context) (*RunResult, error) {
 		}
 	}
 	return &RunResult{Messages: r.messages, Latest: r.latest, WorkingDir: r.session.WorkingDir}, r.finish.err
+}
+
+// backgroundNotice drains pending background task completions and renders
+// them as one synthetic user message. Empty when no source is set or nothing
+// finished. Completions are removed from the source by the drain, so each is
+// reported exactly once.
+func (s *Session) backgroundNotice() string {
+	if s == nil || s.Background == nil {
+		return ""
+	}
+	completions := s.Background.DrainCompletions()
+	if len(completions) == 0 {
+		return ""
+	}
+	return formatBackgroundNotice(completions)
+}
+
+// formatBackgroundNotice renders completion entries plus bounded failure
+// tails as a system-attributed notice.
+func formatBackgroundNotice(completions []BackgroundCompletion) string {
+	var sb strings.Builder
+	sb.WriteString("[background task update — system notice, not a user message]\n")
+	for _, c := range completions {
+		var status string
+		switch {
+		case c.Killed:
+			status = "killed"
+		case c.Failure != "":
+			status = "failed to run: " + c.Failure
+		case c.ExitCode == 0:
+			status = "finished: exit 0"
+		default:
+			status = fmt.Sprintf("failed: exit %d", c.ExitCode)
+		}
+		fmt.Fprintf(&sb, "\n%s: %s after %s — %q\n  log: %s\n",
+			c.ID, status, formatBackgroundTaskDuration(c.Duration), backgroundCommandSummary(c.Command), c.LogPath)
+		if tail := strings.TrimRight(c.Tail, "\n"); tail != "" {
+			sb.WriteString("  log tail:\n")
+			for _, line := range strings.Split(tail, "\n") {
+				sb.WriteString("    " + line + "\n")
+			}
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func backgroundCommandSummary(command string) string {
+	summary := strings.Join(strings.Fields(command), " ")
+	runes := []rune(summary)
+	if len(runes) > 60 {
+		summary = string(runes[:60]) + "…"
+	}
+	return summary
+}
+
+func formatBackgroundTaskDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(10 * time.Millisecond).String()
+	}
+	return d.Round(100 * time.Millisecond).String()
 }
 
 func (s *Session) chatRound(ctx context.Context, runID string, opts RunOptions, messages []api.Message, latest *api.ChatResponse) (api.Message, []api.ToolCall, bool, error) {

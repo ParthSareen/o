@@ -69,6 +69,11 @@ func (r *headlessRenderer) Emit(ev coreagent.Event) error {
 		}
 	case coreagent.EventCompactionStarted:
 		fmt.Fprintf(r.stderr, "… compacting context (%s)\n", ev.CompactionTrigger)
+	case coreagent.EventBackgroundTasks:
+		r.closeThinking()
+		// Content is pre-formatted (one line per task plus failure tails);
+		// print as-is like other lifecycle notes.
+		fmt.Fprintf(r.stderr, "%s\n", ev.Content)
 	case coreagent.EventError:
 		r.closeThinking()
 		r.sawError = true
@@ -157,6 +162,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
 		},
+		Background: registry.BackgroundSource(),
 	}
 
 	// Create a session in the store for headless mode so the conversation
@@ -246,6 +252,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
 		},
+		Background: registry.BackgroundSource(),
 	}
 
 	if store != nil {

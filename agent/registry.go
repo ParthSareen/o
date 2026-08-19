@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/ParthSareen/o/api"
 )
@@ -44,6 +45,48 @@ type ScopedTool interface {
 
 type Registry struct {
 	tools map[string]Tool
+	// Background surfaces completions from background tool work (e.g.
+	// tools.BackgroundManager, populated by the shell tool's background=true
+	// flag) into runs built from this registry. Child registries (RLM
+	// sub-agents) deliberately leave it unset: only the root run may consume
+	// completions, or a child's drain would steal notices that belong in the
+	// parent's history.
+	Background BackgroundSource
+}
+
+// BackgroundCompletion is one finished background task, reported to runs
+// via BackgroundSource.
+type BackgroundCompletion struct {
+	ID       string
+	Command  string
+	ExitCode int
+	Killed   bool
+	// Failure is the process start/wait error, if any; ExitCode is not
+	// meaningful when Failure is set.
+	Failure  string
+	Duration time.Duration
+	LogPath  string
+	// Tail is a bounded trailing log excerpt, set only for failed tasks so
+	// the notice carries enough context to act on without an extra read.
+	Tail string
+}
+
+// BackgroundSource reports finished background work. A session drains it at
+// run start (work that completed while the session was idle) and again
+// before finishing a run (work that completed mid-run), injecting results
+// into the conversation so the model can react. Implementations must report
+// each completion exactly once across all drains.
+type BackgroundSource interface {
+	DrainCompletions() []BackgroundCompletion
+}
+
+// BackgroundSource returns the registry's background completion source, or
+// nil. Nil-receiver safe.
+func (r *Registry) BackgroundSource() BackgroundSource {
+	if r == nil {
+		return nil
+	}
+	return r.Background
 }
 
 func (r *Registry) Register(tool Tool) {

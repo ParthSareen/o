@@ -199,6 +199,13 @@ func (m *chatModel) applyAgentEvent(event coreagent.Event) {
 		}
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: message}))
 		m.status = "compact skipped"
+	case coreagent.EventBackgroundTasks:
+		// The session injected this notice into the conversation; mirror it
+		// in the transcript as a muted entry and in liveMessages so the
+		// context estimate stays honest.
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: event.Content}))
+		m.liveMessages = append(m.liveMessages, api.Message{Role: "user", Content: event.Content})
+		contextChanged = true
 	case coreagent.EventError:
 		m.resetRunState()
 		m.eventErrorRendered = true

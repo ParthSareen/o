@@ -415,6 +415,14 @@ final class SessionController {
         case .compactionSkipped:
             setLastCompactionPhase(.skipped, scope: scope, detail: ev.content)
 
+        case .backgroundTasks:
+            // Background task completions arrive as a pre-formatted notice
+            // (also injected into history by the session); render muted.
+            finalizeLiveText(scope: scope)
+            if let text = ev.content, !text.isEmpty {
+                appendBlock(.background(id: UUID(), text: text), scope: scope)
+            }
+
         case .runFinished:
             finalizeLiveText(scope: scope)
             if scope == nil {
