@@ -14,7 +14,8 @@ func shellToolName() string {
 }
 
 func shellToolDescription() string {
-	return "Execute a bash command on the system. Use this to inspect files, run tests, and perform development tasks."
+	return "Execute a bash command on the system. Use this to inspect files, run tests, and perform development tasks. " +
+		"Supports background=true for long-running commands (dev servers, builds): they write a log file and report completion in a [background task update] notice."
 }
 
 func shellCommandDescription() string {
@@ -46,4 +47,25 @@ func killBashCommand(cmd *exec.Cmd) error {
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	return nil
+}
+
+// newBackgroundBashCommand builds a detached background command. Unlike
+// newBashCommand it is NOT bound to the tool call's (bounded, cancelable)
+// context — the process must outlive the call that launched it — and it
+// skips the final-working-directory wrapper: background tasks do not move
+// the session working directory.
+func newBackgroundBashCommand(command string) *exec.Cmd {
+	cmd := exec.Command("bash", "-c", command)
+	configureBashCommand(cmd)
+	return cmd
+}
+
+// startBackgroundCommand/waitBackgroundCommand split runBashCommand so the
+// background manager can start the process and reap it in a goroutine.
+func startBackgroundCommand(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
+
+func waitBackgroundCommand(cmd *exec.Cmd) error {
+	return cmd.Wait()
 }

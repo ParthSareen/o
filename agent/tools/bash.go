@@ -22,7 +22,13 @@ const (
 	maxBashOutputBytes = 60_000
 )
 
-type Bash struct{}
+// Bash executes shell commands. Background, when non-nil, enables the
+// background=true flag: the command is launched detached and Execute returns
+// immediately with a task handle — task ID, PID, log path — instead of
+// blocking on completion (see bash_background.go).
+type Bash struct {
+	Background *BackgroundManager
+}
 
 func (b *Bash) Name() string {
 	return shellToolName()
@@ -37,6 +43,14 @@ func (b *Bash) Schema() api.ToolFunction {
 	props.Set("command", api.ToolProperty{
 		Type:        api.PropertyType{"string"},
 		Description: shellCommandDescription(),
+	})
+	props.Set("background", api.ToolProperty{
+		Type: api.PropertyType{"boolean"},
+		Description: "Run the command in the background and return immediately with a task ID, PID, and log path instead of waiting for it to finish. " +
+			"Use for long-running work (dev servers, watch mode, builds, downloads) that would otherwise block or time out this tool. " +
+			"Combined stdout/stderr streams to the log file: tail or grep it with a foreground command to check progress, and cat the exit record " +
+			"(.exit file next to the log) to see whether it finished and its exit code. A [background task update] notice reports the result " +
+			"automatically when the command exits.",
 	})
 	return api.ToolFunction{
 		Name:        b.Name(),
@@ -78,7 +92,56 @@ func (b *Bash) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[
 	if err := rejectUnsafeShellCommand(command); err != nil {
 		return agent.ToolResult{}, err
 	}
+	if backgroundRequested(args) {
+		return b.executeBackground(toolCtx, command)
+	}
+	return b.executeForeground(ctx, toolCtx, command)
+}
 
+// backgroundRequested tolerates both the boolean form and the string "true"
+// models occasionally emit.
+func backgroundRequested(args map[string]any) bool {
+	switch v := args["background"].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
+}
+
+// executeBackground launches the command detached and returns a handle. The
+// session working directory is deliberately left untouched: background
+// commands skip the foreground final-working-directory wrapper (its temp
+// file would outlive the deferred cleanup), and a long-running cd must not
+// move the session.
+func (b *Bash) executeBackground(toolCtx agent.ToolContext, command string) (agent.ToolResult, error) {
+	if b.Background == nil {
+		return agent.ToolResult{Content: "Error: background execution is unavailable in this session (disabled via OLLAMA_AGENT_DISABLE_BACKGROUND_SHELL)."}, nil
+	}
+	task, err := b.Background.Start(toolCtx.WorkingDir, command)
+	if err != nil {
+		return agent.ToolResult{Content: fmt.Sprintf("Error: could not start background command: %v", err)}, nil
+	}
+	workingDir := toolCtx.WorkingDir
+	if workingDir == "" {
+		workingDir = "(process default)"
+	}
+	return agent.ToolResult{Content: fmt.Sprintf(
+		"Started background task %s (pid %d) — still running, detached from this call.\n"+
+			"Command: %s\n"+
+			"Working directory: %s\n"+
+			"Output log (combined stdout/stderr): %s\n"+
+			"Exit status record (written when it exits): %s\n\n"+
+			"To check progress: tail or grep the log with a foreground command; cat the exit record to see whether it finished and its exit code. "+
+			"You will also get an automatic [background task update] notice when it exits — during this run if it is still active, otherwise at the start of your next turn. "+
+			"To stop it: ask to kill pid %d.",
+		task.ID, task.PID, command, workingDir, task.LogPath, task.ExitPath, task.PID,
+	)}, nil
+}
+
+func (b *Bash) executeForeground(ctx context.Context, toolCtx agent.ToolContext, command string) (agent.ToolResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, bashTimeout)
 	defer cancel()
 

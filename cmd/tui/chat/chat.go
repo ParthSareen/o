@@ -1226,6 +1226,7 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 		ApprovalState:    m.ensureApprovalState(),
 		WorkingDir:       m.currentWorkingDir(),
 		Compactor:        m.opts.Compactor,
+		Background:       m.opts.Tools.BackgroundSource(),
 	}
 	opts := coreagent.RunOptions{
 		ChatID:       m.chatID,
