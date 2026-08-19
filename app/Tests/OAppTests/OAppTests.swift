@@ -29,6 +29,12 @@ struct EventDecodeTests {
         #expect(fin.type == .runFinished && fin.status == "done")
     }
 
+    @Test func decodesBackgroundTasksNotice() {
+        let ev = event(#"{"type":"background_tasks","runId":"r1","content":"[background task update]\nbg-1: finished: exit 0"}"#)
+        #expect(ev.type == .backgroundTasks)
+        #expect(ev.content?.contains("bg-1") == true)
+    }
+
     @Test func unknownTypeDecodesAsUnknown() {
         let ev = event(#"{"type":"future_event","foo":1}"#)
         #expect(ev.type == .unknown)

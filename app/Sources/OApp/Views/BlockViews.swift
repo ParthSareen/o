@@ -15,6 +15,8 @@ struct BlockRow: View {
             ToolCallRow(tool: tool)
         case .compaction(_, let phase, let detail):
             CompactionRow(phase: phase, detail: detail)
+        case .background(_, let text):
+            BackgroundTasksRow(text: text)
         case .error(_, let message):
             ErrorRow(message: message)
         }
@@ -215,6 +217,30 @@ struct CompactionRow: View {
         case .done: return "context compacted"
         case .skipped: return detail.isEmpty ? "compaction skipped" : "skipped: \(detail)"
         }
+    }
+}
+
+/// Muted notice block for background task completions (background_tasks
+/// events); the same text is injected into model history by the session.
+struct BackgroundTasksRow: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("background task update", systemImage: "clock.badge.checkmark")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.vertical, 2)
     }
 }
 

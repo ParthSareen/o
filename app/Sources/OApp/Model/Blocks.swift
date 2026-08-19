@@ -36,12 +36,13 @@ enum Block: Equatable, Identifiable, Sendable {
     case thinking(id: UUID, text: String)
     case tool(ToolBlock)
     case compaction(id: UUID, phase: CompactionPhase, detail: String)
+    case background(id: UUID, text: String)
     case error(id: UUID, message: String)
 
     var id: UUID {
         switch self {
         case .userMessage(let id, _), .assistant(let id, _), .thinking(let id, _),
-             .compaction(let id, _, _), .error(let id, _):
+             .compaction(let id, _, _), .background(let id, _), .error(let id, _):
             return id
         case .tool(let t): return t.id
         }

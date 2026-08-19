@@ -196,6 +196,7 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
 		},
+		Background: registry.BackgroundSource(),
 	}
 
 	r := &pipeRunner{

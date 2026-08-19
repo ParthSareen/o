@@ -21,6 +21,11 @@ const (
 	EventCompactionSkipped  EventType = "compaction_skipped"
 	EventRunFinished        EventType = "run_finished"
 	EventError              EventType = "error"
+	// EventBackgroundTasks carries a background-task completion notice: the
+	// content of the synthetic message the session injected after draining a
+	// BackgroundSource. UIs render it as a muted entry so the notice is
+	// visible in the run narrative.
+	EventBackgroundTasks EventType = "background_tasks"
 	// EventSessionOpened is emitted once by pipe mode when a session is
 	// created or resumed, before any run events. It carries the session
 	// metadata and (for resumed sessions) the persisted message history so
@@ -173,6 +178,10 @@ func newRunFinished(m eventMetadata, status RunStatus) Event {
 
 func newErrorEvent(m eventMetadata, errMsg string) Event {
 	return Event{Type: EventError, RunID: m.runID, ChatID: m.chatID, Model: m.model, Error: errMsg}
+}
+
+func newBackgroundTasks(m eventMetadata, content string) Event {
+	return Event{Type: EventBackgroundTasks, RunID: m.runID, ChatID: m.chatID, Model: m.model, Content: content}
 }
 
 func newCompactionProgress(m eventMetadata, tokens int) Event {

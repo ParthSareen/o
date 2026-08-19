@@ -55,6 +55,7 @@ enum AgentEventType: String, Codable, Sendable {
     case error = "error"
     case inspect = "inspect"
     case sessionAssigned = "session_assigned"
+    case backgroundTasks = "background_tasks"
     case unknown
 }
 
