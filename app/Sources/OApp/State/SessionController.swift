@@ -63,6 +63,8 @@ final class SessionController {
     private var pendingMain = PendingText()
     private var pendingSub: [String: PendingText] = [:] // keyed by parent tool-call id
     private var liveDirty = false
+    /// Structural insertions deferred to the flush tick (see enqueueBlock).
+    private var pendingBlocks: [(block: Block, scope: String?)] = []
 
     private var process: OProcess?
     private var pumpTask: Task<Void, Never>?
@@ -167,12 +169,18 @@ final class SessionController {
     }
 
     private func flushLiveText() {
-        guard liveDirty else { return }
-        liveDirty = false
-        if liveAssistant != pendingMain.assistant { liveAssistant = pendingMain.assistant }
-        if liveThinking != pendingMain.thinking { liveThinking = pendingMain.thinking }
-        for (parentID, pending) in pendingSub {
-            mutateTool(parentID, in: &blocks) { $0.subagentLive = pending.assistant }
+        if liveDirty {
+            liveDirty = false
+            if liveAssistant != pendingMain.assistant { liveAssistant = pendingMain.assistant }
+            if liveThinking != pendingMain.thinking { liveThinking = pendingMain.thinking }
+            for (parentID, pending) in pendingSub {
+                mutateTool(parentID, in: &blocks) { $0.subagentLive = pending.assistant }
+            }
+        }
+        if !pendingBlocks.isEmpty {
+            let queued = pendingBlocks
+            pendingBlocks.removeAll()
+            for (block, scope) in queued { appendBlock(block, scope: scope) }
         }
     }
 
@@ -420,7 +428,7 @@ final class SessionController {
             // (also injected into history by the session); render muted.
             finalizeLiveText(scope: scope)
             if let text = ev.content, !text.isEmpty {
-                appendBlock(.background(id: UUID(), text: text), scope: scope)
+                enqueueBlock(.background(id: UUID(), text: text), scope: scope)
             }
 
         case .runFinished:
@@ -518,6 +526,17 @@ final class SessionController {
         }
         let found = mutateTool(scope, in: &blocks) { $0.children.append(block) }
         if !found { blocks.append(block) }
+    }
+
+    /// Structural block insertions that can land at arbitrary times mid-run
+    /// (background-task completions) ride the 33ms flush tick instead of
+    /// mutating `blocks` straight from the event callback. Batching them with
+    /// text flushes keeps the transcript's lazy stack from being structurally
+    /// invalidated at random interleavings (observed as an AppKit display-
+    /// cycle constraint crash via LazyLayoutViewCache.signalPrefetch).
+    private func enqueueBlock(_ block: Block, scope: String?) {
+        pendingBlocks.append((block, scope))
+        startFlushLoopIfNeeded()
     }
 
     private func mutateLastCompaction(scope: String?, _ update: (inout String) -> Void) {

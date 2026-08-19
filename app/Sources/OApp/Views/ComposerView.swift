@@ -200,7 +200,7 @@ struct ComposerView: View {
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(Color(nsColor: .textBackgroundColor))
                     .frame(width: 30, height: 30)
-                    .background(Circle().fill(Color.red))
+                    .background(Circle().fill(Color.primary.opacity(0.75)))
             }
             .buttonStyle(.plain)
             .help("Cancel run")
@@ -335,11 +335,13 @@ struct ComposerView: View {
     @State private var noteFlash: String? = nil
 
     /// Brief control-row confirmation for stateless slash commands (/think, /tools).
+    /// No withAnimation here: animated layout passes overlapping transcript
+    /// streaming widen an AppKit display-cycle constraint race.
     private func flashNote(_ text: String) {
-        withAnimation { noteFlash = text }
+        noteFlash = text
         Task {
             try? await Task.sleep(for: .seconds(1.8))
-            await MainActor.run { withAnimation { noteFlash = nil } }
+            await MainActor.run { noteFlash = nil }
         }
     }
 
@@ -352,10 +354,10 @@ struct ComposerView: View {
         guard let last = controller.lastAssistantText() else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(last, forType: .string)
-        withAnimation { copiedFlash = true }
+        copiedFlash = true
         Task {
             try? await Task.sleep(for: .milliseconds(1100))
-            await MainActor.run { withAnimation { copiedFlash = false } }
+            await MainActor.run { copiedFlash = false }
         }
     }
 }
