@@ -30,28 +30,31 @@ struct ComposerView: View {
             }
             card
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 20)
+        .frame(maxWidth: 780)
+        .frame(maxWidth: .infinity)
+        .padding(.leading, 24)
+        .padding(.trailing, 28)
         .padding(.bottom, 16)
         .onAppear { focused = true }
         .onChange(of: slashQuery) { _, q in slashOpen = q != nil && !filteredSkills.isEmpty }
     }
 
-    /// The bordered composer card: editor on top, control row below.
+    /// The floating composer card: editor on top, control row below.
     private var card: some View {
         VStack(spacing: 6) {
             editor
             controlRow
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(Color(nsColor: .textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(focused ? Color.primary.opacity(0.45) : Color.primary.opacity(0.15),
-                        lineWidth: focused ? 1.5 : 1)
+            RoundedRectangle(cornerRadius: 24)
+                .stroke(focused ? Color.primary.opacity(0.30) : Color.primary.opacity(0.12),
+                        lineWidth: 1)
         )
+        .shadow(color: .black.opacity(0.10), radius: 14, x: 0, y: 4)
         .popover(isPresented: $slashOpen, attachmentAnchor: .point(.topLeading), arrowEdge: .bottom) {
             SlashPalette(skills: filteredSkills) { skill in
                 insertSkill(skill)
@@ -193,14 +196,21 @@ struct ComposerView: View {
     private var actionButton: some View {
         if controller.phase == .running {
             Button(action: controller.cancelRun) {
-                Image(systemName: "stop.circle.fill").font(.title2)
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color(nsColor: .textBackgroundColor))
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(Color.red))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.red)
             .help("Cancel run")
         } else {
             Button(action: send) {
-                Image(systemName: "arrow.up.circle.fill").font(.title2)
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color(nsColor: .textBackgroundColor))
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(sendDisabled ? Color.primary.opacity(0.22) : Color.primary))
             }
             .buttonStyle(.plain)
             .disabled(sendDisabled)
@@ -214,17 +224,16 @@ struct ComposerView: View {
 
     private var modelMenu: some View {
         Button { modelPickerOpen = true } label: {
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
                 Text(controller.model.isEmpty ? "model…" : shortModelName(controller.model))
-                    .font(.caption2)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8))
+                    .font(.caption)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.primary.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background(Capsule().strokeBorder(Color.primary.opacity(0.18)))
         }
         .buttonStyle(.plain)
         .disabled(controller.phase == .running || controller.phase == .starting)

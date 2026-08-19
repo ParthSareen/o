@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @Bindable var manager: SessionManager
     @State private var list = SessionListStore.shared
     @State private var selection: String? = nil
@@ -11,7 +12,6 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             if let error = list.loadError {
                 Text(error).font(.caption).foregroundStyle(.red).padding(8)
             }
@@ -19,8 +19,17 @@ struct SidebarView: View {
                 editList
                 editBar
             } else {
+                HStack {
+                    Text("History")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
                 sessionList
             }
+            footer
         }
         .onAppear { list.start() }
         .onChange(of: selection) { _, newValue in
@@ -34,8 +43,25 @@ struct SidebarView: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("Sessions").font(.headline)
+        HStack(spacing: 10) {
+            if !editing {
+                Button {
+                    selection = nil
+                    manager.startNewChat()
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().strokeBorder(Color.primary.opacity(0.18)))
+                }
+                .buttonStyle(.plain)
+                .help("New chat in this window (⌘N for a new window)")
+            } else {
+                Text("Select")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
             if !list.unreadIDs.isEmpty {
                 Text("\(list.unreadIDs.count)")
                     .font(.caption2)
@@ -47,22 +73,15 @@ struct SidebarView: View {
                     .clipShape(Capsule())
                     .help("\(list.unreadIDs.count) unread")
             }
-            Spacer()
             if !editing {
-                Button {
-                    selection = nil
-                    manager.startNewChat()
-                } label: {
-                    Image(systemName: "square.and.pencil")
-                }
-                .buttonStyle(.plain)
-                .help("New chat in this window (⌘N for a new window)")
                 Menu {
                     Button("Select…") { editing = true }
                     Button("Delete Empty Sessions") { list.deleteEmptySessions() }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .padding(.horizontal, 6)
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().strokeBorder(Color.primary.opacity(0.18)))
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -75,8 +94,36 @@ struct SidebarView: View {
                 .font(.callout)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    /// Bottom profile-style row: which model this window is on, plus settings.
+    private var footer: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 8) {
+                Image(systemName: "circle.hexagongrid.fill")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.primary.opacity(0.7))
+                Text(manager.active.model.isEmpty ? "o" : shortModel(manager.active.model))
+                    .font(.callout)
+                    .lineLimit(1)
+                Spacer()
+                Button { openSettings() } label: {
+                    Image(systemName: "gearshape")
+                        .foregroundStyle(.primary.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private func shortModel(_ m: String) -> String {
+        m.hasSuffix(":latest") ? String(m.dropLast(7)) : m
     }
 
     private var sessionList: some View {
@@ -94,7 +141,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .tint(.gray)
+        .tint(.primary.opacity(0.12))
     }
 
     private var editList: some View {
@@ -111,7 +158,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .tint(.gray)
+        .tint(.primary.opacity(0.12))
     }
 
     private var editBar: some View {
@@ -164,9 +211,9 @@ private struct SessionRow: View {
     let isRunning: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 7) {
+        HStack(spacing: 7) {
             // indicator column (constant width): spinner = running in bg,
-            // blue ring = current in this window, blue filled = unread
+            // ring = current in this window, filled = unread
             Group {
                 if isRunning {
                     ProgressView()
@@ -177,22 +224,15 @@ private struct SessionRow: View {
                 }
             }
             .frame(width: 10)
-            .padding(.top, 4)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.displayTitle)
-                    .fontWeight(isUnread ? .semibold : .regular)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                HStack(spacing: 6) {
-                    Text(session.model).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(compactRelativeAge(session.updatedAt))
-                        .foregroundStyle(.primary.opacity(0.45))
-                }
+            Text(session.displayTitle)
+                .fontWeight(isUnread ? .semibold : .regular)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 6)
+            Text(compactRelativeAge(session.updatedAt))
                 .font(.caption2)
-                .foregroundStyle(.primary.opacity(0.6))
-            }
+                .foregroundStyle(.primary.opacity(0.45))
         }
         .padding(.vertical, 2)
     }

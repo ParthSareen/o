@@ -77,30 +77,36 @@ struct RootView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             workingDirButton
-            Button {
+            circleButton("doc.text.magnifyingglass",
+                         help: "Prompt inspector (system prompt, tools, messages)") {
                 showPrompt = true
-            } label: {
-                Image(systemName: "doc.text.magnifyingglass")
             }
-            .help("Prompt inspector (system prompt, tools, messages)")
 
-            Button {
+            circleButton("checklist", help: "Toggle changes panel") {
                 if !reviewFullScreen { showDiff.toggle() }
-            } label: {
-                Label("Changes", systemImage: "checklist")
             }
-            .help("Toggle changes panel")
             .disabled(reviewFullScreen)
 
-            Button {
+            circleButton("arrow.up.left.and.arrow.down.right",
+                         help: "Review changes full screen") {
                 reviewFullScreen = true
                 showDiff = false
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
             }
-            .help("Review changes full screen")
             .disabled(reviewFullScreen)
         }
+    }
+
+    /// Toolbar icon in a filled circle — the top-right pills in the reference UI.
+    private func circleButton(_ systemName: String, help: String,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.primary.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private var workingDirButton: some View {
@@ -118,7 +124,11 @@ struct RootView: View {
             }
         } label: {
             Image(systemName: "folder")
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.primary.opacity(0.06)))
         }
+        .buttonStyle(.plain)
         .help(workingDirHelp)
     }
 

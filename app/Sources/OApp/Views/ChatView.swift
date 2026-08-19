@@ -42,8 +42,10 @@ struct ChatView: View {
                         .id("working")
                     }
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 24)
                 .padding(.vertical, 12)
+                .frame(maxWidth: 780)
+                .frame(maxWidth: .infinity)
             }
             // selection lives on the container — dragging across blocks/
             // messages then works (per-Text selection is single-view only)
