@@ -10,7 +10,6 @@ actor OProcess {
         var systemPrompt: String? = nil
         var contextWindowTokens: Int = 0
         var allowAllTools: Bool = true
-        var rlm: Bool = true
         var workingDir: String? = nil // nil → home directory
     }
 
@@ -49,7 +48,6 @@ actor OProcess {
 
         var args = ["--pipe"]
         args.append(launch.allowAllTools ? "--allow-all-tools" : "--allow-all-tools=false")
-        args.append(launch.rlm ? "--rlm" : "--rlm=false")
         if let name = launch.name, !name.isEmpty { args += ["--name", name] }
         if let system = launch.systemPrompt, !system.isEmpty { args += ["--system", system] }
         if launch.contextWindowTokens > 0 {

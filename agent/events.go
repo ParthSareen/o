@@ -92,12 +92,12 @@ type SkillInfo struct {
 }
 
 type Event struct {
-	Type              EventType         `json:"type"`
-	RunID             string            `json:"runId,omitempty"`
-	ChatID            string            `json:"chatId,omitempty"`
-	Model             string            `json:"model,omitempty"`
+	Type   EventType `json:"type"`
+	RunID  string    `json:"runId,omitempty"`
+	ChatID string    `json:"chatId,omitempty"`
+	Model  string    `json:"model,omitempty"`
 	// Name is the human-readable session name, set on session_opened events.
-	Name string `json:"name,omitempty"`
+	Name              string            `json:"name,omitempty"`
 	Status            RunStatus         `json:"status,omitempty"`
 	ToolStatus        ToolStatus        `json:"toolStatus,omitempty"`
 	CompactionTrigger CompactionTrigger `json:"compactionTrigger,omitempty"`
@@ -107,21 +107,17 @@ type Event struct {
 	Content           string            `json:"content,omitempty"`
 	Thinking          string            `json:"thinking,omitempty"`
 	ToolCalls         []api.ToolCall    `json:"toolCalls,omitempty"`
-	Messages          []api.Message    `json:"messages,omitempty"`
+	Messages          []api.Message     `json:"messages,omitempty"`
 	// Skills lists the skills available for /-invocation; set on
 	// session_opened events only.
 	Skills []SkillInfo `json:"skills,omitempty"`
 	// System is the assembled system prompt; set on inspect events only.
 	System string `json:"system,omitempty"`
 	// Tools lists the registered tools; set on inspect events only.
-	Tools []ToolInfo `json:"tools,omitempty"`
-	Args              map[string]any    `json:"args,omitempty"`
-	Tokens            int               `json:"tokens,omitempty"`
-	Error             string            `json:"error,omitempty"`
-	// SubagentID is set on events forwarded from a child sub-agent session.
-	// It carries the parent tool call ID so the TUI can nest the child's
-	// activity under the subagents tool entry.
-	SubagentID string `json:"subagentId,omitempty"`
+	Tools  []ToolInfo     `json:"tools,omitempty"`
+	Args   map[string]any `json:"args,omitempty"`
+	Tokens int            `json:"tokens,omitempty"`
+	Error  string         `json:"error,omitempty"`
 }
 
 type EventSink interface {

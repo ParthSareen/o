@@ -32,16 +32,11 @@ const (
 // completions are reported to the session via DrainCompletions, which the
 // run loop turns into synthetic notices.
 //
-// The manager is shared by pointer across the shell tool and RLM child
-// sessions (which copy the parent's tool instances), so task IDs are stable
-// for the whole agent session. Only the root session drains completions
-// (see agent.Registry.Background).
-//
 // TODO(lifecycle): Close is not yet wired into session/process teardown —
-// registries are built in agentToolsRegistryWithRLM with no destruction
-// hook. Until then, tasks orphaned at process exit keep running on Unix; on
-// Windows the job object's KILL_ON_JOB_CLOSE handles it. Wire Close into
-// headless/TUI/pipe teardown as a follow-up.
+// registries are built in agentToolsRegistry with no destruction hook. Until
+// then, tasks orphaned at process exit keep running on Unix; on Windows the
+// job object's KILL_ON_JOB_CLOSE handles it. Wire Close into headless/TUI/
+// pipe teardown as a follow-up.
 type BackgroundManager struct {
 	mu      sync.Mutex
 	tasks   map[string]*BackgroundTask

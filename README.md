@@ -53,7 +53,7 @@ which includes rules for headless use by agents.
 
 `--pipe` speaks a machine-readable NDJSON protocol over stdio (prompt/cancel
 commands in, the full agent event stream out) for UI frontends like `app/`.
-It implies `--allow-all-tools` and `--rlm` unless you set them explicitly.
+It implies `--allow-all-tools` unless you set it explicitly.
 
 ## The TUI
 

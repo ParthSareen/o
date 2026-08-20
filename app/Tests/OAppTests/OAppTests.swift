@@ -150,31 +150,6 @@ struct ReducerTests {
         #expect(post == "done")
     }
 
-    @Test func subagentEventsNestUnderParentTool() {
-        let c = makeController()
-        c.apply(event(#"{"type":"session_opened","chatId":"s1","model":"m","messages":[]}"#))
-        c.sendPromptForTest("delegate")
-        c.apply(event(#"{"type":"tool_started","toolStatus":"running","toolCallId":"parent1","toolName":"subagents"}"#))
-        c.apply(event(#"{"type":"message_delta","content":"child says hi","subagentId":"parent1"}"#))
-        c.apply(event(#"{"type":"tool_started","toolStatus":"running","toolCallId":"c9","toolName":"bash","subagentId":"parent1","args":{"command":"pwd"}}"#))
-        c.apply(event(#"{"type":"tool_finished","toolStatus":"done","toolCallId":"c9","toolName":"bash","subagentId":"parent1","content":"/tmp"}"#))
-        c.apply(event(#"{"type":"run_finished","status":"done","subagentId":"parent1"}"#))
-        c.apply(event(#"{"type":"tool_finished","toolStatus":"done","toolCallId":"parent1","toolName":"subagents","content":"subagent done"}"#))
-        c.apply(event(#"{"type":"run_finished","status":"done"}"#))
-
-        guard c.blocks.count == 2, case .tool(let parent) = c.blocks[1] else {
-            Issue.record("blocks = \(c.blocks)"); return
-        }
-        #expect(parent.status == .done && parent.result == "subagent done")
-        guard parent.children.count == 2 else {
-            Issue.record("children = \(parent.children)"); return
-        }
-        guard case .tool(let child) = parent.children[1] else {
-            Issue.record("children = \(parent.children)"); return
-        }
-        #expect(child.name == "bash" && child.result == "/tmp")
-    }
-
     @Test func compactionLifecycle() {
         let c = makeController()
         c.apply(event(#"{"type":"session_opened","chatId":"s1","model":"m","messages":[]}"#))

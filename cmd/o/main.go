@@ -29,7 +29,6 @@ type cliOptions struct {
 	resumeID            string
 	listSessions        bool
 	name                string
-	rlm                 bool
 }
 
 func buildFlagSet() (*flag.FlagSet, *cliOptions) {
@@ -41,12 +40,11 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.BoolVar(&opts.multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&opts.contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
 	fs.BoolVar(&opts.headless, "headless", false, "print the response and exit (prompt from args or stdin)")
-	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools and --rlm unless set explicitly")
+	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools unless set explicitly")
 	fs.BoolVar(&opts.resume, "resume", false, "resume the most recent session")
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
 	fs.StringVar(&opts.name, "name", "", "set a human-readable name for a new session")
-	fs.BoolVar(&opts.rlm, "rlm", false, "enable recursive language model mode (registers the subagents tool)")
 	return fs, opts
 }
 
@@ -86,7 +84,7 @@ func main() {
 	// positional prompt is the first turn of the NDJSON session instead.
 	headless := opts.headless || (prompt != "" && !opts.pipe)
 
-	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.pipe, opts.resume, opts.resumeID, opts.name, opts.rlm); err != nil {
+	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.pipe, opts.resume, opts.resumeID, opts.name); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -151,12 +149,6 @@ USAGE
   o --list                      list saved sessions
   o --name <text> [model]       start a new session with a human-readable name
 
-RLM MODE
-  o --rlm [model] "prompt"     enable recursive language model mode, which
-                               registers a "subagents" tool for spawning
-                               sub-LM calls. Use OLLAMA_RLM_TOOL_NAME to
-                               override the tool name for experiments.
-
 FLAGS
 `)
 	var defaults strings.Builder
@@ -189,7 +181,7 @@ AGENTS
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
 // headless addition.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, pipe bool, resume bool, resumeID string, name string, rlm bool) error {
+func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, pipe bool, resume bool, resumeID string, name string) error {
 	// Open the session store for persistence (non-fatal if it fails).
 	store, storeErr := sessionstore.Open()
 	if storeErr != nil {
@@ -256,7 +248,6 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 			MultiModal:          multiModal,
 			ContextWindowTokens: contextWindowTokens,
 			Options:             map[string]any{},
-			RLM:                 rlm,
 		}
 
 		info, err := prepareAgentModel(cmd, client, &opts, false)
@@ -335,7 +326,6 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		MultiModal:          multiModal,
 		ContextWindowTokens: contextWindowTokens,
 		Options:             map[string]any{},
-		RLM:                 rlm,
 	}
 
 	info, err := prepareAgentModel(cmd, client, &opts, false)

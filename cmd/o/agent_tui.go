@@ -41,7 +41,6 @@ type agentTUIOptions struct {
 	MultiModal          bool
 	ChatID              string
 	Messages            []api.Message
-	RLM                 bool
 }
 
 func saveLastAgentModel(model string) error {
@@ -98,20 +97,20 @@ func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptio
 	if _, err := reloadSkills(); err != nil {
 		return fmt.Errorf("load agent skills: %w", err)
 	}
-	var registry *coreagent.Registry
 	registryForModel := func(ctx context.Context, model string) *coreagent.Registry {
-		return agentToolsRegistryWithRLM(ctx, client, model, skillCatalog, opts.RLM, nil)
+		return agentToolsRegistry(ctx, client, model, skillCatalog)
 	}
+	var registry *coreagent.Registry
 	if opts.Model != "" {
-		registry = agentToolsRegistryWithRLM(cmd.Context(), client, opts.Model, skillCatalog, opts.RLM, nil)
+		registry = agentToolsRegistry(cmd.Context(), client, opts.Model, skillCatalog)
 	}
 	systemPrompt := agentSystemPromptWithWorkingDir(opts.Model, opts.System, agentSkillSystemContext(skillCatalog, registry, opts.ToolsDisabled), cwd)
 
 	_, err := agentchat.Run(cmd.Context(), agentchat.Options{
-		ChatID:              opts.ChatID,
-		Name:                opts.Name,
-		Messages:            opts.Messages,
-		Store:               store,
+		ChatID:               opts.ChatID,
+		Name:                 opts.Name,
+		Messages:             opts.Messages,
+		Store:                store,
 		Model:                opts.Model,
 		Client:               client,
 		Tools:                registry,
@@ -236,6 +235,8 @@ func agentDefaultSystemPromptWithWorkingDir(now time.Time, modelName string, wor
 		"Use "+shellName+" carefully. Prefer read-only inspection first. Stay within the current working directory unless explicitly asked. Surface intent before risky actions such as writes, deletes, moves, installs, git state changes, service changes, sudo, secrets access, network scripts, or commands outside the working directory. Request approval when required and do not work around denied approvals.",
 		"",
 		"Tell the user about meaningful changes, verification, failures, blockers, assumptions, and risks. Summarize routine tool output instead of dumping it.",
+		"",
+		"Delegating work: run a separate o agent in headless mode when a task benefits from an isolated context. Examples: `o --headless <model> \"prompt\"` answers once and exits; `echo \"prompt\" | o --headless <model>` reads the prompt from stdin. The child session keeps its own history (saved under ~/.o) and prints the final answer on stdout. Pass --allow-all-tools when the child needs tools — headless runs deny anything that would need approval — and pass an explicit model. Headless runs are also good for reviews: `git diff main...HEAD | o --headless --allow-all-tools <model> \"review this diff: correctness first, then risks and simpler options\"` gives a fresh-context verdict you can quote back.",
 	)
 	if workingDir != "" {
 		parts = append(parts, "Current working directory: "+strconv.Quote(workingDir)+".")
@@ -256,10 +257,6 @@ func agentSystemFromShow(ctx context.Context, client *api.Client, modelName stri
 }
 
 func agentToolsRegistry(ctx context.Context, client *api.Client, modelName string, skillCatalog *coreagent.SkillCatalog) *coreagent.Registry {
-	return agentToolsRegistryWithRLM(ctx, client, modelName, skillCatalog, false, nil)
-}
-
-func agentToolsRegistryWithRLM(ctx context.Context, client *api.Client, modelName string, skillCatalog *coreagent.SkillCatalog, rlm bool, rlmOpts *rlmToolConfig) *coreagent.Registry {
 	supportsTools, err := agentModelSupportsTools(ctx, client, modelName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\033[1mwarning:\033[0m could not check model capabilities: %v\n", err)
@@ -296,40 +293,7 @@ func agentToolsRegistryWithRLM(ctx context.Context, client *api.Client, modelNam
 		}
 	}
 
-	if rlm {
-		toolName := "subagents"
-		maxDepth := 1
-		if rlmOpts != nil {
-			if rlmOpts.ToolName != "" {
-				toolName = rlmOpts.ToolName
-			}
-			if rlmOpts.MaxDepth > 0 {
-				maxDepth = rlmOpts.MaxDepth
-			}
-		}
-		// OLLAMA_RLM_TOOL_NAME overrides the tool name for experiments.
-		if envName := os.Getenv("OLLAMA_RLM_TOOL_NAME"); envName != "" {
-			toolName = envName
-		}
-		rlmTool := &agenttools.RLMQuery{
-			Client:   client,
-			Model:    modelName,
-			ToolName: toolName,
-			MaxDepth: maxDepth,
-		}
-		registry.Register(rlmTool)
-		// Wire the registry back-reference so the child session gets the
-		// full tool suite (minus subagents) for depth=1 calls.
-		rlmTool.Registry = registry
-	}
-
 	return registry
-}
-
-// rlmToolConfig configures the RLM tool for experiments.
-type rlmToolConfig struct {
-	ToolName string
-	MaxDepth int
 }
 
 func agentModelSupportsTools(ctx context.Context, client *api.Client, modelName string) (bool, error) {

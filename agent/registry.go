@@ -11,15 +11,7 @@ import (
 
 type ToolContext struct {
 	WorkingDir string
-	// EventSinks are the parent session's event sinks, passed so tools that
-	// spawn child sessions (e.g. the RLM subagents tool) can forward child
-	// events to the parent TUI.
-	EventSinks []EventSink
-	// ToolCallID is the ID of the tool call that triggered this execution,
-	// used to tag forwarded child events with their parent tool call.
-	ToolCallID string
 }
-
 type ToolResult struct {
 	Content    string
 	WorkingDir string
@@ -47,10 +39,7 @@ type Registry struct {
 	tools map[string]Tool
 	// Background surfaces completions from background tool work (e.g.
 	// tools.BackgroundManager, populated by the shell tool's background=true
-	// flag) into runs built from this registry. Child registries (RLM
-	// sub-agents) deliberately leave it unset: only the root run may consume
-	// completions, or a child's drain would steal notices that belong in the
-	// parent's history.
+	// flag) into runs built from this registry.
 	Background BackgroundSource
 }
 

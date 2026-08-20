@@ -154,7 +154,7 @@ func runPipeSetup(ctx context.Context, client *api.Client, opts *agentTUIOptions
 		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
 	}
 
-	registry := agentToolsRegistryWithRLM(ctx, client, opts.Model, catalog, opts.RLM, nil)
+	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
 
 	systemPrompt := agentSystemPromptWithWorkingDir(
 		opts.Model, opts.System,
@@ -450,16 +450,13 @@ func (r *pipeRunner) emitInspect() {
 	})
 }
 
-// applyPipeDefaults applies pipe-mode defaults: full tool access and RLM
-// (subagents) are on unless the user passed those flags explicitly.
+// applyPipeDefaults applies pipe-mode defaults: full tool access is on unless
+// the user passed the flag explicitly.
 func applyPipeDefaults(fs *flag.FlagSet, opts *cliOptions) {
 	seen := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
 	if !seen["allow-all-tools"] {
 		opts.allowAllTools = true
-	}
-	if !seen["rlm"] {
-		opts.rlm = true
 	}
 }
 

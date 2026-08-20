@@ -69,14 +69,6 @@ type chatEventsClosedMsg struct{}
 type chatTickMsg struct{}
 
 func (m *chatModel) applyAgentEvent(event coreagent.Event) {
-	// Subagent events (forwarded from child sessions via the RLM tool) are
-	// routed to the nested tools slice of the parent subagents entry, not
-	// the main transcript.
-	if event.SubagentID != "" {
-		m.applySubagentEvent(event)
-		return
-	}
-
 	contextChanged := false
 
 	switch event.Type {
@@ -338,80 +330,6 @@ func waitForChatMsg(ch <-chan tea.Msg) tea.Cmd {
 		}
 		return msg
 	}
-}
-
-// applySubagentEvent handles events forwarded from a child sub-agent session
-// (via the RLM subagents tool). It routes the child's tool calls, messages,
-// and thinking into the nested tools slice of the parent subagents tool
-// entry, so the TUI can render the child's activity inline under the call.
-func (m *chatModel) applySubagentEvent(event coreagent.Event) {
-	parentIdx := m.findToolEntry(event.SubagentID)
-	if parentIdx < 0 {
-		return
-	}
-	entry := &m.entries[parentIdx]
-
-	switch event.Type {
-	case coreagent.EventMessageDelta:
-		// Accumulate child assistant messages in the parent entry's content
-		// so the final answer is visible when the subagents call completes.
-		if event.Content != "" {
-			entry.content += event.Content
-			entry.status = "running"
-			m.markEntryDirty(parentIdx)
-		}
-
-	case coreagent.EventToolStarted:
-		childIdx := findNestedToolEntry(entry.tools, event.ToolCallID)
-		if childIdx < 0 {
-			entry.tools = append(entry.tools, newChatEntry(chatEntry{role: "tool"}))
-			childIdx = len(entry.tools) - 1
-		}
-		entry.tools[childIdx].detail = event.ToolName
-		entry.tools[childIdx].label = toolInvocationLabel(event.ToolName, event.Args)
-		entry.tools[childIdx].status = "running"
-		entry.tools[childIdx].toolID = event.ToolCallID
-		entry.tools[childIdx].args = event.Args
-		entry.tools[childIdx].startedAt = time.Now()
-		m.markEntryDirty(parentIdx)
-
-	case coreagent.EventToolFinished:
-		childIdx := findNestedToolEntry(entry.tools, event.ToolCallID)
-		if childIdx < 0 {
-			entry.tools = append(entry.tools, newChatEntry(chatEntry{role: "tool"}))
-			childIdx = len(entry.tools) - 1
-		}
-		status := toolFinishedStatus(event)
-		entry.tools[childIdx].content = event.Content
-		entry.tools[childIdx].label = toolInvocationLabel(event.ToolName, event.Args)
-		entry.tools[childIdx].detail = event.ToolName
-		entry.tools[childIdx].status = status
-		if status != "denied" {
-			entry.tools[childIdx].err = event.Error
-		}
-		entry.tools[childIdx].toolID = event.ToolCallID
-		entry.tools[childIdx].args = event.Args
-		entry.tools[childIdx].finishedAt = time.Now()
-		m.markEntryDirty(parentIdx)
-
-	case coreagent.EventError:
-		entry.status = "error"
-		entry.err = event.Error
-		m.markEntryDirty(parentIdx)
-	}
-}
-
-// findNestedToolEntry finds a tool entry by ID within a nested tools slice.
-func findNestedToolEntry(tools []chatEntry, toolID string) int {
-	if toolID == "" {
-		return -1
-	}
-	for i := len(tools) - 1; i >= 0; i-- {
-		if tools[i].toolID == toolID {
-			return i
-		}
-	}
-	return -1
 }
 
 func (m *chatModel) scheduleTick() tea.Cmd {

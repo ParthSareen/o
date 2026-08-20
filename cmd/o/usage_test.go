@@ -4,6 +4,7 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUsageDocumentsEveryFlag(t *testing.T) {
@@ -34,6 +35,15 @@ func TestUsageAgentGuidance(t *testing.T) {
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestSystemPromptTeachesHeadlessDelegation(t *testing.T) {
+	prompt := agentDefaultSystemPromptWithWorkingDir(time.Now(), "test-model", "/tmp")
+	for _, want := range []string{"o --headless", "--allow-all-tools"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q", want)
 		}
 	}
 }

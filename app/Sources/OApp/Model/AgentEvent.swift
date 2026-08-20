@@ -78,7 +78,6 @@ struct AgentEvent: Decodable, Sendable {
     var args: [String: JSONValue]?
     var tokens: Int?
     var error: String?
-    var subagentId: String?
     var skills: [SkillInfo]?
     var system: String?
     var tools: [ToolInfo]?
@@ -104,7 +103,6 @@ struct AgentEvent: Decodable, Sendable {
         args = try c.decodeIfPresent([String: JSONValue].self, forKey: .args)
         tokens = try c.decodeIfPresent(Int.self, forKey: .tokens)
         error = try c.decodeIfPresent(String.self, forKey: .error)
-        subagentId = try c.decodeIfPresent(String.self, forKey: .subagentId)
         skills = try c.decodeIfPresent([SkillInfo].self, forKey: .skills)
         system = try c.decodeIfPresent(String.self, forKey: .system)
         tools = try c.decodeIfPresent([ToolInfo].self, forKey: .tools)
@@ -114,7 +112,7 @@ struct AgentEvent: Decodable, Sendable {
         case type, runId, chatId, model, name, status, toolStatus
         case compactionTrigger, toolCallId, toolName, workingDir
         case content, thinking, toolCalls = "toolCalls", messages, args
-        case tokens, error, subagentId, skills, system, tools
+        case tokens, error, skills, system, tools
     }
 }
 

@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/sessionstore"
 	"github.com/ParthSareen/o/api"
+	"github.com/ParthSareen/o/sessionstore"
 )
 
 // headlessPrompter answers approval prompts without a TTY. With allowAll it
@@ -126,7 +126,7 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
 	}
 
-	registry := agentToolsRegistryWithRLM(ctx, client, opts.Model, catalog, opts.RLM, nil)
+	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}
@@ -222,7 +222,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
 	}
 
-	registry := agentToolsRegistryWithRLM(ctx, client, opts.Model, catalog, opts.RLM, nil)
+	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}

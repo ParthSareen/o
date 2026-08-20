@@ -29,7 +29,6 @@ struct SettingsView: View {
 
             Section("Agent") {
                 Toggle("Full tool access (no approval prompts)", isOn: $settings.prefs.allowAllTools)
-                Toggle("Sub-agents (RLM)", isOn: $settings.prefs.rlm)
                 HStack {
                     Text("Context window tokens")
                     Spacer()

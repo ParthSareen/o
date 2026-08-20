@@ -102,11 +102,6 @@ struct ToolCallRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    if !tool.children.isEmpty {
-                        Label("\(tool.children.count)", systemImage: "arrow.triangle.branch")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
@@ -129,16 +124,6 @@ struct ToolCallRow: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
-                    }
-                    ForEach(tool.children) { child in
-                        BlockRow(block: child)
-                            .padding(.leading, 8)
-                    }
-                    if !tool.subagentLive.isEmpty {
-                        Text(tool.subagentLive)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(6)
                     }
                 }
                 .padding(.horizontal, 10)

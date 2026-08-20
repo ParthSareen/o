@@ -43,8 +43,8 @@ OApp (SwiftUI)
 - **Sidebar** reads `~/.o/sessions.db` read-only via SQLite (schema lives in
   `sessionstore/`). Deletes go through direct DB writes; everything else goes
   through the process.
-- **Settings** live in `~/.o/ui.json` (model, full-access toggle, RLM,
-  context window, extra system prompt, default working directory); the model
+- **Settings** live in `~/.o/ui.json` (model, full-access toggle, context
+  window, extra system prompt, default working directory); the model
   choice also syncs into `~/.ollama/config.json:last_model`.
 - **Model selector** (composer bar): switching reloads this window's session
   via `--resume-id <id> <model>`; `o` persists the override (`SetModel`).
@@ -77,8 +77,8 @@ Events on stdout: everything `agent.Event` emits (`message_delta`,
 {"type":"session_opened","chatId":"…","model":"…","name":"…","workingDir":"…","messages":[...],"skills":[{"name":"…","description":"…"}]}
 ```
 
-Pipe mode grants full tool access and enables RLM sub-agents by default
-(override with `--allow-all-tools=false`, `--rlm=false`).
+Pipe mode grants full tool access by default
+(override with `--allow-all-tools=false`).
 
 Hand-test without the app:
 

@@ -22,8 +22,6 @@ struct ToolBlock: Equatable, Identifiable, Sendable {
     var result: String? = nil
     var errorText: String? = nil
     var workingDir: String? = nil
-    var children: [Block] = []        // sub-agent activity (rlm)
-    var subagentLive: String = ""     // streaming text from a sub-agent run
 }
 
 enum CompactionPhase: Equatable, Sendable {

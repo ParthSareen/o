@@ -61,10 +61,9 @@ final class SessionController {
     }
 
     private var pendingMain = PendingText()
-    private var pendingSub: [String: PendingText] = [:] // keyed by parent tool-call id
     private var liveDirty = false
     /// Structural insertions deferred to the flush tick (see enqueueBlock).
-    private var pendingBlocks: [(block: Block, scope: String?)] = []
+    private var pendingBlocks: [Block] = []
 
     private var process: OProcess?
     private var pumpTask: Task<Void, Never>?
@@ -87,7 +86,6 @@ final class SessionController {
         liveAssistant = ""
         liveThinking = ""
         pendingMain = PendingText()
-        pendingSub = [:]
         contextTokens = nil
         lastRunStatus = nil
         skills = []
@@ -102,8 +100,6 @@ final class SessionController {
             name: spec.name,
             systemPrompt: settings.prefs.defaultSystemPrompt.isEmpty ? nil : settings.prefs.defaultSystemPrompt,
             contextWindowTokens: settings.prefs.contextWindowTokens,
-            allowAllTools: settings.prefs.allowAllTools,
-            rlm: settings.prefs.rlm,
             workingDir: spec.workingDir ?? settings.prefs.defaultWorkingDir.nilIfEmpty
         )
 
@@ -173,14 +169,11 @@ final class SessionController {
             liveDirty = false
             if liveAssistant != pendingMain.assistant { liveAssistant = pendingMain.assistant }
             if liveThinking != pendingMain.thinking { liveThinking = pendingMain.thinking }
-            for (parentID, pending) in pendingSub {
-                mutateTool(parentID, in: &blocks) { $0.subagentLive = pending.assistant }
-            }
         }
         if !pendingBlocks.isEmpty {
             let queued = pendingBlocks
             pendingBlocks.removeAll()
-            for (block, scope) in queued { appendBlock(block, scope: scope) }
+            for block in queued { appendBlock(block) }
         }
     }
 
@@ -191,7 +184,7 @@ final class SessionController {
         guard !trimmed.isEmpty, phase == .idle else { return }
         errorBanner = nil
         lastRunStatus = nil
-        appendBlock(.userMessage(id: UUID(), text: trimmed), scope: nil)
+        appendBlock(.userMessage(id: UUID(), text: trimmed))
         phase = .running
         onRunStarted?()
         // wire text may carry extra context (e.g. review comments) while the
@@ -331,14 +324,13 @@ final class SessionController {
     func testingInjectUserTurn(_ text: String) {
         errorBanner = nil
         lastRunStatus = nil
-        appendBlock(.userMessage(id: UUID(), text: text), scope: nil)
+        appendBlock(.userMessage(id: UUID(), text: text))
         phase = .running
     }
 
     // MARK: event reducer
 
     func apply(_ ev: AgentEvent) {
-        let scope = ev.subagentId?.isEmpty == false ? ev.subagentId : nil
         switch ev.type {
         case .sessionOpened:
             sessionID = ev.chatId
@@ -354,18 +346,16 @@ final class SessionController {
 
         case .messageDelta:
             guard let content = ev.content else { return }
-            if let scope { pendingSub[scope, default: PendingText()].assistant += content }
-            else { pendingMain.assistant += content }
+            pendingMain.assistant += content
             liveDirty = true
 
         case .thinkingDelta:
             guard let text = ev.thinking else { return }
-            if let scope { pendingSub[scope, default: PendingText()].thinking += text }
-            else { pendingMain.thinking += text }
+            pendingMain.thinking += text
             liveDirty = true
 
         case .toolCallDetected:
-            finalizeLiveText(scope: scope)
+            finalizeLiveText()
             for call in ev.toolCalls ?? [] {
                 var tool = ToolBlock(id: UUID())
                 tool.callID = call.id
@@ -374,13 +364,13 @@ final class SessionController {
                 if let args = call.function.arguments {
                     tool.argsSummary = Self.toolSummary(name: tool.name, args: args)
                 }
-                appendBlock(.tool(tool), scope: scope)
+                appendBlock(.tool(tool))
             }
 
         case .toolStarted:
-            finalizeLiveText(scope: scope)
+            finalizeLiveText()
             guard let name = ev.toolName else { return }
-            mutateTool(id: ev.toolCallId ?? "", name: name, scope: scope) { tool in
+            mutateTool(id: ev.toolCallId ?? "", name: name) { tool in
                 tool.status = .running
                 tool.name = name
                 if let args = ev.args {
@@ -392,58 +382,52 @@ final class SessionController {
 
         case .toolFinished:
             guard let name = ev.toolName else { return }
-            mutateTool(id: ev.toolCallId ?? "", name: name, scope: scope) { tool in
+            mutateTool(id: ev.toolCallId ?? "", name: name) { tool in
                 tool.status = ToolRunStatus(wire: ev.toolStatus)
                 tool.name = name
                 if let content = ev.content, !content.isEmpty { tool.result = content }
                 if let err = ev.error, !err.isEmpty { tool.errorText = err }
             }
-            // safety net: finish any live sub-agent text under this call
-            if let scope = ev.toolCallId, pendingSub[scope] != nil {
-                finalizeLiveText(scope: scope)
-            }
 
         case .compactionStarted:
-            finalizeLiveText(scope: scope)
+            finalizeLiveText()
             appendBlock(.compaction(id: UUID(), phase: .running,
-                                    detail: ev.compactionTrigger ?? ""), scope: scope)
+                                    detail: ev.compactionTrigger ?? ""))
 
         case .compactionProgress:
             if let tokens = ev.tokens {
                 contextTokens = tokens
-                mutateLastCompaction(scope: scope) { detail in
+                mutateLastCompaction { detail in
                     detail = "compacting… \(tokens) tokens"
                 }
             }
 
         case .compacted:
-            mutateLastCompaction(scope: scope) { $0 = ev.content ?? "context compacted" }
-            setLastCompactionPhase(.done, scope: scope)
+            mutateLastCompaction { $0 = ev.content ?? "context compacted" }
+            setLastCompactionPhase(.done)
 
         case .compactionSkipped:
-            setLastCompactionPhase(.skipped, scope: scope, detail: ev.content)
+            setLastCompactionPhase(.skipped, detail: ev.content)
 
         case .backgroundTasks:
             // Background task completions arrive as a pre-formatted notice
             // (also injected into history by the session); render muted.
-            finalizeLiveText(scope: scope)
+            finalizeLiveText()
             if let text = ev.content, !text.isEmpty {
-                enqueueBlock(.background(id: UUID(), text: text), scope: scope)
+                enqueueBlock(.background(id: UUID(), text: text))
             }
 
         case .runFinished:
-            finalizeLiveText(scope: scope)
-            if scope == nil {
-                phase = .idle
+            finalizeLiveText()
+            phase = .idle
                 lastRunStatus = ev.status
                 onRunFinished?()
                 NotificationCenter.default.post(name: .oSessionsChanged, object: nil)
-            }
 
         case .error:
-            finalizeLiveText(scope: scope)
-            appendBlock(.error(id: UUID(), message: ev.error ?? "unknown error"), scope: scope)
-            if scope == nil { phase = phase == .running ? .running : .idle }
+            finalizeLiveText()
+            appendBlock(.error(id: UUID(), message: ev.error ?? "unknown error"))
+            phase = phase == .running ? .running : .idle
 
         case .sessionAssigned:
             // fresh sessions are lazy: the store row appears on first prompt
@@ -475,7 +459,7 @@ final class SessionController {
     }
 
     private func applyError(_ message: String) {
-        finalizeLiveText(scope: nil)
+        finalizeLiveText()
         blocks.append(.error(id: UUID(), message: message))
         phase = .idle
     }
@@ -499,47 +483,33 @@ final class SessionController {
     /// Commit any streamed-but-unrendered text into finished blocks, and
     /// clear the live text areas. Called at event boundaries (tool calls,
     /// run end) so text and tools interleave in the right order.
-    private func finalizeLiveText(scope: String?) {
+    private func finalizeLiveText() {
         flushLiveText()
-        let pending: PendingText
-        if let scope {
-            pending = pendingSub[scope] ?? PendingText()
-            pendingSub[scope] = nil
-        } else {
-            pending = pendingMain
-            pendingMain = PendingText()
-            liveAssistant = ""
-            liveThinking = ""
-        }
+        let pending = pendingMain
+        pendingMain = PendingText()
+        liveAssistant = ""
+        liveThinking = ""
         if !pending.thinking.isEmpty {
-            appendBlock(.thinking(id: UUID(), text: pending.thinking), scope: scope)
+            appendBlock(.thinking(id: UUID(), text: pending.thinking))
         }
         if !pending.assistant.isEmpty {
-            appendBlock(.assistant(id: UUID(), text: pending.assistant), scope: scope)
+            appendBlock(.assistant(id: UUID(), text: pending.assistant))
         }
     }
-
-    private func appendBlock(_ block: Block, scope: String?) {
-        guard let scope else {
-            blocks.append(block)
-            return
-        }
-        let found = mutateTool(scope, in: &blocks) { $0.children.append(block) }
-        if !found { blocks.append(block) }
+    private func appendBlock(_ block: Block) {
+        blocks.append(block)
     }
-
     /// Structural block insertions that can land at arbitrary times mid-run
     /// (background-task completions) ride the 33ms flush tick instead of
     /// mutating `blocks` straight from the event callback. Batching them with
     /// text flushes keeps the transcript's lazy stack from being structurally
     /// invalidated at random interleavings (observed as an AppKit display-
     /// cycle constraint crash via LazyLayoutViewCache.signalPrefetch).
-    private func enqueueBlock(_ block: Block, scope: String?) {
-        pendingBlocks.append((block, scope))
+    private func enqueueBlock(_ block: Block) {
+        pendingBlocks.append(block)
         startFlushLoopIfNeeded()
     }
-
-    private func mutateLastCompaction(scope: String?, _ update: (inout String) -> Void) {
+    private func mutateLastCompaction(_ update: (inout String) -> Void) {
         for i in blocks.indices.reversed() {
             if case .compaction(let id, let phase, var detail) = blocks[i], phase == .running {
                 update(&detail)
@@ -547,10 +517,8 @@ final class SessionController {
                 return
             }
         }
-        _ = scope
     }
-
-    private func setLastCompactionPhase(_ phase: CompactionPhase, scope: String?, detail: String? = nil) {
+    private func setLastCompactionPhase(_ phase: CompactionPhase, detail: String? = nil) {
         for i in blocks.indices.reversed() {
             if case .compaction(let id, let oldPhase, var d) = blocks[i], oldPhase == .running {
                 if let detail, !detail.isEmpty { d = detail }
@@ -558,26 +526,12 @@ final class SessionController {
                 return
             }
         }
-        _ = scope
     }
-
-    /// Update a tool block at the given scope. Matches by call ID first,
-    /// then by the first matching-name block still pending/running (some
-    /// models emit tool calls without stable IDs).
-    private func mutateTool(id: String, name: String, scope: String?, _ update: (inout ToolBlock) -> Void) {
+    /// Update a tool block. Matches by call ID first, then by the first
+    /// matching-name block still pending/running (some models emit tool
+    /// calls without stable IDs).
+    private func mutateTool(id: String, name: String, _ update: (inout ToolBlock) -> Void) {
         if !id.isEmpty, mutateTool(id, in: &blocks, update) { return }
-        // fallback: nearest unfinished block with this name at this scope
-        if let scope {
-            if updateChildTool(parentID: scope, name: name, update) { return }
-            // no matching child block (sub-agent tool calls may arrive
-            // without a tool_call_detected first): create one under the parent
-            var tool = ToolBlock(id: UUID())
-            tool.callID = id
-            tool.name = name
-            update(&tool)
-            _ = mutateTool(scope, in: &blocks) { $0.children.append(.tool(tool)) }
-            return
-        }
         for i in blocks.indices.reversed() {
             if case .tool(var tool) = blocks[i],
                tool.name == name, tool.status == .pending || tool.status == .running {
@@ -591,25 +545,7 @@ final class SessionController {
         tool.callID = id
         tool.name = name
         update(&tool)
-        appendBlock(.tool(tool), scope: nil)
-    }
-
-    /// Update the nearest unfinished child tool with this name under a parent
-    /// tool block. Returns true if a child was updated.
-    private func updateChildTool(parentID: String, name: String, _ update: (inout ToolBlock) -> Void) -> Bool {
-        var didUpdate = false
-        _ = mutateTool(parentID, in: &blocks) { parent in
-            for i in parent.children.indices.reversed() {
-                if case .tool(var child) = parent.children[i],
-                   child.name == name, child.status == .pending || child.status == .running {
-                    update(&child)
-                    parent.children[i] = .tool(child)
-                    didUpdate = true
-                    return
-                }
-            }
-        }
-        return didUpdate
+        appendBlock(.tool(tool))
     }
 
     @discardableResult
@@ -621,16 +557,9 @@ final class SessionController {
                 list[i] = .tool(tool)
                 return true
             }
-            var children = tool.children
-            if mutateTool(callID, in: &children, update) {
-                tool.children = children
-                list[i] = .tool(tool)
-                return true
-            }
         }
         return false
     }
-
     // MARK: history rebuild
 
     /// Fold a persisted message list (from session_opened) into finished

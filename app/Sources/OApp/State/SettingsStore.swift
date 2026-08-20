@@ -3,7 +3,6 @@ import SwiftUI
 
 struct UIPreferences: Codable, Equatable {
     var allowAllTools: Bool = true
-    var rlm: Bool = true
     var contextWindowTokens: Int = 0      // 0 = model default
     var defaultSystemPrompt: String = ""
     var selectedModel: String = ""        // empty = o's last model
