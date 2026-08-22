@@ -195,6 +195,7 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
 		ApprovalState:    state,
 		WorkingDir:       workingDir,
+		SupportsImages:   opts.MultiModal,
 		Compactor: &coreagent.SimpleCompactor{
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},

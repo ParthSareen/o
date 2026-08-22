@@ -1225,6 +1225,7 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 		ApprovalPrompter: m.approvalPrompterForRun(m.approvalController),
 		ApprovalState:    m.ensureApprovalState(),
 		WorkingDir:       m.currentWorkingDir(),
+		SupportsImages:   m.opts.MultiModal,
 		Compactor:        m.opts.Compactor,
 		Background:       m.opts.Tools.BackgroundSource(),
 	}

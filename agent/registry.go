@@ -11,10 +11,17 @@ import (
 
 type ToolContext struct {
 	WorkingDir string
+	// SupportsImages reports whether the active model accepts image input.
+	// Tools that can return image data (e.g. read on an image file) should
+	// only attach it when set.
+	SupportsImages bool
 }
 type ToolResult struct {
 	Content    string
 	WorkingDir string
+	// Images carries image data returned by the tool. It is attached to the
+	// tool result message so vision-capable models can see it.
+	Images []api.ImageData
 }
 
 type Tool interface {

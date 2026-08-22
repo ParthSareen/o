@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,9 @@ import (
 
 const (
 	maxReadBytes = 200000
+	// maxReadImageBytes caps image attachments, mirroring the 100MB limit the
+	// chat input path applies to pasted/dropped images (filedata.GetData).
+	maxReadImageBytes = 100 * 1024 * 1024
 )
 
 type Read struct{}
@@ -28,7 +32,7 @@ func (r *Read) Name() string {
 }
 
 func (r *Read) Description() string {
-	return "Read a text file from the current working directory."
+	return "Read a text file from the current working directory. When the model supports images, image files (png, jpeg, webp) are returned as image data the model can see."
 }
 
 func (r *Read) Schema() api.ToolFunction {
@@ -73,6 +77,14 @@ func (r *Read) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[
 	}
 	defer file.Close()
 
+	imageKind, err := sniffImageKind(file)
+	if err != nil {
+		return agent.ToolResult{}, err
+	}
+	if imageKind != "" {
+		return readImageResult(toolCtx, file, path, imageKind, info.Size(), args)
+	}
+
 	selection, err := readSelectionFromArgs(args)
 	if err != nil {
 		return agent.ToolResult{}, err
@@ -99,6 +111,55 @@ func (r *Read) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[
 		return agent.ToolResult{}, err
 	}
 	return agent.ToolResult{Content: content}, nil
+}
+
+// readImageResult serves a read call on an image file. When the model
+// supports images the raw bytes are returned as image data the model can
+// see; otherwise the call fails cleanly instead of returning binary noise.
+func readImageResult(toolCtx agent.ToolContext, file *os.File, path, kind string, size int64, args map[string]any) (agent.ToolResult, error) {
+	selection, err := readSelectionFromArgs(args)
+	if err != nil {
+		return agent.ToolResult{}, err
+	}
+	if selection.enabled {
+		return agent.ToolResult{}, fmt.Errorf("line ranges are not supported for image files")
+	}
+	if !toolCtx.SupportsImages {
+		return agent.ToolResult{}, fmt.Errorf("%s is an image (%s) but the current model does not support image input", path, kind)
+	}
+	if size > maxReadImageBytes {
+		return agent.ToolResult{}, fmt.Errorf("%s is too large to read (%d bytes)", path, size)
+	}
+	data, err := readAllWithinLimit(file, maxReadImageBytes)
+	if err != nil {
+		return agent.ToolResult{}, err
+	}
+	return agent.ToolResult{
+		Content: fmt.Sprintf("[%s image, %d bytes, attached to this message]", kind, len(data)),
+		Images:  []api.ImageData{data},
+	}, nil
+}
+
+// readImageKinds maps sniffed content types to a short display name. Matches
+// the image types accepted by the chat input path (filedata.GetData).
+var readImageKinds = map[string]string{
+	"image/jpeg": "JPEG",
+	"image/png":  "PNG",
+	"image/webp": "WEBP",
+}
+
+// sniffImageKind detects whether file is a supported image from its first
+// bytes, restoring the read offset before returning.
+func sniffImageKind(file *os.File) (string, error) {
+	buf := make([]byte, 512)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return readImageKinds[http.DetectContentType(buf[:n])], nil
 }
 
 type Edit struct{}

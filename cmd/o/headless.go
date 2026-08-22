@@ -158,6 +158,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
 		ApprovalState:    state,
 		WorkingDir:       workingDir,
+		SupportsImages:   opts.MultiModal,
 		Compactor: &coreagent.SimpleCompactor{
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
@@ -248,6 +249,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
 		ApprovalState:    state,
 		WorkingDir:       workingDir,
+		SupportsImages:   opts.MultiModal,
 		Compactor: &coreagent.SimpleCompactor{
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
