@@ -1,7 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -567,5 +571,82 @@ func TestReadRejectsInvalidRange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "end must") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func writeTestPNG(t *testing.T, dir, name string) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 0xff, A: 0xff})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestReadReturnsImageDataWhenModelSupportsImages(t *testing.T) {
+	dir := t.TempDir()
+	data := writeTestPNG(t, dir, "photo.png")
+
+	result, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir, SupportsImages: true}, map[string]any{
+		"path": "photo.png",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Images) != 1 {
+		t.Fatalf("images = %d, want 1", len(result.Images))
+	}
+	if string(result.Images[0]) != string(data) {
+		t.Fatal("image data mismatch")
+	}
+	if !strings.Contains(result.Content, "PNG image") {
+		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+func TestReadRejectsImageWhenModelLacksImageSupport(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPNG(t, dir, "photo.png")
+
+	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path": "photo.png",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReadImageRejectsLineRanges(t *testing.T) {
+	dir := t.TempDir()
+	writeTestPNG(t, dir, "photo.png")
+
+	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir, SupportsImages: true}, map[string]any{
+		"path":  "photo.png",
+		"start": 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "line ranges are not supported for image files") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReadTextFileCarriesNoImages(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("plain text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir, SupportsImages: true}, map[string]any{
+		"path": "note.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "plain text\n" || len(result.Images) != 0 {
+		t.Fatalf("result = %#v", result)
 	}
 }

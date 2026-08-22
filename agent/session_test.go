@@ -2265,3 +2265,99 @@ func TestSessionAllowAllToolsExecutesApprovalTool(t *testing.T) {
 		t.Fatalf("tool content = %q, want approved", result.Messages[2].Content)
 	}
 }
+
+type imageTool struct{}
+
+func (imageTool) Name() string {
+	return "image_tool"
+}
+
+func (imageTool) Description() string {
+	return "returns an image when the model supports images"
+}
+
+func (imageTool) Schema() api.ToolFunction {
+	return api.ToolFunction{
+		Name:        "image_tool",
+		Description: "returns an image when the model supports images",
+		Parameters: api.ToolFunctionParameters{
+			Type:       "object",
+			Properties: api.NewToolPropertiesMap(),
+		},
+	}
+}
+
+func (imageTool) Execute(_ context.Context, toolCtx ToolContext, _ map[string]any) (ToolResult, error) {
+	if !toolCtx.SupportsImages {
+		return ToolResult{Content: "images not supported"}, nil
+	}
+	return ToolResult{Content: "[image attached]", Images: []api.ImageData{[]byte("fake-image-bytes")}}, nil
+}
+
+func TestSessionAttachesToolResultImagesWhenModelSupportsImages(t *testing.T) {
+	responses := [][]api.ChatResponse{
+		{{Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
+			ID:       "call-1",
+			Function: api.ToolCallFunction{Name: "image_tool"},
+		}}}}},
+		{{Message: api.Message{Role: "assistant", Content: "done"}}},
+	}
+
+	t.Run("supported", func(t *testing.T) {
+		client := &fakeClient{responses: responses}
+		registry := &Registry{}
+		registry.Register(imageTool{})
+		session := &Session{
+			Client:         client,
+			Tools:          registry,
+			ApprovalState:  approvalStateForTest(true, nil),
+			SupportsImages: true,
+		}
+
+		if _, err := session.Run(context.Background(), RunOptions{
+			ChatID:      "chat-1",
+			Model:       "model",
+			NewMessages: []api.Message{{Role: "user", Content: "show me"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(client.requests) != 2 {
+			t.Fatalf("requests = %d, want 2", len(client.requests))
+		}
+		msgs := client.requests[1].Messages
+		if len(msgs) != 3 {
+			t.Fatalf("second request messages = %#v", msgs)
+		}
+		toolMsg := msgs[2]
+		if toolMsg.Role != "tool" || len(toolMsg.Images) != 1 || string(toolMsg.Images[0]) != "fake-image-bytes" {
+			t.Fatalf("tool message = %#v", toolMsg)
+		}
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		client := &fakeClient{responses: responses}
+		registry := &Registry{}
+		registry.Register(imageTool{})
+		session := &Session{
+			Client:        client,
+			Tools:         registry,
+			ApprovalState: approvalStateForTest(true, nil),
+		}
+
+		if _, err := session.Run(context.Background(), RunOptions{
+			ChatID:      "chat-1",
+			Model:       "model",
+			NewMessages: []api.Message{{Role: "user", Content: "show me"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(client.requests) != 2 {
+			t.Fatalf("requests = %d, want 2", len(client.requests))
+		}
+		msgs := client.requests[1].Messages
+		toolMsg := msgs[len(msgs)-1]
+		if toolMsg.Role != "tool" || len(toolMsg.Images) != 0 || toolMsg.Content != "images not supported" {
+			t.Fatalf("tool message = %#v", toolMsg)
+		}
+	})
+}

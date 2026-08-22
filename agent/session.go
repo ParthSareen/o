@@ -30,6 +30,10 @@ type Session struct {
 	ApprovalState    *ApprovalState
 	WorkingDir       string
 	Compactor        Compactor
+	// SupportsImages reports whether the active model accepts image input.
+	// It is forwarded to tools via ToolContext so tools like read can return
+	// image files as image data on the tool result message.
+	SupportsImages bool
 	// Background, when set, is drained for finished background tasks at run
 	// boundaries: completions are injected into the conversation so the
 	// model sees (and can react to) them.
@@ -705,7 +709,7 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			return toolBatchResult{}, err
 		}
 
-		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir}, call)
+		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir, SupportsImages: s.SupportsImages}, call)
 		if err != nil {
 			rawContent := fmt.Sprintf("Error: %v", err)
 			msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)
@@ -737,6 +741,7 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 		rawContent := result.Content
 
 		msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)
+		msg.Images = result.Images
 		batch.messages = append(batch.messages, msg)
 		batchTokens += estimateMessagesTokens([]api.Message{msg})
 		content := msg.Content
@@ -932,6 +937,7 @@ func (s *Session) compactForToolOutputOverflow(ctx context.Context, runID string
 			}
 		}
 		refit := budget.FitToolResult(toolName, msg.ToolCallID, content, historyTokens+batchTokens, CeilingContextWindow)
+		refit.Images = msg.Images
 		compacted = append(compacted, refit)
 		batchTokens += estimateMessagesTokens([]api.Message{refit})
 	}
