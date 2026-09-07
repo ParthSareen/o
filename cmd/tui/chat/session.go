@@ -8,7 +8,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	apptui "github.com/ParthSareen/o/cmd/tui"
+	"github.com/ParthSareen/o/sessionstore"
 )
+
+// resumeCandidateLimit bounds how many recent sessions /resume scans when
+// matching an ID or name.
+const resumeCandidateLimit = 100
 
 // initSession ensures the chatModel has a chatID. If a store is configured
 // and chatID is empty, a new session row is created. If messages were
@@ -253,6 +258,76 @@ func (m chatModel) renderSessionPicker(width int) string {
 		return ""
 	}
 	return m.sessionPicker.RenderContent()
+}
+
+// handleResumeCommand implements /resume. With no argument it resumes the
+// most recent session other than the current chat; with an argument it
+// matches a session by ID, ID prefix, or name and resumes the most recently
+// updated match.
+func (m *chatModel) handleResumeCommand(args string) (tea.Model, tea.Cmd) {
+	if m.thinking {
+		m.entries = append(m.entries, newSlashEntry("Wait for the current run to finish before resuming."))
+		return *m, nil
+	}
+	if m.store == nil {
+		m.entries = append(m.entries, newSlashEntry("Session history unavailable (no store)."))
+		return *m, nil
+	}
+	metas, err := m.store.ListSessions(resumeCandidateLimit)
+	if err != nil || len(metas) == 0 {
+		m.entries = append(m.entries, newSlashEntry("No saved sessions."))
+		return *m, nil
+	}
+
+	var id string
+	if ref := strings.TrimSpace(args); ref == "" {
+		for _, meta := range metas {
+			if meta.ID != m.chatID {
+				id = meta.ID
+				break
+				}
+			}
+		if id == "" {
+			m.entries = append(m.entries, newSlashEntry("No other session to resume."))
+			return *m, nil
+		}
+	} else {
+		id = matchSessionRef(metas, ref)
+		if id == "" {
+			m.entries = append(m.entries, newSlashEntry("No saved session matches "+ref+"."))
+			return *m, nil
+		}
+	}
+
+	if !m.resumeSession(id) {
+		m.entries = append(m.entries, newSlashEntry("Could not load session."))
+		m.status = "ready"
+		return *m, nil
+	}
+	m.status = "ready"
+	return m.withFlowTranscriptFlush(nil)
+}
+
+// matchSessionRef resolves a /resume argument to a session ID. Exact IDs and
+// names win over ID prefixes; ties resolve to the most recently updated
+// session because metas arrive newest first.
+func matchSessionRef(metas []sessionstore.SessionMeta, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	for _, meta := range metas {
+		if meta.ID == ref || strings.EqualFold(meta.Name, ref) {
+			return meta.ID
+		}
+	}
+	lower := strings.ToLower(ref)
+	for _, meta := range metas {
+		if strings.HasPrefix(strings.ToLower(meta.ID), lower) {
+			return meta.ID
+		}
+	}
+	return ""
 }
 
 // sessionDisplayLabel picks a human-readable label for a session, preferring

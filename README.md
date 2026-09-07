@@ -74,8 +74,9 @@ review → auto → full access.
 
 ## The TUI
 
-Slash commands: `/sessions` selects a session to resume, `/name [set <text>]`
-shows or sets the session name, `/help` lists all commands.
+Slash commands: `/sessions` selects a session to resume, `/resume
+[<id|name>]` resumes the most recent or a matching session, `/name [set
+<text>]` shows or sets the session name, `/help` lists all commands.
 
 Keys:
 

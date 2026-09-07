@@ -64,6 +64,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/prompt", description: "show full prompt, tools, and messages"},
 	{name: "/save", usage: "/save <filename>", description: "save request JSON; saved as <filename>.json"},
 	{name: "/sessions", description: "list and resume past sessions"},
+	{name: "/resume", usage: "/resume [<id|name>]", description: "resume the most recent or a matching session"},
 	{name: "/name", usage: "/name [set <text>]", description: "show or set the session name"},
 }
 
@@ -177,7 +178,8 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return m.resetChat("new chat")
 	case command == "/sessions" && args == "":
 		return m.openSessionPicker()
-	case command == "/sessions" && args == "":
+	case command == "/resume":
+		return m.handleResumeCommand(args)
 	case command == "/name":
 		return m.handleNameCommand(args)
 	case command == "/compact" && args == "":

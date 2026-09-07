@@ -37,6 +37,8 @@ func TestChatHelpCommandShowsV1Commands(t *testing.T) {
 		"- `/bye`: exit",
 		"- `/prompt`: show full prompt, tools, and messages",
 		"- `/save <filename>`: save request JSON; saved as <filename>.json",
+		"- `/sessions`: list and resume past sessions",
+		"- `/resume [<id|name>]`: resume the most recent or a matching session",
 		"**Shortcuts**",
 		"- `shift+enter`: insert a newline",
 		"- `shift+tab`: toggle permission mode",
@@ -45,7 +47,7 @@ func TestChatHelpCommandShowsV1Commands(t *testing.T) {
 			t.Fatalf("help output missing %q:\n%s", want, fm.entries[0].content)
 		}
 	}
-	for _, removed := range []string{"/history", "/load", "/raw", "/resume", "/set", "/show", "/verbose"} {
+	for _, removed := range []string{"/history", "/load", "/raw", "/set", "/show", "/verbose"} {
 		if strings.Contains(fm.entries[0].content, removed) {
 			t.Fatalf("removed command %q should stay hidden from help:\n%s", removed, fm.entries[0].content)
 		}
@@ -838,7 +840,7 @@ func TestSkillSlashNameResolvesAndRejectsArgsAndUnknown(t *testing.T) {
 
 func TestChatDeletedSlashCommandsArePlainText(t *testing.T) {
 	// unrecognized slash input submits as a normal prompt (no error entry)
-	for _, command := range []string{"/clear", "/copy-all", "/launch", "/history", "/load", "/raw", "/resume", "/set", "/show", "/verbose"} {
+	for _, command := range []string{"/clear", "/copy-all", "/launch", "/history", "/load", "/raw", "/set", "/show", "/verbose"} {
 		t.Run(command, func(t *testing.T) {
 			m := chatModel{ctx: context.Background(), opts: Options{Client: chatTestClient{}, Model: "test"}, input: []rune(command)}
 
