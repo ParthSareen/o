@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ParthSareen/o/cmd/launch"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestRenderSignIn_ContainsModelName(t *testing.T) {

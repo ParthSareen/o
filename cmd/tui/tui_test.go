@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ParthSareen/o/cmd/launch"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/go-cmp/cmp"
-	"github.com/ParthSareen/o/cmd/launch"
 )
 
 func launcherTestState() *launch.LauncherState {

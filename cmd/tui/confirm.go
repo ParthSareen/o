@@ -3,9 +3,9 @@ package tui
 import (
 	"fmt"
 
+	"github.com/ParthSareen/o/cmd/launch"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ParthSareen/o/cmd/launch"
 )
 
 var (
