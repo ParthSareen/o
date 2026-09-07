@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	coreagent "github.com/ParthSareen/o/agent"
+	"github.com/ParthSareen/o/api"
 )
 
 func testApprovalRequest() coreagent.ApprovalRequest {
@@ -516,5 +518,184 @@ func TestChatApprovalPromptSkippedWhenFullAccessEnabledInFlight(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected auto-approval sent on the reply channel")
+	}
+}
+
+type fakeReviewChatClient struct {
+	responses [][]api.ChatResponse
+	requests  []*api.ChatRequest
+}
+
+func (c *fakeReviewChatClient) Chat(ctx context.Context, req *api.ChatRequest, fn api.ChatResponseFunc) error {
+	c.requests = append(c.requests, req)
+	if len(c.responses) == 0 {
+		return errors.New("review model unavailable")
+	}
+	responses := c.responses[0]
+	c.responses = c.responses[1:]
+	for _, response := range responses {
+		if err := fn(response); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reviewDecisionChunks(outcome, risk, rationale string) []api.ChatResponse {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("risk_level", risk)
+	args.Set("user_authorization", "high")
+	args.Set("outcome", outcome)
+	args.Set("rationale", rationale)
+	return []api.ChatResponse{{
+		Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
+			ID:       "review_1",
+			Function: api.ToolCallFunction{Name: "submit_decision", Arguments: args},
+		}}},
+		Done: true,
+	}}
+}
+
+func TestDefaultPermissionMode(t *testing.T) {
+	tests := []struct {
+		allowAll, autoReview bool
+		want                 coreagent.ApprovalMode
+	}{
+		{false, false, coreagent.ApprovalModeReview},
+		{false, true, coreagent.ApprovalModeAuto},
+		{true, false, coreagent.ApprovalModeFull},
+		{true, true, coreagent.ApprovalModeFull},
+	}
+	for _, tt := range tests {
+		if got := defaultPermissionMode(tt.allowAll, tt.autoReview); got != tt.want {
+			t.Errorf("defaultPermissionMode(%v, %v) = %v, want %v", tt.allowAll, tt.autoReview, got, tt.want)
+		}
+	}
+}
+
+func TestChatPermissionToggleCyclesThroughAuto(t *testing.T) {
+	events := make(chan tea.Msg, 1)
+	state := testApprovalState(false, nil)
+	m := chatModel{
+		opts:               Options{Client: &fakeReviewChatClient{}, Model: "test-model"},
+		approvalState:      state,
+		approvalController: newChatApprovalController(events, state),
+		defaultAllowAll:    false,
+		defaultAutoReview:  false,
+	}
+
+	updated, _ := m.togglePermissionMode()
+	fm := updated.(chatModel)
+	if fm.permissionMode() != coreagent.ApprovalModeAuto || fm.status != "auto mode enabled" {
+		t.Fatalf("first toggle = %v %q, want auto mode", fm.permissionMode(), fm.status)
+	}
+	if !fm.opts.AutoReview || fm.opts.AllowAllTools {
+		t.Fatalf("opts out of sync with auto mode: auto=%v full=%v", fm.opts.AutoReview, fm.opts.AllowAllTools)
+	}
+
+	updated, _ = fm.togglePermissionMode()
+	fm = updated.(chatModel)
+	if fm.permissionMode() != coreagent.ApprovalModeFull || fm.status != "full access enabled" {
+		t.Fatalf("second toggle = %v %q, want full access", fm.permissionMode(), fm.status)
+	}
+
+	updated, _ = fm.togglePermissionMode()
+	fm = updated.(chatModel)
+	if fm.permissionMode() != coreagent.ApprovalModeReview || fm.status != "review mode enabled" {
+		t.Fatalf("third toggle = %v %q, want review mode", fm.permissionMode(), fm.status)
+	}
+}
+
+func TestChatPermissionToggleWithoutAutoSkipsAuto(t *testing.T) {
+	events := make(chan tea.Msg, 1)
+	state := testApprovalState(false, nil)
+	// No client: auto mode is unavailable, so the cycle is review <-> full.
+	m := chatModel{
+		approvalState:      state,
+		approvalController: newChatApprovalController(events, state),
+	}
+
+	updated, _ := m.togglePermissionMode()
+	fm := updated.(chatModel)
+	if fm.permissionMode() != coreagent.ApprovalModeFull {
+		t.Fatalf("toggle = %v, want full access without auto", fm.permissionMode())
+	}
+}
+
+func TestChatAutoReviewSessionPrompterGrades(t *testing.T) {
+	for _, decision := range []struct {
+		outcome string
+		want    bool
+	}{
+		{"allow", true},
+		{"deny", false},
+	} {
+		client := &fakeReviewChatClient{responses: [][]api.ChatResponse{
+			reviewDecisionChunks(decision.outcome, "low", "grades fine"),
+		}}
+		events := make(chan tea.Msg, 1)
+		state := testApprovalState(false, nil)
+		state.SetMode(coreagent.ApprovalModeAuto)
+		m := chatModel{
+			opts:               Options{Client: client, Model: "test-model"},
+			approvalState:      state,
+			approvalController: newChatApprovalController(events, state),
+		}
+
+		result, err := m.autoReviewSessionPrompter().PromptApproval(context.Background(), testApprovalRequest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Allow != decision.want {
+			t.Fatalf("outcome %q: allow = %v, want %v", decision.outcome, result.Allow, decision.want)
+		}
+		select {
+		case msg := <-events:
+			t.Fatalf("grading should not surface a human prompt: %#v", msg)
+		default:
+		}
+		if len(client.requests) != 1 {
+			t.Fatalf("expected one grading call, got %d", len(client.requests))
+		}
+	}
+}
+
+func TestChatAutoReviewSessionPrompterFallsBackToHuman(t *testing.T) {
+	// No scripted response: the grading call fails and the wrapper must fall
+	// back to the human prompt.
+	client := &fakeReviewChatClient{}
+	events := make(chan tea.Msg, 1)
+	state := testApprovalState(false, nil)
+	state.SetMode(coreagent.ApprovalModeAuto)
+	m := chatModel{
+		opts:               Options{Client: client, Model: "test-model"},
+		approvalState:      state,
+		approvalController: newChatApprovalController(events, state),
+	}
+
+	resultCh := make(chan coreagent.Approval, 1)
+	go func() {
+		result, err := m.autoReviewSessionPrompter().PromptApproval(context.Background(), testApprovalRequest())
+		if err != nil {
+			resultCh <- coreagent.Approval{Reason: err.Error()}
+			return
+		}
+		resultCh <- result
+	}()
+
+	select {
+	case msg := <-events:
+		prompt, ok := msg.(chatApprovalPromptMsg)
+		if !ok {
+			t.Fatalf("event = %#v, want approval prompt", msg)
+		}
+		prompt.reply <- coreagent.Approval{Allow: true}
+	case <-time.After(time.Second):
+		t.Fatal("grading failure should fall back to the human prompt")
+	}
+
+	result := <-resultCh
+	if !result.Allow {
+		t.Fatalf("approval = %#v, want the human approval", result)
 	}
 }

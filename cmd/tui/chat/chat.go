@@ -68,6 +68,8 @@ type Options struct {
 	OnModelSelected             func(context.Context, string) error
 	SystemPromptForModel        func(context.Context, string, *coreagent.Registry, bool) string
 	ApprovalPrompter            coreagent.ApprovalPrompter
+	AutoReview                  bool
+	ReviewModel                 string
 	EventSinks                  []coreagent.EventSink
 	AllowAllTools               bool
 	WorkingDir                  string
@@ -146,6 +148,8 @@ type chatModel struct {
 	cloudAuthPrompt      *cloudAuthPrompt
 	pendingModel         string
 	defaultAllowAll      bool
+	defaultAutoReview    bool
+	autoReviewer         *coreagent.AutoReviewer
 	permissionNotice     string
 	selection            chatSelection
 
@@ -220,20 +224,21 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	approvalState := &coreagent.ApprovalState{}
-	approvalState.Set(opts.AllowAllTools, nil)
+	approvalState.SetMode(defaultPermissionMode(opts.AllowAllTools, opts.AutoReview))
 
 	m := chatModel{
-		ctx:             ctx,
-		opts:            opts,
-		chatID:          opts.ChatID,
-		messages:        slices.Clone(opts.Messages),
-		workingDir:      opts.WorkingDir,
-		approvalState:   approvalState,
-		defaultAllowAll: opts.AllowAllTools,
-		promptHistory:   initialPromptHistory(ctx, opts),
-		store:           opts.Store,
-		status:          "ready",
-		openModelOnInit: opts.OpenModelPicker || (strings.TrimSpace(opts.Model) == "" && opts.ModelOptions != nil),
+		ctx:               ctx,
+		opts:              opts,
+		chatID:            opts.ChatID,
+		messages:          slices.Clone(opts.Messages),
+		workingDir:        opts.WorkingDir,
+		approvalState:     approvalState,
+		defaultAllowAll:   opts.AllowAllTools,
+		defaultAutoReview: opts.AutoReview,
+		promptHistory:     initialPromptHistory(ctx, opts),
+		store:             opts.Store,
+		status:            "ready",
+		openModelOnInit:   opts.OpenModelPicker || (strings.TrimSpace(opts.Model) == "" && opts.ModelOptions != nil),
 	}
 	m.nextImageID, m.nextAudioID = nextInputAttachmentIDsFromMessages(m.messages)
 	m.nextPastedTextID = nextInputPastedTextIDFromMessages(m.messages)
@@ -1079,6 +1084,8 @@ func (m *chatModel) resetChat(status string) (tea.Model, tea.Cmd) {
 	m.resetPromptHistoryCursor()
 	m.resetWorkingDir()
 	m.opts.AllowAllTools = m.defaultAllowAll
+	m.opts.AutoReview = m.defaultAutoReview
+	m.autoReviewer = nil
 	m.permissionNotice = ""
 	m.thinking = false
 	m.thinkingTokens = 0
@@ -1222,7 +1229,7 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 		Tools:            m.opts.Tools,
 		Skills:           m.opts.Skills,
 		DisableTools:     m.opts.ToolsDisabled,
-		ApprovalPrompter: m.approvalPrompterForRun(m.approvalController),
+		ApprovalPrompter: m.approvalPrompterForRun(m.autoReviewSessionPrompter()),
 		ApprovalState:    m.ensureApprovalState(),
 		WorkingDir:       m.currentWorkingDir(),
 		SupportsImages:   m.opts.MultiModal,

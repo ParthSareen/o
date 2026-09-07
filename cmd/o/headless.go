@@ -27,6 +27,30 @@ func (p headlessPrompter) PromptApproval(context.Context, coreagent.ApprovalRequ
 	}, nil
 }
 
+// headlessApproval builds the approval state and prompter for headless
+// runs. Auto mode grades calls with the review model and denies when grading
+// fails; there is no human to fall back on.
+func headlessApproval(client coreagent.ChatClient, opts *agentTUIOptions) (*coreagent.ApprovalState, coreagent.ApprovalPrompter) {
+	state := &coreagent.ApprovalState{}
+	if opts.AllowAllTools {
+		state.GrantAll()
+		return state, headlessPrompter{allowAll: true}
+	}
+	if opts.AutoReview {
+		state.SetMode(coreagent.ApprovalModeAuto)
+		reviewer := &coreagent.AutoReviewer{
+			Client: client,
+			Model:  coreagent.ResolveAutoReviewModel(opts.ReviewModel, opts.Model),
+		}
+		return state, coreagent.AutoReviewPrompter{
+			Reviewer:      reviewer,
+			State:         state,
+			DenyOnFailure: true,
+		}
+	}
+	return state, headlessPrompter{allowAll: false}
+}
+
 // headlessRenderer consumes agent events: assistant content goes to stdout
 // (pipe-friendly), thinking/tool activity/compaction to stderr.
 type headlessRenderer struct {
@@ -143,10 +167,7 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 // runHeadlessSession drives one agent session against any ChatClient; split
 // out so tests can run without a real server.
 func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt, prompt, workingDir string, stdout, stderr io.Writer) int {
-	state := &coreagent.ApprovalState{}
-	if opts.AllowAllTools {
-		state.GrantAll()
-	}
+	state, approvalPrompter := headlessApproval(client, opts)
 
 	renderer := newHeadlessRenderer(stdout, stderr, true)
 	session := &coreagent.Session{
@@ -155,7 +176,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 		Tools:            registry,
 		Skills:           catalog,
 		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
+		ApprovalPrompter: approvalPrompter,
 		ApprovalState:    state,
 		WorkingDir:       workingDir,
 		SupportsImages:   opts.MultiModal,
@@ -234,10 +255,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		workingDir,
 	)
 
-	state := &coreagent.ApprovalState{}
-	if opts.AllowAllTools {
-		state.GrantAll()
-	}
+	state, approvalPrompter := headlessApproval(client, opts)
 
 	renderer := newHeadlessRenderer(stdout, stderr, true)
 	session := &coreagent.Session{
@@ -246,7 +264,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		Tools:            registry,
 		Skills:           catalog,
 		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
+		ApprovalPrompter: approvalPrompter,
 		ApprovalState:    state,
 		WorkingDir:       workingDir,
 		SupportsImages:   opts.MultiModal,

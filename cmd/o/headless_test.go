@@ -201,3 +201,140 @@ func TestHeadlessUnknownToolDoesNotPanic(t *testing.T) {
 		t.Fatalf("code = %d", code)
 	}
 }
+
+func reviewDecisionChunks(outcome, risk, rationale string) []api.ChatResponse {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("risk_level", risk)
+	args.Set("user_authorization", "high")
+	args.Set("outcome", outcome)
+	args.Set("rationale", rationale)
+	return []api.ChatResponse{{
+		Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
+			ID:       "review_1",
+			Function: api.ToolCallFunction{Name: "submit_decision", Arguments: args},
+		}}},
+		Done: true,
+	}}
+}
+
+func runFakeAutoReview(t *testing.T, fc *fakeClient, registry *coreagent.Registry) (stdout, stderr string, code int) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	opts := &agentTUIOptions{Model: "test-model", AutoReview: true, Options: map[string]any{}}
+	code = runHeadlessSession(context.Background(), fc, opts, nil, nil, registry, "system prompt", "do the thing", t.TempDir(), &out, &errb)
+	return out.String(), errb.String(), code
+}
+
+func TestHeadlessAutoReviewAllows(t *testing.T) {
+	tool := &riskyTool{}
+	registry := &coreagent.Registry{}
+	registry.Register(tool)
+
+	fc := &fakeClient{responses: [][]api.ChatResponse{
+		toolCallChunks("risky", nil),
+		reviewDecisionChunks("allow", "low", "requested by the user"),
+		textChunks("risky ran fine"),
+	}}
+	stdout, stderr, code := runFakeAutoReview(t, fc, registry)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr)
+	}
+	if tool.called != 1 {
+		t.Fatal("risky tool should execute when the review model allows")
+	}
+	if !strings.Contains(stdout, "risky ran fine") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	// The grading call must go to the session model with the decision tool.
+	if len(fc.requests) != 3 {
+		t.Fatalf("requests = %d, want 3 (turn, review, final)", len(fc.requests))
+	}
+	review := fc.requests[1]
+	if review.Model != "test-model" {
+		t.Fatalf("review model = %q, want the session model", review.Model)
+	}
+	if len(review.Tools) != 1 || review.Tools[0].Function.Name != "submit_decision" {
+		t.Fatalf("review request tools = %+v", review.Tools)
+	}
+}
+
+func TestHeadlessAutoReviewDenies(t *testing.T) {
+	tool := &riskyTool{}
+	registry := &coreagent.Registry{}
+	registry.Register(tool)
+
+	fc := &fakeClient{responses: [][]api.ChatResponse{
+		toolCallChunks("risky", nil),
+		reviewDecisionChunks("deny", "high", "the command is destructive"),
+	}}
+	_, stderr, code := runFakeAutoReview(t, fc, registry)
+	if tool.called != 0 {
+		t.Fatal("risky tool must not execute when the review model denies")
+	}
+	if !strings.Contains(stderr, "✗ risky denied") || !strings.Contains(stderr, "Auto review denied (high risk): the command is destructive") {
+		t.Fatalf("stderr = %q (want denial with review rationale)", stderr)
+	}
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (denied)", code)
+	}
+}
+
+func TestHeadlessAutoReviewFailsClosed(t *testing.T) {
+	tool := &riskyTool{}
+	registry := &coreagent.Registry{}
+	registry.Register(tool)
+
+	fc := &fakeClient{responses: [][]api.ChatResponse{
+		toolCallChunks("risky", nil),
+		textChunks("looks fine to me"),
+	}}
+	_, stderr, code := runFakeAutoReview(t, fc, registry)
+	if tool.called != 0 {
+		t.Fatal("risky tool must not execute when grading fails")
+	}
+	if !strings.Contains(stderr, "Auto review failed") {
+		t.Fatalf("stderr = %q (want fail-closed denial)", stderr)
+	}
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (denied)", code)
+	}
+}
+
+func TestHeadlessApprovalSetup(t *testing.T) {
+	state, prompter := headlessApproval(&fakeClient{}, &agentTUIOptions{})
+	if state.Mode() != coreagent.ApprovalModeReview {
+		t.Fatalf("default mode = %v, want review", state.Mode())
+	}
+	result, err := prompter.PromptApproval(context.Background(), testHeadlessRequest())
+	if err != nil || result.Allow {
+		t.Fatalf("review mode should deny headlessly, got %+v, %v", result, err)
+	}
+
+	state, prompter = headlessApproval(&fakeClient{}, &agentTUIOptions{AllowAllTools: true})
+	if state.Mode() != coreagent.ApprovalModeFull {
+		t.Fatalf("allow-all mode = %v, want full", state.Mode())
+	}
+	result, err = prompter.PromptApproval(context.Background(), testHeadlessRequest())
+	if err != nil || !result.Allow {
+		t.Fatalf("full access should allow, got %+v, %v", result, err)
+	}
+
+	state, prompter = headlessApproval(&fakeClient{}, &agentTUIOptions{AutoReview: true, Model: "m"})
+	if state.Mode() != coreagent.ApprovalModeAuto {
+		t.Fatalf("auto mode = %v, want auto", state.Mode())
+	}
+	result, err = prompter.PromptApproval(context.Background(), testHeadlessRequest())
+	if err != nil || result.Allow {
+		t.Fatalf("auto mode should deny when grading fails, got %+v, %v", result, err)
+	}
+	if !strings.Contains(result.Reason, "Auto review failed") {
+		t.Fatalf("reason = %q", result.Reason)
+	}
+}
+
+func testHeadlessRequest() coreagent.ApprovalRequest {
+	return coreagent.ApprovalRequest{
+		WorkingDir: "/repo",
+		Calls:      []coreagent.ApprovalToolCall{{ToolName: "risky", Args: map[string]any{}}},
+	}
+}

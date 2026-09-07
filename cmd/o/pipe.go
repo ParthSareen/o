@@ -180,11 +180,9 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 	}
 
 	// Pipe mode grants full tool access by default; approval prompts have no
-	// channel back to the frontend, so a required approval would stall the run.
-	state := &coreagent.ApprovalState{}
-	if opts.AllowAllTools {
-		state.GrantAll()
-	}
+	// channel back to the frontend, so a required approval would stall the
+	// run. --auto swaps the blanket grant for review-model grading.
+	state, approvalPrompter := headlessApproval(client, opts)
 
 	session := &coreagent.Session{
 		Client:           client,
@@ -192,7 +190,7 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 		Tools:            registry,
 		Skills:           catalog,
 		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: headlessPrompter{allowAll: opts.AllowAllTools},
+		ApprovalPrompter: approvalPrompter,
 		ApprovalState:    state,
 		WorkingDir:       workingDir,
 		SupportsImages:   opts.MultiModal,

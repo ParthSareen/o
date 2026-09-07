@@ -4,11 +4,16 @@ import (
 	"context"
 	"strings"
 	"sync"
+
+	"github.com/ParthSareen/o/api"
 )
 
 type ApprovalRequest struct {
 	WorkingDir string
-	Calls      []ApprovalToolCall
+	// Task is the most recent user message, giving auto review the context
+	// of what the agent was asked to do.
+	Task  string
+	Calls []ApprovalToolCall
 }
 
 func (r *ApprovalRequest) AddToolCall(id, name, scope string, args map[string]any) {
@@ -38,9 +43,21 @@ type ApprovalPrompter interface {
 	PromptApproval(context.Context, ApprovalRequest) (Approval, error)
 }
 
+// ApprovalMode is the session's permission mode: review prompts for every
+// tool call, auto grades calls that would prompt with a review model, and
+// full runs everything without approval.
+type ApprovalMode int
+
+const (
+	ApprovalModeReview ApprovalMode = iota
+	ApprovalModeAuto
+	ApprovalModeFull
+)
+
 type ApprovalState struct {
 	mu       sync.RWMutex
 	allowAll bool
+	auto     bool
 	scopes   map[string]bool
 }
 
@@ -51,7 +68,46 @@ func (s *ApprovalState) Set(allowAll bool, scopes map[string]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.allowAll = allowAll
+	s.auto = false
 	s.scopes = cloneApprovalScopes(scopes)
+}
+
+// SetMode switches the permission mode.
+func (s *ApprovalState) SetMode(mode ApprovalMode) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch mode {
+	case ApprovalModeFull:
+		s.allowAll = true
+		s.auto = false
+	case ApprovalModeAuto:
+		s.allowAll = false
+		s.auto = true
+	default:
+		s.allowAll = false
+		s.auto = false
+	}
+}
+
+// Mode reports the current permission mode. A state with allow-all granted
+// is full even if auto was also set.
+func (s *ApprovalState) Mode() ApprovalMode {
+	if s == nil {
+		return ApprovalModeReview
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch {
+	case s.allowAll:
+		return ApprovalModeFull
+	case s.auto:
+		return ApprovalModeAuto
+	default:
+		return ApprovalModeReview
+	}
 }
 
 // GrantAll grants blanket approval for all future tool calls.
@@ -140,6 +196,17 @@ func cloneApprovalScopes(src map[string]bool) map[string]bool {
 		}
 	}
 	return dst
+}
+
+// latestUserMessageContent returns the content of the most recent user
+// message, giving approval reviewers the context of the current task.
+func latestUserMessageContent(messages []api.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
 }
 
 func (s *Session) needsApproval(tool Tool, name string, args map[string]any) bool {

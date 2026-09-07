@@ -20,6 +20,8 @@ import (
 type cliOptions struct {
 	system              string
 	allowAllTools       bool
+	autoReview          bool
+	reviewModel         string
 	toolsDisabled       bool
 	multiModal          bool
 	contextWindowTokens int
@@ -36,11 +38,13 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs := flag.NewFlagSet("o", flag.ExitOnError)
 	fs.StringVar(&opts.system, "system", "", "override the model system prompt")
 	fs.BoolVar(&opts.allowAllTools, "allow-all-tools", false, "run tools without approval prompts")
+	fs.BoolVar(&opts.autoReview, "auto", false, "auto mode: a review model grades tool calls that would prompt for approval")
+	fs.StringVar(&opts.reviewModel, "review-model", os.Getenv("O_REVIEW_MODEL"), "model that grades tool calls in --auto mode; \"selected\" (default) uses the session model")
 	fs.BoolVar(&opts.toolsDisabled, "no-tools", false, "disable tool use entirely")
 	fs.BoolVar(&opts.multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&opts.contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
 	fs.BoolVar(&opts.headless, "headless", false, "print the response and exit (prompt from args or stdin)")
-	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools unless set explicitly")
+	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools unless --auto or it is set explicitly")
 	fs.BoolVar(&opts.resume, "resume", false, "resume the most recent session")
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
@@ -82,9 +86,9 @@ func main() {
 	// A positional prompt implies headless; explicit --headless with no
 	// positional prompt reads the prompt from stdin. In pipe mode a
 	// positional prompt is the first turn of the NDJSON session instead.
-	headless := opts.headless || (prompt != "" && !opts.pipe)
+	opts.headless = opts.headless || (prompt != "" && !opts.pipe)
 
-	if err := run(model, prompt, opts.system, opts.allowAllTools, opts.toolsDisabled, opts.multiModal, opts.contextWindowTokens, headless, opts.pipe, opts.resume, opts.resumeID, opts.name); err != nil {
+	if err := run(model, prompt, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -165,10 +169,12 @@ HEADLESS OUTPUT CONTRACT
   exit 1   error, or a tool was denied (reason on stderr)
 
 AGENTS
-  ALWAYS pass --allow-all-tools when driving o headlessly. Most tools
-  (bash, edit, web_fetch, ...) require approval; there is no human at the
-  approval prompt headlessly, so without the flag the tool is denied, the
-  run stops, and o exits 1.
+  ALWAYS pass --allow-all-tools or --auto when driving o headlessly. Most
+  tools (bash, edit, web_fetch, ...) require approval; there is no human at
+  the approval prompt headlessly, so without one of the flags the tool is
+  denied, the run stops, and o exits 1. --allow-all-tools runs everything;
+  --auto runs a review model over each call that would prompt, which keeps
+  dangerous commands blocked at the cost of a small grading delay.
 
   o --allow-all-tools glm-5.2:cloud "list the files in src/ and summarize them"
 
@@ -181,7 +187,7 @@ AGENTS
 
 // run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
 // headless addition.
-func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal bool, contextWindowTokens int, headless bool, pipe bool, resume bool, resumeID string, name string) error {
+func run(model, prompt string, opts *cliOptions) error {
 	// Open the session store for persistence (non-fatal if it fails).
 	store, storeErr := sessionstore.Open()
 	if storeErr != nil {
@@ -189,11 +195,11 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 	}
 
 	// --resume / --resume-id: load a saved session and continue it.
-	if resume || resumeID != "" {
+	if opts.resume || opts.resumeID != "" {
 		if store == nil {
 			return fmt.Errorf("session store unavailable, cannot resume")
 		}
-		if resumeID == "" {
+		if opts.resumeID == "" {
 			// --resume without --resume-id: load the most recent session.
 			meta, err := store.MostRecentSession()
 			if err != nil {
@@ -202,9 +208,9 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 			if meta == nil {
 				return fmt.Errorf("no saved sessions to resume")
 			}
-			resumeID = meta.ID
+			opts.resumeID = meta.ID
 		}
-		sess, err := store.LoadSession(resumeID)
+		sess, err := store.LoadSession(opts.resumeID)
 		if err != nil {
 			return fmt.Errorf("resume session: %w", err)
 		}
@@ -240,34 +246,36 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		cmd := &cobra.Command{}
 		cmd.SetContext(ctx)
 
-		opts := agentTUIOptions{
+		agentOpts := agentTUIOptions{
 			Model:               model,
-			System:              system,
-			AllowAllTools:       allowAllTools,
-			ToolsDisabled:       toolsDisabled,
-			MultiModal:          multiModal,
-			ContextWindowTokens: contextWindowTokens,
+			System:              opts.system,
+			AllowAllTools:       opts.allowAllTools,
+			AutoReview:          opts.autoReview,
+			ReviewModel:         opts.reviewModel,
+			ToolsDisabled:       opts.toolsDisabled,
+			MultiModal:          opts.multiModal,
+			ContextWindowTokens: opts.contextWindowTokens,
 			Options:             map[string]any{},
 		}
 
-		info, err := prepareAgentModel(cmd, client, &opts, false)
+		info, err := prepareAgentModel(cmd, client, &agentOpts, false)
 		if err != nil {
 			return err
 		}
-		opts.System = firstNonEmpty(system, info.System)
+		agentOpts.System = firstNonEmpty(opts.system, info.System)
 
-		if err := saveLastAgentModel(opts.Model); err != nil {
+		if err := saveLastAgentModel(agentOpts.Model); err != nil {
 			return err
 		}
 
-		if pipe {
-			if code := runPipeResume(ctx, client, &opts, store, sess, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
+		if opts.pipe {
+			if code := runPipeResume(ctx, client, &agentOpts, store, sess, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
 				os.Exit(code)
 			}
 			return nil
 		}
 
-		if headless {
+		if opts.headless {
 			if prompt == "" {
 				raw, err := io.ReadAll(os.Stdin)
 				if err != nil {
@@ -278,16 +286,16 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 			if prompt == "" {
 				return fmt.Errorf("headless mode needs a prompt (positional args or stdin)")
 			}
-			if code := runHeadlessResume(ctx, client, &opts, store, sess, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
+			if code := runHeadlessResume(ctx, client, &agentOpts, store, sess, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
 				os.Exit(code)
 			}
 			return nil
 		}
 
 		// Interactive resume: pass the session's messages and ChatID to the TUI.
-		opts.ChatID = sess.ID
-		opts.Messages = sess.Messages
-		if err := GenerateAgentTUI(cmd, client, opts, store); err != nil {
+		agentOpts.ChatID = sess.ID
+		agentOpts.Messages = sess.Messages
+		if err := GenerateAgentTUI(cmd, client, agentOpts, store); err != nil {
 			return fmt.Errorf("error running agent: %w", err)
 		}
 		return nil
@@ -317,35 +325,37 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 	cmd := &cobra.Command{}
 	cmd.SetContext(ctx)
 
-	opts := agentTUIOptions{
+	agentOpts := agentTUIOptions{
 		Model:               model,
-		Name:                name,
-		System:              system,
-		AllowAllTools:       allowAllTools,
-		ToolsDisabled:       toolsDisabled,
-		MultiModal:          multiModal,
-		ContextWindowTokens: contextWindowTokens,
+		Name:                opts.name,
+		System:              opts.system,
+		AllowAllTools:       opts.allowAllTools,
+		AutoReview:          opts.autoReview,
+		ReviewModel:         opts.reviewModel,
+		ToolsDisabled:       opts.toolsDisabled,
+		MultiModal:          opts.multiModal,
+		ContextWindowTokens: opts.contextWindowTokens,
 		Options:             map[string]any{},
 	}
 
-	info, err := prepareAgentModel(cmd, client, &opts, false)
+	info, err := prepareAgentModel(cmd, client, &agentOpts, false)
 	if err != nil {
 		return err
 	}
-	opts.System = firstNonEmpty(system, info.System)
+	agentOpts.System = firstNonEmpty(opts.system, info.System)
 
-	if err := saveLastAgentModel(opts.Model); err != nil {
+	if err := saveLastAgentModel(agentOpts.Model); err != nil {
 		return err
 	}
 
-	if pipe {
-		if code := runPipe(ctx, client, &opts, store, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
+	if opts.pipe {
+		if code := runPipe(ctx, client, &agentOpts, store, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
 			os.Exit(code)
 		}
 		return nil
 	}
 
-	if headless {
+	if opts.headless {
 		if prompt == "" {
 			raw, err := io.ReadAll(os.Stdin)
 			if err != nil {
@@ -356,13 +366,13 @@ func run(model, prompt, system string, allowAllTools, toolsDisabled, multiModal 
 		if prompt == "" {
 			return fmt.Errorf("headless mode needs a prompt (positional args or stdin)")
 		}
-		if code := runHeadless(ctx, client, &opts, store, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
+		if code := runHeadless(ctx, client, &agentOpts, store, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
 			os.Exit(code)
 		}
 		return nil
 	}
 
-	if err := GenerateAgentTUI(cmd, client, opts, store); err != nil {
+	if err := GenerateAgentTUI(cmd, client, agentOpts, store); err != nil {
 		return fmt.Errorf("error running agent: %w", err)
 	}
 	return nil

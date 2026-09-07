@@ -627,7 +627,7 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 	}
 	plans := make([]plannedToolCall, 0, len(calls))
 	batchWorkingDir := s.currentWorkingDir()
-	approvalReq := ApprovalRequest{WorkingDir: batchWorkingDir}
+	approvalReq := ApprovalRequest{WorkingDir: batchWorkingDir, Task: latestUserMessageContent(messages)}
 	for _, call := range calls {
 		toolName := call.Function.Name
 		args := call.Function.Arguments.ToMap()

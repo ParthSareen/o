@@ -37,6 +37,8 @@ type agentTUIOptions struct {
 	KeepAlive           *api.Duration
 	ContextWindowTokens int
 	AllowAllTools       bool
+	AutoReview          bool
+	ReviewModel         string
 	ToolsDisabled       bool
 	MultiModal          bool
 	ChatID              string
@@ -139,6 +141,8 @@ func GenerateAgentTUI(cmd *cobra.Command, client *api.Client, opts agentTUIOptio
 		KeepAlive:           opts.KeepAlive,
 		MultiModal:          opts.MultiModal,
 		AllowAllTools:       opts.AllowAllTools,
+		AutoReview:          opts.AutoReview,
+		ReviewModel:         opts.ReviewModel,
 		ContextWindowTokens: opts.ContextWindowTokens,
 		Compactor: &coreagent.SimpleCompactor{
 			Client:  client,

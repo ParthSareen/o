@@ -34,24 +34,74 @@ type chatApprovalPrompt struct {
 	cursor  int
 }
 
-func (m chatModel) approvalPrompterForRun(controller *chatApprovalController) coreagent.ApprovalPrompter {
+func (m chatModel) approvalPrompterForRun(prompter coreagent.ApprovalPrompter) coreagent.ApprovalPrompter {
 	if m.opts.ApprovalPrompter != nil {
 		return m.opts.ApprovalPrompter
 	}
-	return controller
+	return prompter
+}
+
+// defaultPermissionMode maps launch flags to the starting permission mode.
+// Full access wins over auto when both are set.
+func defaultPermissionMode(allowAll, autoReview bool) coreagent.ApprovalMode {
+	switch {
+	case allowAll:
+		return coreagent.ApprovalModeFull
+	case autoReview:
+		return coreagent.ApprovalModeAuto
+	default:
+		return coreagent.ApprovalModeReview
+	}
+}
+
+// newDefaultApprovalState builds the state a session starts in.
+func (m chatModel) newDefaultApprovalState() *coreagent.ApprovalState {
+	state := &coreagent.ApprovalState{}
+	state.SetMode(defaultPermissionMode(m.defaultAllowAll, m.defaultAutoReview))
+	return state
 }
 
 func (m *chatModel) ensureApprovalState() *coreagent.ApprovalState {
 	if m.approvalState == nil {
-		m.approvalState = &coreagent.ApprovalState{}
-		m.approvalState.Set(m.defaultAllowAll, nil)
+		m.approvalState = m.newDefaultApprovalState()
 	}
 	return m.approvalState
 }
 
 func (m *chatModel) resetApprovalState() {
-	m.approvalState = &coreagent.ApprovalState{}
-	m.approvalState.Set(m.defaultAllowAll, nil)
+	m.approvalState = m.newDefaultApprovalState()
+}
+
+// ensureAutoReviewer lazily builds and caches the reviewer for auto mode,
+// grading with the current model unless a review model is configured.
+func (m *chatModel) ensureAutoReviewer() *coreagent.AutoReviewer {
+	if m.autoReviewer != nil {
+		return m.autoReviewer
+	}
+	if m.opts.Client == nil {
+		return nil
+	}
+	model := coreagent.ResolveAutoReviewModel(m.opts.ReviewModel, m.opts.Model)
+	if model == "" {
+		return nil
+	}
+	m.autoReviewer = &coreagent.AutoReviewer{Client: m.opts.Client, Model: model}
+	return m.autoReviewer
+}
+
+// autoReviewSessionPrompter wraps the human approval controller with the
+// auto reviewer. The wrapper is inert in review and full modes and falls
+// back to the human prompt when grading fails.
+func (m *chatModel) autoReviewSessionPrompter() coreagent.ApprovalPrompter {
+	reviewer := m.ensureAutoReviewer()
+	if reviewer == nil {
+		return m.approvalController
+	}
+	return coreagent.AutoReviewPrompter{
+		Reviewer: reviewer,
+		State:    m.ensureApprovalState(),
+		Next:     m.approvalController,
+	}
 }
 
 func (m chatModel) allowAllToolsEnabled() bool {
@@ -61,13 +111,41 @@ func (m chatModel) allowAllToolsEnabled() bool {
 	return m.approvalState.AllGranted()
 }
 
+func (m chatModel) permissionMode() coreagent.ApprovalMode {
+	if m.approvalState == nil {
+		return defaultPermissionMode(m.defaultAllowAll, m.defaultAutoReview)
+	}
+	return m.approvalState.Mode()
+}
+
+func (m *chatModel) autoReviewAvailable() bool {
+	return m.ensureAutoReviewer() != nil
+}
+
 func (m *chatModel) setAllowAllTools(allowAll bool) {
 	if allowAll {
-		m.ensureApprovalState().GrantAll()
+		m.ensureApprovalState().SetMode(coreagent.ApprovalModeFull)
 	} else {
-		m.ensureApprovalState().Set(false, nil)
+		m.ensureApprovalState().SetMode(coreagent.ApprovalModeReview)
 	}
 	m.opts.AllowAllTools = allowAll
+}
+
+func (m *chatModel) setPermissionMode(mode coreagent.ApprovalMode) {
+	m.ensureApprovalState().SetMode(mode)
+	m.opts.AllowAllTools = mode == coreagent.ApprovalModeFull
+	m.opts.AutoReview = mode == coreagent.ApprovalModeAuto
+}
+
+func permissionModeNotice(mode coreagent.ApprovalMode) string {
+	switch mode {
+	case coreagent.ApprovalModeAuto:
+		return "auto mode enabled"
+	case coreagent.ApprovalModeFull:
+		return "full access enabled"
+	default:
+		return "review mode enabled"
+	}
 }
 
 func (m *chatModel) openApprovalPrompt(msg chatApprovalPromptMsg) {
@@ -79,23 +157,32 @@ func (m *chatModel) openApprovalPrompt(msg chatApprovalPromptMsg) {
 }
 
 func (m *chatModel) togglePermissionMode() (tea.Model, tea.Cmd) {
-	m.setAllowAllTools(!m.allowAllToolsEnabled())
-	if m.allowAllToolsEnabled() {
-		m.permissionNotice = "full access enabled"
-		m.status = "full access enabled"
-		if m.approvalPrompt != nil {
-			updated, cmd := m.resolveApprovalPrompt(chatApprovalChoice{allow: true, allowAll: true})
-			if model, ok := updated.(chatModel); ok {
-				model.permissionNotice = "full access enabled"
-				model.status = "full access enabled"
-				return model, cmd
-			}
-			return updated, cmd
+	var next coreagent.ApprovalMode
+	switch m.permissionMode() {
+	case coreagent.ApprovalModeReview:
+		if m.autoReviewAvailable() {
+			next = coreagent.ApprovalModeAuto
+		} else {
+			next = coreagent.ApprovalModeFull
 		}
-		return *m, nil
+	case coreagent.ApprovalModeAuto:
+		next = coreagent.ApprovalModeFull
+	default:
+		next = coreagent.ApprovalModeReview
 	}
-	m.permissionNotice = "review mode enabled"
-	m.status = "review mode enabled"
+	m.setPermissionMode(next)
+	notice := permissionModeNotice(next)
+	m.permissionNotice = notice
+	m.status = notice
+	if next == coreagent.ApprovalModeFull && m.approvalPrompt != nil {
+		updated, cmd := m.resolveApprovalPrompt(chatApprovalChoice{allow: true, allowAll: true})
+		if model, ok := updated.(chatModel); ok {
+			model.permissionNotice = notice
+			model.status = notice
+			return model, cmd
+		}
+		return updated, cmd
+	}
 	return *m, nil
 }
 
