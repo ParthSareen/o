@@ -108,6 +108,7 @@ func (r *AutoReviewer) Review(ctx context.Context, req ApprovalRequest) (Approva
 
 	ctx, cancel := context.WithTimeout(ctx, autoReviewTimeout)
 	defer cancel()
+	started := time.Now()
 
 	stream := false
 	chatReq := &api.ChatRequest{
@@ -138,7 +139,17 @@ func (r *AutoReviewer) Review(ctx context.Context, req ApprovalRequest) (Approva
 	if decision == nil {
 		return Approval{}, errors.New("review model returned no decision")
 	}
-	return decision.approval(), nil
+	approval := decision.approval()
+	info := ReviewDecision{
+		Model:     r.Model,
+		Outcome:   decision.Outcome,
+		Risk:      decision.RiskLevel,
+		Rationale: decision.Rationale,
+		Duration:  time.Since(started),
+		Calls:     len(req.Calls),
+	}
+	approval.Review = &info
+	return approval, nil
 }
 
 // autoReviewDecisionFromMessage extracts the decision from a tool call, with

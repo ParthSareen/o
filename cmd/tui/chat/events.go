@@ -108,6 +108,15 @@ func (m *chatModel) applyAgentEvent(event coreagent.Event) {
 		idx := m.ensureLiveAssistantMessage()
 		m.liveMessages[idx].ToolCalls = append(m.liveMessages[idx].ToolCalls, event.ToolCalls...)
 		contextChanged = true
+	case coreagent.EventApprovalReviewed:
+		if event.Review != nil {
+			m.entries = append(m.entries, newChatEntry(chatEntry{
+				role:    "review",
+				label:   reviewStatusLabel(event.Review, event.Model),
+				content: event.Review.Rationale,
+			}))
+			m.markEntryDirty(len(m.entries) - 1)
+		}
 	case coreagent.EventToolStarted:
 		m.resetStreamingState()
 		startedAt := time.Now()

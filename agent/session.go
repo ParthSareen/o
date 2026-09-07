@@ -658,6 +658,11 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			}
 			return toolBatchResult{}, err
 		}
+		if approvalResult.Review != nil {
+			if emitErr := s.emit(newApprovalReviewed(meta, approvalResult.Review)); emitErr != nil {
+				return toolBatchResult{}, emitErr
+			}
+		}
 		if !approvalResult.Allow {
 			content := approvalResult.Reason
 			if content == "" {

@@ -390,3 +390,89 @@ func TestApprovalStateModes(t *testing.T) {
 		t.Fatal("Set should reset to review mode")
 	}
 }
+
+func TestAutoReviewerReviewPopulatesDecision(t *testing.T) {
+	client := &fakeClient{responses: [][]api.ChatResponse{
+		{decisionResponse("deny", "high", "the command deletes user files")},
+	}}
+	reviewer := &AutoReviewer{Client: client, Model: "grader-model"}
+	req := ApprovalRequest{
+		WorkingDir: "/repo",
+		Calls: []ApprovalToolCall{
+			{ToolName: "bash", Args: map[string]any{"command": "rm -rf build"}},
+			{ToolName: "bash", Args: map[string]any{"command": "rm -rf dist"}},
+		},
+	}
+
+	approval, err := reviewer.Review(context.Background(), req)
+	if err != nil {
+		t.Fatalf("review should not error: %v", err)
+	}
+	if approval.Review == nil {
+		t.Fatal("graded approval should carry the review decision")
+	}
+	want := ReviewDecision{Model: "grader-model", Outcome: "deny", Risk: "high", Rationale: "the command deletes user files", Calls: 2}
+	got := *approval.Review
+	got.Duration = 0
+	if got != want {
+		t.Fatalf("review = %+v, want %+v", got, want)
+	}
+	if approval.Review.Duration <= 0 {
+		t.Fatal("review should record the grading duration")
+	}
+}
+
+func TestSessionEmitsApprovalReviewedEvent(t *testing.T) {
+	toolArgs := api.NewToolCallFunctionArguments()
+	toolArgs.Set("text", "hi")
+	client := &fakeClient{responses: [][]api.ChatResponse{
+		{{Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
+			ID:       "call-1",
+			Function: api.ToolCallFunction{Name: "needs-approval", Arguments: toolArgs},
+		}}}, Done: true}},
+		{{Message: api.Message{Role: "assistant", Content: "done"}, Done: true}},
+	}}
+	registry := &Registry{}
+	registry.Register(namedApprovalTestTool{name: "needs-approval"})
+	review := &ReviewDecision{Model: "grader", Outcome: "allow", Risk: "low", Rationale: "requested edit", Calls: 1}
+	prompter := &recordingApprovalPrompter{results: []Approval{{Allow: true, Review: review}}}
+	events := &recordingEventSink{}
+	session := &Session{
+		Client:           client,
+		Tools:            registry,
+		ApprovalPrompter: prompter,
+		ApprovalState:    &ApprovalState{},
+		EventSinks:       []EventSink{events},
+		WorkingDir:       t.TempDir(),
+	}
+
+	if _, err := session.Run(context.Background(), RunOptions{
+		Model:       "model",
+		NewMessages: []api.Message{{Role: "user", Content: "run it"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var reviewEvents []Event
+	var firstToolStarted = -1
+	for i, event := range events.events {
+		if event.Type == EventApprovalReviewed {
+			reviewEvents = append(reviewEvents, event)
+		}
+		if event.Type == EventToolStarted && firstToolStarted < 0 {
+			firstToolStarted = i
+		}
+	}
+	if len(reviewEvents) != 1 {
+		t.Fatalf("approval_reviewed events = %d, want 1", len(reviewEvents))
+	}
+	got := reviewEvents[0].Review
+	if got == nil || got.Outcome != "allow" || got.Risk != "low" || got.Rationale != "requested edit" {
+		t.Fatalf("review event payload = %+v", got)
+	}
+	for i, event := range events.events {
+		if event.Type == EventApprovalReviewed && firstToolStarted >= 0 && i > firstToolStarted {
+			t.Fatal("approval_reviewed should be emitted before tool_started")
+		}
+	}
+}

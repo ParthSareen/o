@@ -223,6 +223,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		opts.RootDir = opts.WorkingDir
 	}
 
+	// Kill background tasks when the UI exits so their processes cannot
+	// outlive the session.
+	defer func() { _ = opts.Tools.Close() }()
+
 	approvalState := &coreagent.ApprovalState{}
 	approvalState.SetMode(defaultPermissionMode(opts.AllowAllTools, opts.AutoReview))
 

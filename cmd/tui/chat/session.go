@@ -285,8 +285,8 @@ func (m *chatModel) handleResumeCommand(args string) (tea.Model, tea.Cmd) {
 			if meta.ID != m.chatID {
 				id = meta.ID
 				break
-				}
 			}
+		}
 		if id == "" {
 			m.entries = append(m.entries, newSlashEntry("No other session to resume."))
 			return *m, nil

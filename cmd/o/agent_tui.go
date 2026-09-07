@@ -274,9 +274,9 @@ func agentToolsRegistry(ctx context.Context, client *api.Client, modelName strin
 		bash := &agenttools.Bash{}
 		if os.Getenv("OLLAMA_AGENT_DISABLE_BACKGROUND_SHELL") == "" {
 			// One manager per session, carried on the registry so every
-			// Session built from it can drain completions. TODO: call
-			// Close on session/process teardown so Unix tasks can't outlive
-			// the session (Windows is covered by job objects).
+			// Session built from it can drain completions. Teardown paths call
+			// Registry.Close so Unix tasks cannot outlive the session (Windows is
+			// covered by job objects).
 			bash.Background = agenttools.NewBackgroundManager()
 			registry.Background = bash.Background
 		}

@@ -70,7 +70,9 @@ failed review falls back to the human prompt, headless runs deny.
 
 `--review-model` (or `O_REVIEW_MODEL`) picks the grading model; the default
 `selected` uses the session model. In the TUI, `shift+tab` cycles
-review → auto → full access.
+review → auto → full access. Every model-graded call leaves a `⟳ auto
+review` line in the transcript (outcome, risk, duration; `ctrl+o` expands
+the rationale), and headless runs log the same line to stderr.
 
 ## The TUI
 
@@ -84,10 +86,14 @@ Keys:
 | --- | --- |
 | `ctrl+t` | Open nvim in the working directory. `O_NVIM` overrides the command. |
 | `ctrl+g` | Open the nvim diff viewer (`nvim -c DiffviewOpen`). `O_NVIM_DIFF` overrides the command. |
+| `ctrl+o` | Toggle inline tool output, thinking text, and auto-review rationales. |
 
 Both keys suspend the TUI and come back when you exit nvim. They need nvim in
 `PATH`. `/nvim` and `/diffview` do the same but are hidden: they are not in
 `/help` or in the completions.
+
+Background shell tasks (`background=true`) are killed when the session exits,
+so they cannot outlive o; use watchy for processes that should persist.
 
 The chat renders markdown: headings, code fences, tables, emphasis, links,
 images (alt text only), lists, blockquotes, and horizontal rules.

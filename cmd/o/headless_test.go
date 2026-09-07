@@ -338,3 +338,21 @@ func testHeadlessRequest() coreagent.ApprovalRequest {
 		Calls:      []coreagent.ApprovalToolCall{{ToolName: "risky", Args: map[string]any{}}},
 	}
 }
+
+func TestHeadlessAutoReviewPrintsDecision(t *testing.T) {
+	tool := &riskyTool{}
+	registry := &coreagent.Registry{}
+	registry.Register(tool)
+
+	fc := &fakeClient{responses: [][]api.ChatResponse{
+		toolCallChunks("risky", nil),
+		reviewDecisionChunks("deny", "medium", "the command touches production"),
+	}}
+	_, stderr, code := runFakeAutoReview(t, fc, registry)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (denied)", code)
+	}
+	if !strings.Contains(stderr, "⟳ auto review deny (medium risk): the command touches production") {
+		t.Fatalf("stderr = %q (want the review decision line)", stderr)
+	}
+}

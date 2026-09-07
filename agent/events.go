@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/ParthSareen/o/api"
 )
@@ -26,6 +27,10 @@ const (
 	// BackgroundSource. UIs render it as a muted entry so the notice is
 	// visible in the run narrative.
 	EventBackgroundTasks EventType = "background_tasks"
+	// EventApprovalReviewed is emitted when auto mode's review model graded
+	// a batch of tool calls (allowed or denied). It carries the decision on
+	// the Review field.
+	EventApprovalReviewed EventType = "approval_reviewed"
 	// EventSessionOpened is emitted once by pipe mode when a session is
 	// created or resumed, before any run events. It carries the session
 	// metadata and (for resumed sessions) the persisted message history so
@@ -84,6 +89,17 @@ const (
 	CompactionTriggerDue        CompactionTrigger = "due"
 )
 
+// ReviewDecision is the auto-review model's verdict on a batch of tool
+// calls, surfaced to UIs via approval_reviewed events.
+type ReviewDecision struct {
+	Model     string        `json:"model,omitempty"`
+	Outcome   string        `json:"outcome"` // allow | deny
+	Risk      string        `json:"risk"`    // low | medium | high | critical
+	Rationale string        `json:"rationale,omitempty"`
+	Duration  time.Duration `json:"durationMs,omitempty"`
+	Calls     int           `json:"calls,omitempty"`
+}
+
 // SkillInfo is a UI-facing summary of one catalog skill, carried on
 // session_opened events so frontends can render a slash-command palette.
 type SkillInfo struct {
@@ -118,6 +134,8 @@ type Event struct {
 	Args   map[string]any `json:"args,omitempty"`
 	Tokens int            `json:"tokens,omitempty"`
 	Error  string         `json:"error,omitempty"`
+	// Review carries the auto-review verdict on approval_reviewed events.
+	Review *ReviewDecision `json:"review,omitempty"`
 }
 
 type EventSink interface {
@@ -150,6 +168,10 @@ func newMessageDelta(m eventMetadata, content string) Event {
 
 func newThinkingDelta(m eventMetadata, thinking string) Event {
 	return Event{Type: EventThinkingDelta, RunID: m.runID, ChatID: m.chatID, Model: m.model, Thinking: thinking}
+}
+
+func newApprovalReviewed(m eventMetadata, review *ReviewDecision) Event {
+	return Event{Type: EventApprovalReviewed, RunID: m.runID, ChatID: m.chatID, Model: m.model, Review: review}
 }
 
 func newToolCallDetected(m eventMetadata, calls []api.ToolCall) Event {

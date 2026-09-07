@@ -85,6 +85,18 @@ func (r *Registry) BackgroundSource() BackgroundSource {
 	return r.Background
 }
 
+// Close releases resources owned by the registry, killing any background
+// tasks so their processes cannot outlive the session. Nil-receiver safe.
+func (r *Registry) Close() error {
+	if r == nil {
+		return nil
+	}
+	if closer, ok := r.Background.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 func (r *Registry) Register(tool Tool) {
 	if r == nil || tool == nil {
 		return

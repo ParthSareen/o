@@ -37,6 +37,9 @@ type Approval struct {
 	AllowAll    bool
 	AllowScopes []string
 	Reason      string
+	// Review carries the auto-review verdict when the decision came from the
+	// review model, so the session can surface it to UIs.
+	Review *ReviewDecision
 }
 
 type ApprovalPrompter interface {

@@ -78,6 +78,11 @@ func (r *headlessRenderer) Emit(ev coreagent.Event) error {
 			fmt.Fprint(r.stderr, ev.Thinking)
 			r.inThinking = true
 		}
+	case coreagent.EventApprovalReviewed:
+		r.closeThinking()
+		if ev.Review != nil {
+			fmt.Fprintf(r.stderr, "⟳ auto review %s (%s risk): %s\n", ev.Review.Outcome, ev.Review.Risk, oneLine(ev.Review.Rationale))
+		}
 	case coreagent.EventToolStarted:
 		r.closeThinking()
 		fmt.Fprintf(r.stderr, "→ %s %s\n", ev.ToolName, shortArgs(ev.Args))
@@ -167,6 +172,8 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 // runHeadlessSession drives one agent session against any ChatClient; split
 // out so tests can run without a real server.
 func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt, prompt, workingDir string, stdout, stderr io.Writer) int {
+	// Kill background tasks on exit so their processes cannot outlive the run.
+	defer func() { _ = registry.Close() }()
 	state, approvalPrompter := headlessApproval(client, opts)
 
 	renderer := newHeadlessRenderer(stdout, stderr, true)
@@ -245,6 +252,8 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 	}
 
 	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
+	// Kill background tasks on exit so their processes cannot outlive the run.
+	defer func() { _ = registry.Close() }()
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}

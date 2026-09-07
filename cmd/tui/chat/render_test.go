@@ -1563,29 +1563,33 @@ func TestChatCtrlOTogglesInlineOutput(t *testing.T) {
 	}
 }
 
-func TestChatCtrlODoesNotExpandThinking(t *testing.T) {
+func TestChatCtrlOExpandsThinking(t *testing.T) {
 	m := chatModel{
 		entries: []chatEntry{
 			newChatEntry(chatEntry{role: "thinking", label: "Thinking", status: "done", content: "private reasoning"}),
 		},
 	}
 
+	if view := stripANSI(m.renderTranscript(100)); strings.Contains(view, "private reasoning") {
+		t.Fatalf("collapsed thinking must not render by default:\n%s", view)
+	}
+
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	m = updated.(chatModel)
-	if m.entries[0].expanded {
-		t.Fatalf("ctrl+o should not expand thinking entries: %#v", m.entries[0])
+	if !m.entries[0].expanded {
+		t.Fatalf("ctrl+o should expand thinking entries: %#v", m.entries[0])
 	}
-	if view := stripANSI(m.renderTranscript(100)); strings.Contains(view, "private reasoning") {
-		t.Fatalf("ctrl+o should not render thinking content:\n%s", view)
+	if view := stripANSI(m.renderTranscript(100)); !strings.Contains(view, "private reasoning") {
+		t.Fatalf("ctrl+o should render thinking content:\n%s", view)
 	}
 
 	m.liveMessages = []api.Message{{Role: "assistant", Thinking: "live private reasoning"}}
 	m.syncThinkingEntry()
-	if m.entries[1].expanded {
-		t.Fatalf("live thinking should not inherit ctrl+o expansion: %#v", m.entries[1])
+	if !m.entries[1].expanded {
+		t.Fatalf("live thinking should keep ctrl+o expansion: %#v", m.entries[1])
 	}
-	if view := stripANSI(m.renderTranscript(100)); strings.Contains(view, "live private reasoning") {
-		t.Fatalf("ctrl+o should not render live thinking content:\n%s", view)
+	if view := stripANSI(m.renderTranscript(100)); !strings.Contains(view, "live private reasoning") {
+		t.Fatalf("ctrl+o should render live thinking content:\n%s", view)
 	}
 }
 

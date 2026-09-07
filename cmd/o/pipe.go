@@ -155,6 +155,9 @@ func runPipeSetup(ctx context.Context, client *api.Client, opts *agentTUIOptions
 	}
 
 	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
+	// Kill background tasks on exit so their processes cannot outlive the
+	// pipe session.
+	defer func() { _ = registry.Close() }()
 
 	systemPrompt := agentSystemPromptWithWorkingDir(
 		opts.Model, opts.System,

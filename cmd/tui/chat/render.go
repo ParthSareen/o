@@ -91,7 +91,9 @@ func entryHasExpandableOutput(entry chatEntry) bool {
 func entryHasToolOutputMode(entry chatEntry) bool {
 	return (entry.role == "tool" && (isToolActiveStatus(entry.status) || isToolResultStatus(entry.status) || entry.content != "" || len(entry.tools) > 0)) ||
 		(entry.role == "tool_group" && len(entry.tools) > 0) ||
-		(entry.role == "compaction_summary" && strings.TrimSpace(entry.content) != "")
+		(entry.role == "compaction_summary" && strings.TrimSpace(entry.content) != "") ||
+		(entry.role == "review" && strings.TrimSpace(entry.content) != "") ||
+		(entry.role == "thinking" && strings.TrimSpace(entry.content) != "")
 }
 
 func (m *chatModel) applyToolOutputMode() {
@@ -597,6 +599,9 @@ func (m chatModel) renderEntry(entry chatEntry) (string, string) {
 		return "", entry.content
 	case "thinking":
 		return chatMetaStyle.Render("•") + " ", thinkingStatusLine(entry)
+	case "review":
+		prefix := chatMetaStyle.Render("⟳ ") + " "
+		return prefix, entry.label
 	case "slash":
 		return chatMetaStyle.Render("•") + " ", entry.content
 	case "compaction_summary":
@@ -629,6 +634,8 @@ func (m chatModel) renderEntryLines(entry chatEntry, body string, width int, cod
 		return lines
 	case "thinking":
 		return renderThinkingLines(entry, width)
+	case "review":
+		return renderReviewLines(entry, width)
 	case "system", "slash":
 		return splitRenderedBody(renderMarkdownForViewWithCodeCache(body, width, codeCache))
 	case "user":
@@ -792,6 +799,36 @@ func compactionSummaryStatusLine(entry chatEntry) string {
 	return fmt.Sprintf("Compacted summary %s", segment)
 }
 
+// reviewStatusLabel formats the auto-review verdict for the transcript.
+// The grading model is named when it differs from the session model.
+func reviewStatusLabel(review *coreagent.ReviewDecision, sessionModel string) string {
+	if review == nil {
+		return ""
+	}
+	label := fmt.Sprintf("auto review %s (%s risk", review.Outcome, review.Risk)
+	if review.Duration > 0 {
+		label += ", " + review.Duration.Round(time.Millisecond).String()
+	}
+	if review.Calls > 1 {
+		label += fmt.Sprintf(", %d calls", review.Calls)
+	}
+	label += ")"
+	if review.Model != "" && review.Model != sessionModel {
+		label += " · graded by " + review.Model
+	}
+	return label
+}
+
+func renderReviewLines(entry chatEntry, width int) []string {
+	lines := wrapChatText(strings.TrimSpace(entry.label), width)
+	if !entry.expanded || strings.TrimSpace(entry.content) == "" {
+		return lines
+	}
+	lines = append(lines, "")
+	lines = append(lines, indentLines(wrapChatText(entry.content, width-2), "  ")...)
+	return lines
+}
+
 func renderThinkingLines(entry chatEntry, width int) []string {
 	if !entry.expanded || strings.TrimSpace(entry.content) == "" {
 		return nil
@@ -829,13 +866,13 @@ func (m *chatModel) syncThinkingEntry() {
 		idx = len(m.entries) - 1
 	}
 	if idx < 0 {
-		m.entries = append(m.entries, newChatEntry(chatEntry{role: "thinking", status: "running"}))
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "thinking", status: "running", expanded: m.toolOutputOpen}))
 		idx = len(m.entries) - 1
 	}
 	m.entries[idx].content = m.latestLiveThinking()
 	m.entries[idx].label = m.thinkingLabel()
 	m.entries[idx].status = "running"
-	m.entries[idx].expanded = false
+	// Leave entry.expanded alone: ctrl+o may be showing the live thinking.
 	m.markEntryDirty(idx)
 }
 

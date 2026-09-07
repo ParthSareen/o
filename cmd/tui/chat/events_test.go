@@ -374,3 +374,59 @@ func TestMessagesEndWithCompactionResult(t *testing.T) {
 		t.Fatal("expected compaction result")
 	}
 }
+
+func TestApplyAgentEventShowsReviewDecision(t *testing.T) {
+	m := chatModel{running: true}
+
+	m.applyAgentEvent(coreagent.Event{
+		Type:  coreagent.EventApprovalReviewed,
+		Model: "session-model",
+		Review: &coreagent.ReviewDecision{
+			Model:     "session-model",
+			Outcome:   "deny",
+			Risk:      "high",
+			Rationale: "the command sends secrets outside the repo",
+			Calls:     2,
+		},
+	})
+
+	if len(m.entries) != 1 || m.entries[0].role != "review" {
+		t.Fatalf("entries = %#v, want one review entry", m.entries)
+	}
+	entry := m.entries[0]
+	if !strings.Contains(entry.label, "auto review deny (high risk, 2 calls)") {
+		t.Fatalf("label = %q", entry.label)
+	}
+	if entry.content != "the command sends secrets outside the repo" {
+		t.Fatalf("content = %q", entry.content)
+	}
+
+	// A different grading model is called out in the label.
+	m.applyAgentEvent(coreagent.Event{
+		Type:  coreagent.EventApprovalReviewed,
+		Model: "session-model",
+		Review: &coreagent.ReviewDecision{
+			Model:     "qwen3.5:8b",
+			Outcome:   "allow",
+			Risk:      "low",
+			Rationale: "requested test run",
+		},
+	})
+	if !strings.Contains(m.entries[1].label, "graded by qwen3.5:8b") {
+		t.Fatalf("label = %q, want the grading model named", m.entries[1].label)
+	}
+
+	// Collapsed the entry shows the verdict line; ctrl+o reveals the rationale.
+	if view := stripANSI(m.renderTranscript(100)); strings.Contains(view, "sends secrets") {
+		t.Fatalf("collapsed review must hide the rationale:\n%s", view)
+	}
+	m.toolOutputMode = true
+	m.toolOutputOpen = true
+	m.applyToolOutputMode()
+	if !m.entries[1].expanded {
+		t.Fatal("ctrl+o should expand review entries")
+	}
+	if view := stripANSI(m.renderTranscript(100)); !strings.Contains(view, "⟳") {
+		t.Fatalf("review line should render:\n%s", view)
+	}
+}
