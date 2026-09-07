@@ -203,6 +203,9 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
 		} else {
 			chatID = sess.ID
+		// Surface the saved session so a parent agent can follow up with
+		// o --resume-id; background logs rely on this line.
+		fmt.Fprintf(stderr, "session: %s\n", chatID)
 			if err := store.AddPrompt(chatID, prompt); err != nil {
 				fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
 			}
@@ -250,6 +253,8 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 	for _, d := range catalog.Diagnostics() {
 		fmt.Fprintf(stderr, "warning: ignored invalid agent skill: %v\n", d)
 	}
+	// Surface the resumed session so a parent agent can keep following up.
+	fmt.Fprintf(stderr, "session: %s\n", sess.ID)
 
 	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
 	// Kill background tasks on exit so their processes cannot outlive the run.

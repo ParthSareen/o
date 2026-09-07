@@ -8,6 +8,7 @@ import (
 
 	coreagent "github.com/ParthSareen/o/agent"
 	"github.com/ParthSareen/o/api"
+	"github.com/ParthSareen/o/sessionstore"
 )
 
 // fakeClient plays scripted chat-response chunks.
@@ -354,5 +355,41 @@ func TestHeadlessAutoReviewPrintsDecision(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "⟳ auto review deny (medium risk): the command touches production") {
 		t.Fatalf("stderr = %q (want the review decision line)", stderr)
+	}
+}
+
+func TestHeadlessPrintsSessionLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := sessionstore.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	fc := &fakeClient{responses: [][]api.ChatResponse{textChunks("hello")}}
+	opts := &agentTUIOptions{Model: "test-model", Options: map[string]any{}}
+	var out, errb bytes.Buffer
+	code := runHeadlessSession(context.Background(), fc, opts, store, nil, &coreagent.Registry{}, "system", "hi", t.TempDir(), &out, &errb)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, errb.String())
+	}
+
+	var sessionID string
+	for _, line := range strings.Split(errb.String(), "\n") {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(line), "session: "); ok {
+			sessionID = strings.TrimSpace(id)
+		}
+	}
+	if sessionID == "" {
+		t.Fatalf("stderr should carry the session line:\n%s", errb.String())
+	}
+	// The printed ID must be the persisted session, so a parent agent
+	// following up with --resume-id hits this exact conversation.
+	sess, err := store.LoadSession(sessionID)
+	if err != nil || sess == nil {
+		t.Fatalf("printed session ID %q did not resolve: %v", sessionID, err)
+	}
+	if out.String() != "hello\n" {
+		t.Fatalf("stdout = %q", out.String())
 	}
 }

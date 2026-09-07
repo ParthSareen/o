@@ -200,3 +200,29 @@ func TestReadLogTailTrimsToWindowAndUTF8Boundary(t *testing.T) {
 		t.Fatalf("tail = %q, want %q", tail, want)
 	}
 }
+
+func TestBackgroundSessionIDFromLog(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "bg-1.log")
+
+	// No line, no ID.
+	if id := backgroundSessionID(logPath); id != "" {
+		t.Fatalf("missing log: id = %q, want empty", id)
+	}
+
+	// The session line wins over surrounding noise and sits at the head.
+	content := "pulling manifest...\nloading model\nsession: 3e3aeba9-0271-4c2b-b4df-97e6eb5ab7ca\nanswer text\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id := backgroundSessionID(logPath); id != "3e3aeba9-0271-4c2b-b4df-97e6eb5ab7ca" {
+		t.Fatalf("id = %q", id)
+	}
+
+	// Non-o task logs have no session line.
+	if err := os.WriteFile(logPath, []byte("dev server listening on :3000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id := backgroundSessionID(logPath); id != "" {
+		t.Fatalf("plain log: id = %q, want empty", id)
+	}
+}

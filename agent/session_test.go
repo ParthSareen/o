@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ParthSareen/o/api"
 )
@@ -2360,4 +2361,25 @@ func TestSessionAttachesToolResultImagesWhenModelSupportsImages(t *testing.T) {
 			t.Fatalf("tool message = %#v", toolMsg)
 		}
 	})
+}
+
+func TestFormatBackgroundNoticeIncludesSessionHint(t *testing.T) {
+	notice := formatBackgroundNotice([]BackgroundCompletion{{
+		ID:        "bg-1",
+		Command:   "o --allow-all-tools glm-5.3:cloud \"work\"",
+		ExitCode:  0,
+		Duration:  45 * time.Second,
+		LogPath:   "/tmp/bg-1.log",
+		SessionID: "abc-123",
+	}})
+	for _, want := range []string{"bg-1: finished: exit 0", "o session abc-123", "--resume-id abc-123"} {
+		if !strings.Contains(notice, want) {
+			t.Fatalf("notice missing %q:\n%s", want, notice)
+		}
+	}
+
+	plain := formatBackgroundNotice([]BackgroundCompletion{{ID: "bg-2", Command: "make watch", ExitCode: 0}})
+	if strings.Contains(plain, "--resume-id") {
+		t.Fatalf("notice without a session should not carry a resume hint:\n%s", plain)
+	}
 }

@@ -495,6 +495,9 @@ func formatBackgroundNotice(completions []BackgroundCompletion) string {
 		}
 		fmt.Fprintf(&sb, "\n%s: %s after %s — %q\n  log: %s\n",
 			c.ID, status, formatBackgroundTaskDuration(c.Duration), backgroundCommandSummary(c.Command), c.LogPath)
+		if c.SessionID != "" {
+			fmt.Fprintf(&sb, "  o session %s: after the child exits, follow up with o --resume-id %s --headless --allow-all-tools \"follow-up\"\n", c.SessionID, c.SessionID)
+		}
 		if tail := strings.TrimRight(c.Tail, "\n"); tail != "" {
 			sb.WriteString("  log tail:\n")
 			for _, line := range strings.Split(tail, "\n") {

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -179,6 +180,33 @@ func (t *BackgroundTask) finished() bool {
 	}
 }
 
+// backgroundSessionID scans the head of a task log for the `session: <id>`
+// line a child o --headless run prints at startup, so the parent agent can
+// follow up on the child's saved session. Empty when the log has no such
+// line (the task did not run o headlessly).
+func backgroundSessionID(logPath string) string {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	// The line is printed at process start, so a bounded head read suffices
+	// even for very long logs.
+	buf := make([]byte, 16<<10)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return ""
+	}
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(line), "session: "); ok {
+			if id = strings.TrimSpace(id); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 // DrainCompletions implements agent.BackgroundSource: finished tasks not yet
 // reported, marked reported as a side effect.
 func (m *BackgroundManager) DrainCompletions() []agent.BackgroundCompletion {
@@ -207,6 +235,7 @@ func (m *BackgroundManager) DrainCompletions() []agent.BackgroundCompletion {
 			Duration: task.EndedAt.Sub(task.StartedAt),
 			LogPath:  task.LogPath,
 		}
+		completion.SessionID = backgroundSessionID(task.LogPath)
 		if task.err != nil {
 			completion.Failure = task.err.Error()
 		}

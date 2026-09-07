@@ -53,15 +53,18 @@ type Registry struct {
 // BackgroundCompletion is one finished background task, reported to runs
 // via BackgroundSource.
 type BackgroundCompletion struct {
-	ID       string
-	Command  string
+	ID      string
+	Command string
 	ExitCode int
-	Killed   bool
+	Killed  bool
 	// Failure is the process start/wait error, if any; ExitCode is not
 	// meaningful when Failure is set.
 	Failure  string
 	Duration time.Duration
 	LogPath  string
+	// SessionID is the saved session of a child `o --headless` run, parsed
+	// from its log so the parent agent can follow up with --resume-id.
+	SessionID string
 	// Tail is a bounded trailing log excerpt, set only for failed tasks so
 	// the notice carries enough context to act on without an extra read.
 	Tail string

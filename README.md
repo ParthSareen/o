@@ -108,6 +108,11 @@ A session can have a name. Set it with `--name` at launch or with
 Title of each session; sessions without a name show `(unnamed)`. o upgrades
 an old database when it opens it; no manual step is necessary.
 
+Headless runs print their saved session ID on stderr as `session: <id>`
+(background-task logs carry the line too), and `o --resume-id <id>
+--headless "follow-up"` continues that conversation — the session's model is
+reused, so an agent can follow up on a finished child without restating it.
+
 ## Debug server
 
 If no server answers on the default port, o can start a debug server on port

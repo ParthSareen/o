@@ -52,6 +52,22 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	return fs, opts
 }
 
+// splitModelPrompt divides positional arguments into a model name and a
+// prompt. The first argument is the model unless it contains whitespace —
+// model names never do — in which case every argument is the prompt and the
+// model comes from the remembered default or the resumed session. This lets
+// `o --resume-id <id> --headless "follow-up"` work without restating the
+// child's model, and keeps the prompt from being mistaken for a model name.
+func splitModelPrompt(args []string) (model, prompt string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	if strings.ContainsAny(args[0], " \t") {
+		return "", strings.Join(args, " ")
+	}
+	return args[0], strings.Join(args[1:], " ")
+}
+
 func main() {
 	fs, opts := buildFlagSet()
 	fs.Usage = func() {
@@ -71,8 +87,7 @@ func main() {
 
 	model, prompt := "", ""
 	if fs.NArg() > 0 {
-		model = fs.Arg(0)
-		prompt = strings.Join(fs.Args()[1:], " ")
+		model, prompt = splitModelPrompt(fs.Args())
 	}
 
 	if opts.listSessions {
@@ -147,6 +162,8 @@ func usageText(fs *flag.FlagSet) string {
 USAGE
   o [flags] [model]             interactive agent TUI (remembers your last model)
   o [flags] [model] "prompt"    headless: answer once and exit
+  o --resume-id <id> --headless "prompt"
+                               follow up on a saved session (its model is reused)
   prompt | o --headless [model] headless with the prompt on stdin
   o --resume                    resume the most recent session
   o --resume-id <id>           resume a specific session by ID
@@ -217,12 +234,6 @@ func run(model, prompt string, opts *cliOptions) error {
 		// Use the session's model unless overridden by a positional arg.
 		if model == "" {
 			model = sess.Model
-		} else if model != sess.Model {
-			// Persist an explicit override so the sidebar and future plain
-			// resumes reflect the chosen model.
-			if err := store.SetModel(sess.ID, model); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not save model choice: %v\n", err)
-			}
 		}
 		if model == "" {
 			model = config.LastModel()
@@ -261,6 +272,14 @@ func run(model, prompt string, opts *cliOptions) error {
 		info, err := prepareAgentModel(cmd, client, &agentOpts, false)
 		if err != nil {
 			return err
+		}
+		if model != sess.Model {
+			// Persist an explicit override so the sidebar and future plain
+			// resumes reflect the chosen model. Only reached after the model
+			// validated, so a mistyped name cannot clobber the stored one.
+			if err := store.SetModel(sess.ID, model); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not save model choice: %v\n", err)
+			}
 		}
 		agentOpts.System = firstNonEmpty(opts.system, info.System)
 
