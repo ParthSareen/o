@@ -242,7 +242,7 @@ func run(model, prompt string, opts *cliOptions) error {
 			return fmt.Errorf("model is required (run `o <model>` once; it is remembered after that)")
 		}
 
-		ensureDebugServer(realServerBootstrap(func(format string, args ...any) {
+		ensureDedicatedServer(realServerBootstrap(func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, format+"\n", args...)
 		}))
 
@@ -327,9 +327,9 @@ func run(model, prompt string, opts *cliOptions) error {
 		return fmt.Errorf("model is required (run `o <model>` once; it is remembered after that)")
 	}
 
-	// If no server answers, start a debug server on :11433 via watchy (never
-	// restarts one that's already running).
-	ensureDebugServer(realServerBootstrap(func(format string, args ...any) {
+	// Always run against o's dedicated ollama server on :11433 (started via
+	// watchy when needed; reuses one that's already running).
+	ensureDedicatedServer(realServerBootstrap(func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, format+"\n", args...)
 	}))
 

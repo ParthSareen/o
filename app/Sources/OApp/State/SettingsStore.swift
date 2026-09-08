@@ -89,7 +89,7 @@ final class SettingsStore {
 
     /// Fetch locally installed models from the ollama server.
     func reloadModels() async {
-        let host = ProcessInfo.processInfo.environment["OLLAMA_HOST"] ?? "http://127.0.0.1:11434"
+        let host = await Self.resolveOllamaHost()
         guard let url = URL(string: host + "/api/tags") else { return }
         struct TagsResponse: Decodable {
             struct Model: Decodable { let model: String?; let name: String? }
@@ -103,6 +103,25 @@ final class SettingsStore {
         } catch {
             modelFetchError = error.localizedDescription
         }
+    }
+
+    /// Matches o's server ladder: explicit OLLAMA_HOST, then o's dedicated
+    /// server on 11433 (started via watchy by the o core), then a shared
+    /// server on 11434. Defaults to 11434 when nothing answers.
+    static func resolveOllamaHost() async -> String {
+        if let explicit = ProcessInfo.processInfo.environment["OLLAMA_HOST"], !explicit.isEmpty {
+            return explicit
+        }
+        for port in [11433, 11434] {
+            guard let probe = URL(string: "http://127.0.0.1:\(port)/api/version") else { continue }
+            var request = URLRequest(url: probe)
+            request.timeoutInterval = 1
+            if let (_, response) = try? await URLSession.shared.data(for: request),
+               (response as? HTTPURLResponse)?.statusCode == 200 {
+                return "http://127.0.0.1:\(port)"
+            }
+        }
+        return "http://127.0.0.1:11434"
     }
 }
 

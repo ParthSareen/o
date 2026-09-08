@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -63,7 +64,7 @@ func (f *fakeBootstrapState) asBootstrap() serverBootstrap {
 		},
 		readyTimeout: time.Second, // fake
 		note: func(format string, args ...any) {
-			f.notes = append(f.notes, format)
+			f.notes = append(f.notes, fmt.Sprintf(format, args...))
 		},
 	}
 }
@@ -72,7 +73,7 @@ func TestServerExplicitHostUpIsRespected(t *testing.T) {
 	f := newFakeBootstrap()
 	f.env["OLLAMA_HOST"] = "http://example:1"
 	f.up["http://example:1"] = true
-	ensureDebugServer(f.asBootstrap())
+	ensureDedicatedServer(f.asBootstrap())
 	if len(f.started) != 0 || f.env["OLLAMA_HOST"] != "http://example:1" {
 		t.Fatalf("explicit host must be untouched: env=%v started=%v", f.env, f.started)
 	}
@@ -84,7 +85,7 @@ func TestServerExplicitHostUpIsRespected(t *testing.T) {
 func TestServerExplicitHostDownWarnsButDoesNotSpawn(t *testing.T) {
 	f := newFakeBootstrap()
 	f.env["OLLAMA_HOST"] = "http://example:1"
-	ensureDebugServer(f.asBootstrap())
+	ensureDedicatedServer(f.asBootstrap())
 	if len(f.started) != 0 {
 		t.Fatalf("explicit host down must not spawn: %v", f.started)
 	}
@@ -93,51 +94,48 @@ func TestServerExplicitHostDownWarnsButDoesNotSpawn(t *testing.T) {
 	}
 }
 
-func TestServerDefaultRunningUntouched(t *testing.T) {
+// (The old "default server up → do nothing" case is now covered by
+// TestServerSpawnsDedicatedEvenWhenSharedUp: o spawns its own server even
+// when a shared one already listens on 11434.)
+
+func TestServerReusesExistingDedicatedServer(t *testing.T) {
+	f := newFakeBootstrap()
+	f.up[dedicatedOllamaHost] = true
+	ensureDedicatedServer(f.asBootstrap())
+	if len(f.started) != 0 {
+		t.Fatal("existing dedicated server must not be restarted")
+	}
+	if f.env["OLLAMA_HOST"] != dedicatedOllamaHost {
+		t.Fatalf("env should point at dedicated server, got %q", f.env["OLLAMA_HOST"])
+	}
+}
+
+func TestServerDedicatedPreferredOverShared(t *testing.T) {
 	f := newFakeBootstrap()
 	f.up[defaultOllamaHost] = true
-	ensureDebugServer(f.asBootstrap())
+	f.up[dedicatedOllamaHost] = true
+	ensureDedicatedServer(f.asBootstrap())
 	if len(f.started) != 0 {
-		t.Fatal("default server up: must not spawn or restart anything")
+		t.Fatal("must not spawn when a dedicated server already runs")
 	}
-	if _, ok := f.env["OLLAMA_HOST"]; ok {
-		t.Fatal("env must stay unset when default server is up")
-	}
-	if len(f.notes) != 0 {
-		t.Fatalf("quiet path expected: %v", f.notes)
+	if f.env["OLLAMA_HOST"] != dedicatedOllamaHost {
+		t.Fatalf("shared server must not win: env=%q", f.env["OLLAMA_HOST"])
 	}
 }
 
-func TestServerReusesExistingDebugServer(t *testing.T) {
+func TestServerSpawnsDedicatedEvenWhenSharedUp(t *testing.T) {
 	f := newFakeBootstrap()
-	f.up[debugOllamaHost] = true
-	ensureDebugServer(f.asBootstrap())
-	if len(f.started) != 0 {
-		t.Fatal("existing debug server must not be restarted")
+	f.up[defaultOllamaHost] = true
+	// dedicated server becomes healthy after the spawn
+	f.readiness = func(host string) bool {
+		return host == dedicatedOllamaHost && len(f.started) > 0
 	}
-	if f.env["OLLAMA_HOST"] != debugOllamaHost {
-		t.Fatalf("env should point at debug server, got %q", f.env["OLLAMA_HOST"])
+	ensureDedicatedServer(f.asBootstrap())
+	if len(f.started) != 1 {
+		t.Fatalf("a shared server on 11434 must not keep o from spawning its own: %v", f.started)
 	}
-}
-
-func TestServerNoWatchyNoSpawn(t *testing.T) {
-	f := newFakeBootstrap()
-	f.lookPathErr["watchy"] = errors.New("not installed")
-	ensureDebugServer(f.asBootstrap())
-	if len(f.started) != 0 || len(f.notes) != 0 {
-		t.Fatalf("no watchy → silent no-op: %v %v", f.started, f.notes)
-	}
-}
-
-func TestServerNoOllamaBinaryWarns(t *testing.T) {
-	f := newFakeBootstrap()
-	delete(f.ollamaPath, "ollama")
-	ensureDebugServer(f.asBootstrap())
-	if len(f.started) != 0 {
-		t.Fatal("no ollama binary: must not spawn")
-	}
-	if len(f.notes) != 1 || !strings.Contains(f.notes[0], "ollama binary") {
-		t.Fatalf("want binary-missing warning: %v", f.notes)
+	if f.env["OLLAMA_HOST"] != dedicatedOllamaHost {
+		t.Fatalf("env should point at dedicated server, got %q", f.env["OLLAMA_HOST"])
 	}
 }
 
@@ -145,11 +143,11 @@ func TestServerSpawnsViaWatchyAndPointsEnv(t *testing.T) {
 	f := newFakeBootstrap()
 	// server becomes healthy after the spawn (watchy actually started it)
 	f.readiness = func(host string) bool {
-		return host == debugOllamaHost && len(f.started) > 0
+		return host == dedicatedOllamaHost && len(f.started) > 0
 	}
-	ensureDebugServer(f.asBootstrap())
-	if len(f.started) != 1 || f.started[0] != debugServerTask {
-		t.Fatalf("want exactly one spawn of %q: %v", debugServerTask, f.started)
+	ensureDedicatedServer(f.asBootstrap())
+	if len(f.started) != 1 || f.started[0] != dedicatedServerTask {
+		t.Fatalf("want exactly one spawn of %q: %v", dedicatedServerTask, f.started)
 	}
 	cmd := f.commands[0]
 	for _, want := range []string{"OLLAMA_HOST=127.0.0.1:11433", "OLLAMA_DEBUG=1", "/usr/bin/ollama", "serve"} {
@@ -157,33 +155,94 @@ func TestServerSpawnsViaWatchyAndPointsEnv(t *testing.T) {
 			t.Fatalf("spawn command %q missing %q", cmd, want)
 		}
 	}
-	if f.env["OLLAMA_HOST"] != debugOllamaHost {
-		t.Fatalf("env should point at debug server, got %q", f.env["OLLAMA_HOST"])
+	if f.env["OLLAMA_HOST"] != dedicatedOllamaHost {
+		t.Fatalf("env should point at dedicated server, got %q", f.env["OLLAMA_HOST"])
 	}
 	if len(f.notes) == 0 || !strings.Contains(f.notes[len(f.notes)-1], "watchy logs") {
 		t.Fatalf("want note pointing at watchy logs: %v", f.notes)
 	}
 }
 
-func TestServerSpawnNeverReadies(t *testing.T) {
+func TestServerSpawnNeverReadiesFallsBackToShared(t *testing.T) {
 	f := newFakeBootstrap()
-	// probes stay down forever; short timeout keeps the test fast
+	f.up[defaultOllamaHost] = true
 	b := f.asBootstrap()
-	b.readyTimeout = 10 * time.Millisecond
-	ensureDebugServer(b)
-	if _, ok := f.env["OLLAMA_HOST"]; ok {
-		t.Fatal("do not point env at a server that never came up")
+	b.readyTimeout = 10 * time.Millisecond // probes stay down forever
+	ensureDedicatedServer(b)
+	if f.env["OLLAMA_HOST"] != defaultOllamaHost {
+		t.Fatalf("want fallback to shared server, env=%q", f.env["OLLAMA_HOST"])
 	}
 	if len(f.notes) == 0 || !strings.Contains(f.notes[len(f.notes)-1], "did not come up") {
-		t.Fatalf("want readiness-timeout warning: %v", f.notes)
+		t.Fatalf("want readiness-timeout note: %v", f.notes)
 	}
 }
 
-func TestServerSpawnFailureSurfaces(t *testing.T) {
+func TestServerSpawnNeverReadiesNothingUpWarns(t *testing.T) {
+	f := newFakeBootstrap()
+	b := f.asBootstrap()
+	b.readyTimeout = 10 * time.Millisecond
+	ensureDedicatedServer(b)
+	if _, ok := f.env["OLLAMA_HOST"]; ok {
+		t.Fatal("do not point env at a server that never came up")
+	}
+	if len(f.notes) == 0 || !strings.Contains(f.notes[len(f.notes)-1], "no ollama server reachable") {
+		t.Fatalf("want no-server warning: %v", f.notes)
+	}
+}
+
+func TestServerSpawnFailureFallsBackToShared(t *testing.T) {
 	f := newFakeBootstrap()
 	f.startTaskErr = errors.New("boom")
-	ensureDebugServer(f.asBootstrap())
+	f.up[defaultOllamaHost] = true
+	ensureDedicatedServer(f.asBootstrap())
+	if f.env["OLLAMA_HOST"] != defaultOllamaHost {
+		t.Fatalf("want fallback to shared server, env=%q", f.env["OLLAMA_HOST"])
+	}
 	if len(f.notes) != 1 || !strings.Contains(f.notes[0], "watchy") {
-		t.Fatalf("want watchy-start failure warning: %v", f.notes)
+		t.Fatalf("want watchy-start failure note: %v", f.notes)
+	}
+}
+
+func TestServerNoWatchyFallsBackToShared(t *testing.T) {
+	f := newFakeBootstrap()
+	f.lookPathErr["watchy"] = errors.New("not installed")
+	f.up[defaultOllamaHost] = true
+	ensureDedicatedServer(f.asBootstrap())
+	if len(f.started) != 0 {
+		t.Fatalf("no watchy: must not spawn: %v", f.started)
+	}
+	if f.env["OLLAMA_HOST"] != defaultOllamaHost {
+		t.Fatalf("want fallback to shared server, env=%q", f.env["OLLAMA_HOST"])
+	}
+	if len(f.notes) != 1 || !strings.Contains(f.notes[0], "watchy") {
+		t.Fatalf("want fallback note mentioning watchy: %v", f.notes)
+	}
+}
+
+func TestServerNoWatchyNothingUpWarns(t *testing.T) {
+	f := newFakeBootstrap()
+	f.lookPathErr["watchy"] = errors.New("not installed")
+	ensureDedicatedServer(f.asBootstrap())
+	if len(f.started) != 0 {
+		t.Fatalf("no watchy: must not spawn: %v", f.started)
+	}
+	if len(f.notes) != 1 || !strings.Contains(f.notes[0], "no ollama server reachable") {
+		t.Fatalf("want no-server warning: %v", f.notes)
+	}
+}
+
+func TestServerNoOllamaBinaryFallsBack(t *testing.T) {
+	f := newFakeBootstrap()
+	delete(f.ollamaPath, "ollama")
+	f.up[defaultOllamaHost] = true
+	ensureDedicatedServer(f.asBootstrap())
+	if len(f.started) != 0 {
+		t.Fatal("no ollama binary: must not spawn")
+	}
+	if f.env["OLLAMA_HOST"] != defaultOllamaHost {
+		t.Fatalf("want fallback to shared server, env=%q", f.env["OLLAMA_HOST"])
+	}
+	if len(f.notes) != 1 || !strings.Contains(f.notes[0], "ollama binary") {
+		t.Fatalf("want binary-missing note: %v", f.notes)
 	}
 }

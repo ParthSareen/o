@@ -113,22 +113,24 @@ Headless runs print their saved session ID on stderr as `session: <id>`
 --headless "follow-up"` continues that conversation — the session's model is
 reused, so an agent can follow up on a finished child without restating it.
 
-## Debug server
+## Dedicated server
 
-If no server answers on the default port, o can start a debug server on port
-11433 through [watchy] (`OLLAMA_DEBUG=1`, loopback only). These rules apply:
+o always runs against its own ollama server on port 11433, started through
+[watchy] (`OLLAMA_DEBUG=1`, loopback only) — even when a shared server already
+listens on 11434. These rules apply:
 
-- o starts the debug server only if watchy and the `ollama` binary are installed.
+- o starts the server only if watchy and the `ollama` binary are installed.
 - o never stops or replaces a server that runs.
-- o reuses a debug server from an earlier launch.
+- o reuses a dedicated server from an earlier launch.
 - If you set `OLLAMA_HOST`, o uses it as it is.
-- If the default server runs, o does nothing.
+- If o cannot start a dedicated server, it falls back to a shared server on
+  11434 when one answers.
 
-To manage the debug server:
+To manage the dedicated server:
 
 ```sh
-watchy logs o-ollama-debug-11433
-watchy stop o-ollama-debug-11433
+watchy logs o-ollama-11433
+watchy stop o-ollama-11433
 ```
 
 ## Differences from upstream
