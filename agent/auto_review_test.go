@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -150,6 +152,128 @@ func TestAutoReviewerGradesWithModel(t *testing.T) {
 	}
 	if got.Stream == nil || *got.Stream {
 		t.Fatal("review call should disable streaming")
+	}
+}
+
+func TestAutoReviewerRequestsLowestThinkLevel(t *testing.T) {
+	client := &scriptedCompactionClient{responses: [][]api.ChatResponse{
+		{decisionResponse("allow", "low", "ordinary build")},
+	}}
+	reviewer := &AutoReviewer{Client: client, Model: "think-low-request-model"}
+	req := ApprovalRequest{
+		WorkingDir: "/repo",
+		Calls:      []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "go build ./..."}}},
+	}
+
+	approval, err := reviewer.Review(context.Background(), req)
+	if err != nil {
+		t.Fatalf("review should not error: %v", err)
+	}
+	if !approval.Allow {
+		t.Fatal("build should be allowed")
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected 1 model call, got %d", len(client.requests))
+	}
+	think := client.requests[0].Think
+	if think == nil || think.Value != "low" {
+		t.Fatalf("review request should ask for the lowest think level, got %#v", think)
+	}
+}
+
+func TestAutoReviewerFallsBackAndCachesWhenThinkLowRejected(t *testing.T) {
+	client := &scriptedCompactionClient{
+		responses: [][]api.ChatResponse{
+			nil,
+			{decisionResponse("deny", "high", "force push rewrites shared history")},
+		},
+		errs: []error{
+			api.StatusError{StatusCode: http.StatusBadRequest, ErrorMessage: "\"think-low-reject-model\" does not support thinking"},
+			nil,
+		},
+	}
+	reviewer := &AutoReviewer{Client: client, Model: "think-low-reject-model"}
+	req := ApprovalRequest{
+		WorkingDir: "/repo",
+		Calls:      []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "git push --force"}}},
+	}
+
+	approval, err := reviewer.Review(context.Background(), req)
+	if err != nil {
+		t.Fatalf("review should retry with a default request: %v", err)
+	}
+	if approval.Allow {
+		t.Fatal("force push should be denied")
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected think-low attempt plus retry, got %d calls", len(client.requests))
+	}
+	if client.requests[0].Think == nil || client.requests[0].Think.Value != "low" {
+		t.Fatalf("first request should ask for the lowest think level, got %#v", client.requests[0].Think)
+	}
+	if client.requests[1].Think != nil {
+		t.Fatalf("retry should use the default think behavior, got %#v", client.requests[1].Think)
+	}
+
+	// The rejection is cached in memory: later reviews of the same model
+	// skip the think-low request entirely.
+	cached := &scriptedCompactionClient{responses: [][]api.ChatResponse{
+		{decisionResponse("allow", "low", "ordinary build")},
+	}}
+	reviewer.Client = cached
+	approval, err = reviewer.Review(context.Background(), req)
+	if err != nil {
+		t.Fatalf("cached model should grade without think low: %v", err)
+	}
+	if !approval.Allow {
+		t.Fatal("cached review should allow an ordinary build")
+	}
+	if len(cached.requests) != 1 {
+		t.Fatalf("cached model should make 1 call, got %d", len(cached.requests))
+	}
+	if cached.requests[0].Think != nil {
+		t.Fatal("cached model should not ask for the think level again")
+	}
+}
+
+func TestAutoReviewerDoesNotCacheOtherErrors(t *testing.T) {
+	client := &scriptedCompactionClient{
+		responses: [][]api.ChatResponse{
+			nil,
+			{decisionResponse("allow", "low", "ordinary build")},
+		},
+		errs: []error{
+			errors.New("connection refused"),
+			nil,
+		},
+	}
+	reviewer := &AutoReviewer{Client: client, Model: "think-other-error-model"}
+	req := ApprovalRequest{
+		WorkingDir: "/repo",
+		Calls:      []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "go build ./..."}}},
+	}
+
+	if _, err := reviewer.Review(context.Background(), req); err == nil {
+		t.Fatal("non-think errors should propagate")
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("non-think errors should not retry, got %d calls", len(client.requests))
+	}
+
+	// Only think rejections are cached, so the next review still asks for
+	// the lowest think level.
+	approval, err := reviewer.Review(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second review should grade: %v", err)
+	}
+	if !approval.Allow {
+		t.Fatal("second review should allow")
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("second review should make 1 more call, got %d total", len(client.requests))
+	}
+	if client.requests[1].Think == nil || client.requests[1].Think.Value != "low" {
+		t.Fatal("second review should still ask for the lowest think level")
 	}
 }
 

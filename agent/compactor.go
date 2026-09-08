@@ -334,7 +334,7 @@ func (c *SimpleCompactor) summarizeEmptyFallback(ctx context.Context, req Compac
 	if err == nil {
 		return summary, nil
 	}
-	if !isUnsupportedCompactionThinkError(err) {
+	if !isUnsupportedThinkError(err) {
 		return "", err
 	}
 	if req.Think == nil {
@@ -344,7 +344,10 @@ func (c *SimpleCompactor) summarizeEmptyFallback(ctx context.Context, req Compac
 	return c.summarize(ctx, retry, previousSummary, archive, chopped)
 }
 
-func isUnsupportedCompactionThinkError(err error) bool {
+// isUnsupportedThinkError reports whether a chat request failed because the
+// model or server rejects the think parameter, e.g. a model without thinking
+// support or a proxy that does not accept think=false.
+func isUnsupportedThinkError(err error) bool {
 	if err == nil {
 		return false
 	}

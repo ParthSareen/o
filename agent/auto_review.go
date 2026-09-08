@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ParthSareen/o/api"
@@ -27,6 +28,22 @@ const (
 	autoReviewTaskLimit   = 2000
 	autoReviewDetailLimit = 4000
 )
+
+// autoReviewThinkLowRejected caches, per model, that the server rejects
+// think="low". Grading only needs a submit_decision call, so the request
+// asks for the lowest thinking level: GLM cloud models such as glm-5.3
+// silently ignore think=false but honor "low". When a model rejects
+// the level entirely (e.g. non-thinking models 400 on any truthy value),
+// the discovery is cached in memory so only the first review per model
+// pays for it.
+var autoReviewThinkLowRejected sync.Map
+
+// autoReviewThinkLow reports whether the review request should ask for the
+// lowest thinking level.
+func autoReviewThinkLow(model string) bool {
+	_, rejected := autoReviewThinkLowRejected.Load(model)
+	return !rejected
+}
 
 // ResolveAutoReviewModel maps the review-model config value to a concrete
 // model. Empty or "selected" grades with the session model; any other value
@@ -92,9 +109,13 @@ func autoReviewDecisionTool() api.Tool {
 }
 
 // Review grades the request and returns the resulting approval. Calls that
-// are statically safe run without a model round-trip. A nil error means the
-// decision was valid (allow or deny); an error means grading failed and the
-// caller must fall back to prompting or denying.
+// are statically safe run without a model round-trip. The grading request
+// asks for the lowest thinking level (the rationale in submit_decision
+// already covers the reasoning; GLM cloud models ignore think=false but
+// honor "low"); if the server rejects the level, the model is cached in
+// memory and the request is retried with the default think behavior. A nil
+// error means the decision was valid (allow or deny); an error means grading
+// failed and the caller must fall back to prompting or denying.
 func (r *AutoReviewer) Review(ctx context.Context, req ApprovalRequest) (Approval, error) {
 	if r == nil || r.Client == nil || strings.TrimSpace(r.Model) == "" {
 		return Approval{}, errors.New("auto review is not configured")
@@ -111,28 +132,42 @@ func (r *AutoReviewer) Review(ctx context.Context, req ApprovalRequest) (Approva
 	started := time.Now()
 
 	stream := false
-	chatReq := &api.ChatRequest{
-		Model: r.Model,
-		Messages: []api.Message{
-			{Role: "system", Content: autoReviewSystemPrompt(req)},
-			{Role: "user", Content: autoReviewUserPrompt(req)},
-		},
-		Tools:  api.Tools{autoReviewDecisionTool()},
-		Stream: &stream,
+	messages := []api.Message{
+		{Role: "system", Content: autoReviewSystemPrompt(req)},
+		{Role: "user", Content: autoReviewUserPrompt(req)},
+	}
+	tools := api.Tools{autoReviewDecisionTool()}
+	grade := func(thinkLow bool) (*autoReviewDecision, error) {
+		chatReq := &api.ChatRequest{
+			Model:    r.Model,
+			Messages: messages,
+			Tools:    tools,
+			Stream:   &stream,
+		}
+		if thinkLow {
+			chatReq.Think = &api.ThinkValue{Value: "low"}
+		}
+		var decision *autoReviewDecision
+		err := r.Client.Chat(ctx, chatReq, func(resp api.ChatResponse) error {
+			if !resp.Done {
+				return nil
+			}
+			d, err := autoReviewDecisionFromMessage(resp.Message)
+			if err != nil {
+				return err
+			}
+			decision = d
+			return nil
+		})
+		return decision, err
 	}
 
-	var decision *autoReviewDecision
-	err := r.Client.Chat(ctx, chatReq, func(resp api.ChatResponse) error {
-		if !resp.Done {
-			return nil
-		}
-		d, err := autoReviewDecisionFromMessage(resp.Message)
-		if err != nil {
-			return err
-		}
-		decision = d
-		return nil
-	})
+	wantThinkLow := autoReviewThinkLow(r.Model)
+	decision, err := grade(wantThinkLow)
+	if err != nil && wantThinkLow && isUnsupportedThinkError(err) {
+		autoReviewThinkLowRejected.Store(r.Model, struct{}{})
+		decision, err = grade(false)
+	}
 	if err != nil {
 		return Approval{}, err
 	}
