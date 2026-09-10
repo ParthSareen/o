@@ -404,10 +404,14 @@ func TestBashCommandReadOnly(t *testing.T) {
 type recordingPrompter struct {
 	called   *bool
 	approval Approval
+	request  *ApprovalRequest
 }
 
-func (p recordingPrompter) PromptApproval(context.Context, ApprovalRequest) (Approval, error) {
+func (p recordingPrompter) PromptApproval(_ context.Context, req ApprovalRequest) (Approval, error) {
 	*p.called = true
+	if p.request != nil {
+		*p.request = req
+	}
 	return p.approval, nil
 }
 
@@ -467,6 +471,80 @@ func TestAutoReviewPrompterModes(t *testing.T) {
 		}
 		if !strings.Contains(approval.Reason, "Auto review failed") {
 			t.Fatalf("deny reason should explain the failure, got %q", approval.Reason)
+		}
+	})
+
+	t.Run("deny escalates to next when enabled", func(t *testing.T) {
+		state := &ApprovalState{}
+		state.SetMode(ApprovalModeAuto)
+		called := false
+		var got ApprovalRequest
+		next := recordingPrompter{called: &called, request: &got, approval: Approval{Allow: true}}
+		client := &fakeClient{responses: [][]api.ChatResponse{
+			{decisionResponse("deny", "high", "force pushing rewrites shared history")},
+		}}
+		prompter := AutoReviewPrompter{Reviewer: &AutoReviewer{Client: client, Model: "m"}, State: state, Next: next, EscalateDeny: true}
+		approval, err := prompter.PromptApproval(context.Background(), req)
+		if err != nil || !approval.Allow {
+			t.Fatalf("escalated deny should follow the human decision, got %+v, %v", approval, err)
+		}
+		if !called {
+			t.Fatal("escalated deny should consult next")
+		}
+		if got.DeniedReview == nil || got.DeniedReview.Risk != "high" || got.DeniedReview.Outcome != "deny" {
+			t.Fatalf("next should receive the review verdict, got %+v", got.DeniedReview)
+		}
+		if approval.Review == nil || approval.Review.Outcome != "deny" {
+			t.Fatalf("escalated approval should keep the review verdict, got %+v", approval.Review)
+		}
+	})
+
+	t.Run("critical deny stays final", func(t *testing.T) {
+		state := &ApprovalState{}
+		state.SetMode(ApprovalModeAuto)
+		called := false
+		next := recordingPrompter{called: &called, approval: Approval{Allow: true}}
+		client := &fakeClient{responses: [][]api.ChatResponse{
+			{decisionResponse("deny", "critical", "wipes the repo")},
+		}}
+		prompter := AutoReviewPrompter{Reviewer: &AutoReviewer{Client: client, Model: "m"}, State: state, Next: next, EscalateDeny: true}
+		approval, err := prompter.PromptApproval(context.Background(), req)
+		if err != nil || approval.Allow {
+			t.Fatalf("critical deny should stay final, got %+v, %v", approval, err)
+		}
+		if called {
+			t.Fatal("critical deny should not escalate")
+		}
+	})
+
+	t.Run("deny stays final without escalation", func(t *testing.T) {
+		state := &ApprovalState{}
+		state.SetMode(ApprovalModeAuto)
+		called := false
+		next := recordingPrompter{called: &called, approval: Approval{Allow: true}}
+		client := &fakeClient{responses: [][]api.ChatResponse{
+			{decisionResponse("deny", "high", "out of scope")},
+		}}
+		prompter := AutoReviewPrompter{Reviewer: &AutoReviewer{Client: client, Model: "m"}, State: state, Next: next}
+		approval, err := prompter.PromptApproval(context.Background(), req)
+		if err != nil || approval.Allow {
+			t.Fatalf("deny without EscalateDeny should stay final, got %+v, %v", approval, err)
+		}
+		if called {
+			t.Fatal("deny without EscalateDeny should not consult next")
+		}
+	})
+
+	t.Run("deny stays final with no human to ask", func(t *testing.T) {
+		state := &ApprovalState{}
+		state.SetMode(ApprovalModeAuto)
+		client := &fakeClient{responses: [][]api.ChatResponse{
+			{decisionResponse("deny", "high", "out of scope")},
+		}}
+		prompter := AutoReviewPrompter{Reviewer: &AutoReviewer{Client: client, Model: "m"}, State: state, EscalateDeny: true}
+		approval, err := prompter.PromptApproval(context.Background(), req)
+		if err != nil || approval.Allow {
+			t.Fatalf("deny without Next should stay final, got %+v, %v", approval, err)
 		}
 	})
 

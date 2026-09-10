@@ -14,6 +14,10 @@ type ApprovalRequest struct {
 	// of what the agent was asked to do.
 	Task  string
 	Calls []ApprovalToolCall
+	// DeniedReview carries the review model's deny verdict when auto mode
+	// escalated the request to a human after denial, so the prompt can show
+	// why it appeared.
+	DeniedReview *ReviewDecision
 }
 
 func (r *ApprovalRequest) AddToolCall(id, name, scope string, args map[string]any) {

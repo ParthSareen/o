@@ -90,17 +90,19 @@ func (m *chatModel) ensureAutoReviewer() *coreagent.AutoReviewer {
 }
 
 // autoReviewSessionPrompter wraps the human approval controller with the
-// auto reviewer. The wrapper is inert in review and full modes and falls
-// back to the human prompt when grading fails.
+// auto reviewer. The wrapper is inert in review and full modes, falls back
+// to the human prompt when grading fails, and escalates non-critical deny
+// verdicts so the user gets the final word.
 func (m *chatModel) autoReviewSessionPrompter() coreagent.ApprovalPrompter {
 	reviewer := m.ensureAutoReviewer()
 	if reviewer == nil {
 		return m.approvalController
 	}
 	return coreagent.AutoReviewPrompter{
-		Reviewer: reviewer,
-		State:    m.ensureApprovalState(),
-		Next:     m.approvalController,
+		Reviewer:     reviewer,
+		State:        m.ensureApprovalState(),
+		Next:         m.approvalController,
+		EscalateDeny: true,
 	}
 }
 
@@ -303,6 +305,11 @@ func (m chatModel) renderApprovalPromptLines(width int) []string {
 	bodyWidth := max(20, width-2)
 
 	var lines []string
+	if review := prompt.request.DeniedReview; review != nil {
+		header := fmt.Sprintf("auto review denied (%s risk): %s", review.Risk, strings.TrimSpace(review.Rationale))
+		lines = append(lines, chatMetaStyle.Render(strings.Join(wrapChatText(header, width), "\n")))
+		lines = append(lines, "")
+	}
 	if len(prompt.request.Calls) <= 1 {
 		detail := approvalRequestDetail(prompt.request, bodyWidth)
 		if detail == "" {

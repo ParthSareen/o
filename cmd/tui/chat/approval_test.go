@@ -161,6 +161,32 @@ func TestChatApprovalRendersSkillLoad(t *testing.T) {
 	}
 }
 
+func TestChatApprovalPromptShowsDeniedReview(t *testing.T) {
+	request := coreagent.ApprovalRequest{
+		WorkingDir: "/repo",
+		Calls: []coreagent.ApprovalToolCall{{
+			ToolCallID: "call-1",
+			ToolName:   "bash",
+			Args:       map[string]any{"command": "git push --force"},
+		}},
+		DeniedReview: &coreagent.ReviewDecision{
+			Outcome:   "deny",
+			Risk:      "high",
+			Rationale: "force pushing rewrites shared history",
+		},
+	}
+	m := chatModel{
+		approvalPrompt: &chatApprovalPrompt{request: request},
+	}
+
+	lines := stripANSI(strings.Join(m.renderApprovalPromptLines(80), "\n"))
+	for _, want := range []string{"auto review denied (high risk)", "force pushing rewrites shared history", "1. Approve once"} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("escalated approval prompt missing %q:\n%s", want, lines)
+		}
+	}
+}
+
 func TestChatApprovalPromptOmitsDuplicateBatchDetails(t *testing.T) {
 	request := coreagent.ApprovalRequest{
 		WorkingDir: "/repo",

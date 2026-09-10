@@ -292,11 +292,15 @@ func (d autoReviewDecision) approval() Approval {
 // Review mode delegates to Next unchanged, and grading failures fall back to
 // Next when it is set (the human prompt) or deny when DenyOnFailure is set
 // (headless and pipe runs have no human to fall back on).
+// With EscalateDeny,
+// non-critical reviewer denies also fall back to Next so the user gets the
+// final word; critical-risk denies stay final.
 type AutoReviewPrompter struct {
 	Reviewer      *AutoReviewer
 	State         *ApprovalState
 	Next          ApprovalPrompter
 	DenyOnFailure bool
+	EscalateDeny  bool
 }
 
 func (p AutoReviewPrompter) PromptApproval(ctx context.Context, req ApprovalRequest) (Approval, error) {
@@ -304,16 +308,38 @@ func (p AutoReviewPrompter) PromptApproval(ctx context.Context, req ApprovalRequ
 		return p.next(ctx, req)
 	}
 	approval, err := p.Reviewer.Review(ctx, req)
-	if err == nil {
+	if err != nil {
+		if p.DenyOnFailure {
+			return Approval{
+				Allow:  false,
+				Reason: "Auto review failed, denying: " + err.Error(),
+			}, nil
+		}
+		return p.next(ctx, req)
+	}
+	if approval.Allow || !p.escalates(approval) {
 		return approval, nil
 	}
-	if p.DenyOnFailure {
-		return Approval{
-			Allow:  false,
-			Reason: "Auto review failed, denying: " + err.Error(),
-		}, nil
+	// The reviewer denied; give the human the final word with the verdict
+	// attached so the prompt can explain why it appeared.
+	escalated := req
+	escalated.DeniedReview = approval.Review
+	human, herr := p.next(ctx, escalated)
+	if herr != nil {
+		return approval, nil
 	}
-	return p.next(ctx, req)
+	human.Review = approval.Review
+	return human, nil
+}
+
+// escalates reports whether a reviewer deny should be handed to Next for a
+// human decision: escalation must be enabled with a Next to ask (headless
+// runs have neither), and critical-risk denies stay final, failing closed.
+func (p AutoReviewPrompter) escalates(approval Approval) bool {
+	if !p.EscalateDeny || p.Next == nil {
+		return false
+	}
+	return approval.Review == nil || approval.Review.Risk != "critical"
 }
 
 func (p AutoReviewPrompter) next(ctx context.Context, req ApprovalRequest) (Approval, error) {
