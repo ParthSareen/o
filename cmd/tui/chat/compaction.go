@@ -97,6 +97,9 @@ func (m chatModel) finishManualCompaction(msg chatCompactDoneMsg) (tea.Model, te
 
 	m.messages = msg.result.Messages
 	m.liveMessages = nil
+	// Compaction rewrote the history in memory; persist the replacement so
+	// a later resume loads the compacted form instead of the full history.
+	m.persistRunResult(m.messages)
 	m.entries = entriesFromMessages(m.messages)
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
 	m.contextEstimate = true

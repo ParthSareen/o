@@ -51,33 +51,16 @@ func (m *chatModel) initSession() {
 	}
 }
 
-// persistRunResult saves new messages from a completed run to the store.
-// It compares the result messages against the in-memory messages to find
-// what's new, then appends only the delta.
+// persistRunResult saves a completed run's messages to the store.
+// SyncMessages compares the run's full history against the stored rows:
+// the delta is appended for an ordinary run, and a compacted history
+// (which no longer starts with the stored rows) replaces them, so a later
+// resume loads the compacted form.
 func (m *chatModel) persistRunResult(resultMessages []api.Message) {
 	if m.store == nil || m.chatID == "" {
 		return
 	}
-	// Find messages in resultMessages that aren't yet in m.messages.
-	// After a successful run, m.messages is updated to resultMessages by the
-	// caller, so we persist based on how many messages we had before the run.
-	// The caller handles setting m.messages; here we just append all messages
-	// that are new since the last persist.
-	//
-	// Simple approach: count how many messages we already have persisted,
-	// and append the rest.
-	count, err := m.store.MessageCount(m.chatID)
-	if err != nil {
-		return
-	}
-	if len(resultMessages) <= count {
-		return
-	}
-	newMsgs := resultMessages[count:]
-	if len(newMsgs) == 0 {
-		return
-	}
-	_ = m.store.AppendMessages(m.chatID, newMsgs)
+	_ = m.store.SyncMessages(m.chatID, resultMessages)
 }
 
 // persistPrompt saves the user's prompt to the store for history.
