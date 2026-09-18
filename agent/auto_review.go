@@ -364,10 +364,32 @@ Deny actions that are dangerous, out of scope, or that a careful engineer would 
 - accessing credentials or secrets (~/.ssh, .env, cloud keys) or anything outside the working directory
 - changing git remotes, force pushes, or rewriting shared history
 
+%s
+
 Judge each action against the user's request. When the user explicitly asked for the action, allow it. When in doubt, deny and say what the agent should do instead.`
 
+// autoReviewSkillsClause tells the reviewer that user-installed skill scripts
+// are part of the agent's toolkit, not the "untrusted code from outside the
+// project" the deny list targets. Skills are loaded with the user's consent
+// before their scripts run, so the carve-out keys on the skill's own files;
+// naming the directory when it is known lets the reviewer recognize it in the
+// pending actions.
+func autoReviewSkillsClause(skillsDir string) string {
+	var b strings.Builder
+	b.WriteString("User-installed skills are part of the agent's toolkit, not untrusted external code.")
+	if skillsDir != "" {
+		fmt.Fprintf(&b, " The user's installed skills live under %s.", skillsDir)
+	}
+	b.WriteString(" Scripts that a loaded skill instructs the agent to run from the skill's own directory are judged by their arguments and effects, not by their location outside the working directory: a documented status poll, build, or test wait is ordinary work. This carve-out covers the skill's own files only; it does not license reading credentials, secrets, or unrelated paths.")
+	return b.String()
+}
+
 func autoReviewSystemPrompt(req ApprovalRequest) string {
-	return fmt.Sprintf(autoReviewSystemPromptTemplate, req.WorkingDir)
+	skillsDir, err := SkillsDir()
+	if err != nil {
+		skillsDir = ""
+	}
+	return fmt.Sprintf(autoReviewSystemPromptTemplate, req.WorkingDir, autoReviewSkillsClause(skillsDir))
 }
 
 func autoReviewUserPrompt(req ApprovalRequest) string {

@@ -155,6 +155,33 @@ func TestAutoReviewerGradesWithModel(t *testing.T) {
 	}
 }
 
+func TestAutoReviewSystemPromptSkillsClause(t *testing.T) {
+	skillsDir := t.TempDir()
+	t.Setenv(SkillsDirEnv, skillsDir)
+	prompt := autoReviewSystemPrompt(ApprovalRequest{WorkingDir: "/repo"})
+	for _, want := range []string{
+		"Working directory: /repo",
+		"User-installed skills are part of the agent's toolkit",
+		"installed skills live under " + skillsDir,
+		"judged by their arguments and effects",
+		"does not license reading credentials",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt should mention %q, got:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestAutoReviewSkillsClauseWithoutDir(t *testing.T) {
+	clause := autoReviewSkillsClause("")
+	if !strings.Contains(clause, "User-installed skills are part of the agent's toolkit") {
+		t.Errorf("clause should keep the carve-out, got %q", clause)
+	}
+	if strings.Contains(clause, "live under") {
+		t.Errorf("clause should omit the path when unknown, got %q", clause)
+	}
+}
+
 func TestAutoReviewerRequestsLowestThinkLevel(t *testing.T) {
 	client := &scriptedCompactionClient{responses: [][]api.ChatResponse{
 		{decisionResponse("allow", "low", "ordinary build")},
