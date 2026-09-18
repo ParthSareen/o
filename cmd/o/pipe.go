@@ -351,6 +351,11 @@ func (r *pipeRunner) runTurn(ctx context.Context, cmds chan cmdMsg, c pipeComman
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// The history this turn starts from. Session.Run returns the FULL
+	// message list (prior + new + assistant), so the run result replaces the
+	// in-memory history and only the delta is persisted.
+	prior := r.history
+
 	type turnResult struct {
 		res *coreagent.RunResult
 		err error
@@ -361,7 +366,7 @@ func (r *pipeRunner) runTurn(ctx context.Context, cmds chan cmdMsg, c pipeComman
 			ChatID:       r.chatID,
 			Model:        r.opts.Model,
 			SystemPrompt: r.systemPrompt,
-			Messages:     r.history,
+			Messages:     prior,
 			NewMessages:  []api.Message{{Role: "user", Content: text}},
 			SkillName:    skill,
 			Format:       r.opts.Format,
@@ -374,6 +379,10 @@ func (r *pipeRunner) runTurn(ctx context.Context, cmds chan cmdMsg, c pipeComman
 
 	eof := false
 	var result turnResult
+	// Control commands that arrive mid-run apply after it finishes: mutating
+	// session state the turn goroutine reads is a data race, and the contract
+	// is that an in-flight run keeps its original settings.
+	var deferred []pipeCommand
 loop:
 	for {
 		select {
@@ -397,10 +406,8 @@ loop:
 				cancel()
 			case "inspect":
 				r.emitInspect()
-			case "set_think":
-				r.setThink(m.cmd.Value)
-			case "set_tools":
-				r.setTools(m.cmd.Value)
+			case "set_think", "set_tools":
+				deferred = append(deferred, m.cmd)
 			case "prompt":
 				r.emitError("a run is already in progress; wait for run_finished or send cancel")
 			case "compact":
@@ -415,11 +422,20 @@ loop:
 	}
 
 	if result.res != nil && len(result.res.Messages) > 0 {
-		r.history = append(r.history, result.res.Messages...)
-		if r.store != nil && r.chatID != "" {
-			if err := r.store.AppendMessages(r.chatID, result.res.Messages); err != nil {
-				fmt.Fprintf(r.stderr, "warning: could not save session: %v\n", err)
-			}
+		// res.Messages is the full run history: replace the in-memory copy
+		// (appending would duplicate prior turns) and persist the delta — or
+		// the whole compacted form, if the run compacted the history.
+		r.history = result.res.Messages
+		if err := r.store.SyncMessages(r.chatID, result.res.Messages); err != nil {
+			fmt.Fprintf(r.stderr, "warning: could not save session: %v\n", err)
+		}
+	}
+	for _, c := range deferred {
+		switch c.Cmd {
+		case "set_think":
+			r.setThink(c.Value)
+		case "set_tools":
+			r.setTools(c.Value)
 		}
 	}
 	if result.err != nil && runCtx.Err() == nil {
@@ -547,6 +563,11 @@ loop:
 
 	if result.err == nil && result.res.Compacted {
 		r.history = result.res.Messages
+		// Compaction rewrote the history; sync the stored messages so a later
+		// resume loads the compacted form instead of the full history.
+		if err := r.store.SyncMessages(r.chatID, result.res.Messages); err != nil {
+			fmt.Fprintf(r.stderr, "warning: could not save compacted session: %v\n", err)
+		}
 		_ = r.sink.Emit(coreagent.Event{
 			Type:              coreagent.EventCompacted,
 			CompactionTrigger: coreagent.CompactionTriggerForce,
