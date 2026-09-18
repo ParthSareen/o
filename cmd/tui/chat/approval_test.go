@@ -649,40 +649,82 @@ func TestChatPermissionToggleWithoutAutoSkipsAuto(t *testing.T) {
 }
 
 func TestChatAutoReviewSessionPrompterGrades(t *testing.T) {
-	for _, decision := range []struct {
-		outcome string
-		want    bool
-	}{
-		{"allow", true},
-		{"deny", false},
-	} {
-		client := &fakeReviewChatClient{responses: [][]api.ChatResponse{
-			reviewDecisionChunks(decision.outcome, "low", "grades fine"),
-		}}
-		events := make(chan tea.Msg, 1)
-		state := testApprovalState(false, nil)
-		state.SetMode(coreagent.ApprovalModeAuto)
-		m := chatModel{
-			opts:               Options{Client: client, Model: "test-model"},
-			approvalState:      state,
-			approvalController: newChatApprovalController(events, state),
-		}
+	// Allow: the reviewer grades directly and no human prompt appears.
+	client := &fakeReviewChatClient{responses: [][]api.ChatResponse{
+		reviewDecisionChunks("allow", "low", "grades fine"),
+	}}
+	events := make(chan tea.Msg, 1)
+	state := testApprovalState(false, nil)
+	state.SetMode(coreagent.ApprovalModeAuto)
+	m := chatModel{
+		opts:               Options{Client: client, Model: "test-model"},
+		approvalState:      state,
+		approvalController: newChatApprovalController(events, state),
+	}
 
+	result, err := m.autoReviewSessionPrompter().PromptApproval(context.Background(), testApprovalRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Allow {
+		t.Fatal("reviewer allow should allow")
+	}
+	select {
+	case msg := <-events:
+		t.Fatalf("grading should not surface a human prompt: %#v", msg)
+	default:
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected one grading call, got %d", len(client.requests))
+	}
+}
+
+func TestChatAutoReviewSessionPrompterEscalatesDeny(t *testing.T) {
+	// Deny: non-critical reviewer denies escalate to the human prompt, whose
+	// answer is final; the review verdict stays attached to the result.
+	client := &fakeReviewChatClient{responses: [][]api.ChatResponse{
+		reviewDecisionChunks("deny", "medium", "grades fine"),
+	}}
+	events := make(chan tea.Msg, 1)
+	state := testApprovalState(false, nil)
+	state.SetMode(coreagent.ApprovalModeAuto)
+	m := chatModel{
+		opts:               Options{Client: client, Model: "test-model"},
+		approvalState:      state,
+		approvalController: newChatApprovalController(events, state),
+	}
+
+	resultCh := make(chan coreagent.Approval, 1)
+	go func() {
 		result, err := m.autoReviewSessionPrompter().PromptApproval(context.Background(), testApprovalRequest())
 		if err != nil {
-			t.Fatal(err)
+			resultCh <- coreagent.Approval{Reason: err.Error()}
+			return
 		}
-		if result.Allow != decision.want {
-			t.Fatalf("outcome %q: allow = %v, want %v", decision.outcome, result.Allow, decision.want)
+		resultCh <- result
+	}()
+
+	select {
+	case msg := <-events:
+		prompt, ok := msg.(chatApprovalPromptMsg)
+		if !ok {
+			t.Fatalf("event = %#v, want approval prompt", msg)
 		}
-		select {
-		case msg := <-events:
-			t.Fatalf("grading should not surface a human prompt: %#v", msg)
-		default:
+		prompt.reply <- coreagent.Approval{Allow: false, Reason: "human agrees"}
+	case <-time.After(time.Second):
+		t.Fatal("reviewer deny should surface the human prompt")
+	}
+
+	select {
+	case result := <-resultCh:
+		if result.Allow {
+			t.Fatal("human deny should block")
 		}
-		if len(client.requests) != 1 {
-			t.Fatalf("expected one grading call, got %d", len(client.requests))
+		if result.Review == nil || result.Review.Outcome != "deny" {
+			t.Fatalf("result should carry the review verdict, got %+v", result.Review)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("escalated approval did not return")
 	}
 }
 
