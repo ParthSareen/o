@@ -203,9 +203,9 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
 		} else {
 			chatID = sess.ID
-		// Surface the saved session so a parent agent can follow up with
-		// o --resume-id; background logs rely on this line.
-		fmt.Fprintf(stderr, "session: %s\n", chatID)
+			// Surface the saved session so a parent agent can follow up with
+			// o --resume-id; background logs rely on this line.
+			fmt.Fprintf(stderr, "session: %s\n", chatID)
 			if err := store.AddPrompt(chatID, prompt); err != nil {
 				fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
 			}
@@ -229,9 +229,11 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 
 	fmt.Fprintln(stdout)
 
-	// Persist the conversation to the session store.
+	// Persist the conversation to the session store. The store row is empty
+	// for a fresh session, so this persists the full result; compaction, if
+	// any, already rewrote result.Messages.
 	if store != nil && chatID != "" && result != nil {
-		if err := store.AppendMessages(chatID, result.Messages); err != nil {
+		if err := store.SyncMessages(chatID, result.Messages); err != nil {
 			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
 		}
 	}
@@ -262,7 +264,6 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}
-
 	systemPrompt := agentSystemPromptWithWorkingDir(
 		opts.Model, opts.System,
 		agentSkillSystemContext(catalog, registry, opts.ToolsDisabled),
@@ -271,6 +272,12 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 
 	state, approvalPrompter := headlessApproval(client, opts)
 
+	return runHeadlessResumeSession(ctx, client, opts, store, catalog, registry, systemPrompt, sess, prompt, workingDir, stdout, stderr, state, approvalPrompter)
+}
+
+// runHeadlessResumeSession drives one resumed headless turn against any
+// ChatClient; split out so tests can run without a real server.
+func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt string, sess *sessionstore.Session, prompt, workingDir string, stdout, stderr io.Writer, state *coreagent.ApprovalState, approvalPrompter coreagent.ApprovalPrompter) int {
 	renderer := newHeadlessRenderer(stdout, stderr, true)
 	session := &coreagent.Session{
 		Client:           client,
@@ -314,7 +321,9 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 	fmt.Fprintln(stdout)
 
 	if store != nil && result != nil {
-		if err := store.AppendMessages(sess.ID, result.Messages[len(sess.Messages):]); err != nil {
+		// SyncMessages replaces the store when the run compacted the history,
+		// so a later resume loads the compacted form.
+		if err := store.SyncMessages(sess.ID, result.Messages); err != nil {
 			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
 		}
 	}
