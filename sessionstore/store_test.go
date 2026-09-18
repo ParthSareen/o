@@ -190,3 +190,180 @@ func TestTitleTruncation(t *testing.T) {
 		t.Errorf("title too long: %d runes: %q", len([]rune(loaded.Title)), loaded.Title)
 	}
 }
+
+// TestSyncMessagesAppendsDelta pins the ordinary-run path: when history
+// starts with the stored rows, only the new messages are appended.
+func TestSyncMessagesAppendsDelta(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("llama3", "/tmp/work", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	prior := []api.Message{
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+	}
+	if err := s.AppendMessages(sess.ID, prior); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+
+	full := append(append([]api.Message{}, prior...),
+		api.Message{Role: "user", Content: "u2"},
+		api.Message{Role: "assistant", Content: "a2"},
+	)
+	if err := s.SyncMessages(sess.ID, full); err != nil {
+		t.Fatalf("SyncMessages: %v", err)
+	}
+
+	loaded, err := s.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(loaded.Messages) != 4 || loaded.Messages[2].Content != "u2" || loaded.Messages[3].Content != "a2" {
+		t.Fatalf("stored = %+v", loaded.Messages)
+	}
+}
+
+// TestSyncMessagesReplacesRewrittenHistory pins the compaction path: a
+// history that does not start with the stored rows replaces the store. This
+// includes the equal-length case, where the compactor archives an old turn
+// and keeps recent ones.
+func TestSyncMessagesReplacesRewrittenHistory(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("llama3", "/tmp/work", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	prior := []api.Message{
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "u2"},
+		{Role: "assistant", Content: "a2"},
+	}
+	if err := s.AppendMessages(sess.ID, prior); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+
+	// summary pair + kept recent turns: same length, different content
+	compacted := []api.Message{
+		{Role: "assistant", Content: "", ToolName: "summary", ToolCallID: "ollama_compaction"},
+		{Role: "tool", Content: "Conversation summary:\nthe summary", ToolName: "summary", ToolCallID: "ollama_compaction"},
+		{Role: "user", Content: "u2"},
+		{Role: "assistant", Content: "a2"},
+	}
+	if err := s.SyncMessages(sess.ID, compacted); err != nil {
+		t.Fatalf("SyncMessages: %v", err)
+	}
+
+	loaded, err := s.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(loaded.Messages) != 4 {
+		t.Fatalf("stored = %d messages, want 4: %+v", len(loaded.Messages), loaded.Messages)
+	}
+	if loaded.Messages[1].ToolCallID != "ollama_compaction" {
+		t.Fatalf("stored lacks the summary pair: %+v", loaded.Messages)
+	}
+	if loaded.Messages[0].Content == "u1" {
+		t.Fatalf("archived turn survived replacement: %+v", loaded.Messages)
+	}
+}
+
+// TestSyncMessagesReplacesShrunkenHistory pins that a shrunken history
+// replaces the store (the panic-prone slice-by-prior-length approach).
+func TestSyncMessagesReplacesShrunkenHistory(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("llama3", "/tmp/work", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.AppendMessages(sess.ID, []api.Message{
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "u2"},
+	}); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+
+	if err := s.SyncMessages(sess.ID, []api.Message{
+		{Role: "assistant", Content: "", ToolName: "summary", ToolCallID: "ollama_compaction"},
+		{Role: "tool", Content: "summary", ToolName: "summary", ToolCallID: "ollama_compaction"},
+	}); err != nil {
+		t.Fatalf("SyncMessages: %v", err)
+	}
+
+	loaded, err := s.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(loaded.Messages) != 2 {
+		t.Fatalf("stored = %d messages, want 2: %+v", len(loaded.Messages), loaded.Messages)
+	}
+}
+
+// TestSyncMessagesNoopWhenIdentical pins that syncing an unchanged history
+// stores nothing new.
+func TestSyncMessagesNoopWhenIdentical(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("llama3", "/tmp/work", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	msgs := []api.Message{
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+	}
+	if err := s.AppendMessages(sess.ID, msgs); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+	if err := s.SyncMessages(sess.ID, msgs); err != nil {
+		t.Fatalf("SyncMessages: %v", err)
+	}
+	loaded, err := s.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(loaded.Messages) != 2 {
+		t.Fatalf("stored = %d messages, want 2", len(loaded.Messages))
+	}
+}
+
+// TestSyncMessagesSelfHealsDrift pins that a store holding duplicated rows
+// (left behind by an earlier bug) is rebuilt from history on the next sync.
+func TestSyncMessagesSelfHealsDrift(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("llama3", "/tmp/work", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// corrupted store: the full history was persisted twice
+	duplicated := []api.Message{
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+	}
+	if err := s.AppendMessages(sess.ID, duplicated); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+
+	history := append(append([]api.Message{}, duplicated[:2]...),
+		api.Message{Role: "user", Content: "u2"},
+		api.Message{Role: "assistant", Content: "a2"},
+	)
+	if err := s.SyncMessages(sess.ID, history); err != nil {
+		t.Fatalf("SyncMessages: %v", err)
+	}
+
+	loaded, err := s.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if len(loaded.Messages) != 4 {
+		t.Fatalf("stored = %d messages, want 4 (drift must be replaced): %+v", len(loaded.Messages), loaded.Messages)
+	}
+	if loaded.Messages[0].Content == "u1" && loaded.Messages[2].Content == "u1" {
+		t.Fatalf("duplicate rows survived: %+v", loaded.Messages)
+	}
+}

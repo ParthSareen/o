@@ -364,6 +364,105 @@ func (s *Store) AppendMessages(sessionID string, msgs []api.Message) error {
 	return tx.Commit()
 }
 
+// ReplaceMessages atomically replaces all stored messages for a session with
+// the given history. Used when compaction rewrites the in-memory history:
+// appending would leave the pre-compaction messages in place, so a resumed
+// session would load them back instead of the compacted form.
+func (s *Store) ReplaceMessages(sessionID string, msgs []api.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM messages WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("clear messages: %w", err)
+	}
+
+	now := time.Now().Unix()
+	for seq, msg := range msgs {
+		if err := insertMessage(tx, sessionID, seq, msg, now); err != nil {
+			return err
+		}
+	}
+
+	// The title survives: it was derived from the first user message, which
+	// compaction may no longer include, and renaming a session mid-run would
+	// be surprising.
+	if _, err := tx.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, now, sessionID); err != nil {
+		return fmt.Errorf("touch session: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// SyncMessages aligns the stored messages for a session with history.
+//
+// history is the caller's current in-memory history (the full list a run
+// returned, not a delta). When history starts with the stored rows, the
+// store already holds that prefix and only history[len(stored):] is
+// appended. When it does not — compaction rewrote the history, possibly
+// keeping recent turns so the length alone is misleading — the store is
+// replaced wholesale, so a later resume loads the compacted form. It also
+// self-heals stores left out of sync by an earlier bug: any drift makes the
+// prefix check fail and the store is rebuilt from history.
+func (s *Store) SyncMessages(sessionID string, history []api.Message) error {
+	if s == nil || sessionID == "" {
+		return nil
+	}
+	stored, err := s.loadMessages(sessionID)
+	if err != nil {
+		return fmt.Errorf("sync messages: %w", err)
+	}
+	if len(stored) <= len(history) && sameMessageIdentity(stored, history) {
+		return s.AppendMessages(sessionID, history[len(stored):])
+	}
+	return s.ReplaceMessages(sessionID, history)
+}
+
+// sameMessageIdentity reports whether history starts with stored. Identity
+// fields only (role, content, thinking, tool identity) are compared, not a
+// deep struct equality: stored rows round-trip through JSON, and those
+// fields are exactly what survives the trip.
+func sameMessageIdentity(stored, history []api.Message) bool {
+	for i := range stored {
+		sRow, h := stored[i], history[i]
+		if sRow.Role != h.Role || sRow.Content != h.Content || sRow.Thinking != h.Thinking ||
+			sRow.ToolCallID != h.ToolCallID || sRow.ToolName != h.ToolName {
+			return false
+		}
+	}
+	return true
+}
+
+// loadMessages returns a session's stored messages ordered by seq.
+func (s *Store) loadMessages(sessionID string) ([]api.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.Query(
+		`SELECT seq, role, content, thinking, tool_calls, tool_call_id, tool_name, images FROM messages WHERE session_id = ? ORDER BY seq`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load session messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []api.Message
+	for rows.Next() {
+		msg, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, rows.Err()
+}
+
 // AddPrompt records a user prompt in the prompt history table. A nil
 // sessionID stores it as global history.
 func (s *Store) AddPrompt(sessionID, prompt string) error {
