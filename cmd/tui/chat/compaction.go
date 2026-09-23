@@ -82,17 +82,17 @@ func (m chatModel) finishManualCompaction(msg chatCompactDoneMsg) (tea.Model, te
 	m.compactingTokens = 0
 	if wasCanceling || isChatContextCanceledError(msg.err) {
 		m.status = "compact canceled"
-		return m.withFlowTranscriptFlush(nil)
+		return m.flushAndArmBackground(nil)
 	}
 	if msg.err != nil {
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: coreagent.CompactionSkippedMessage(msg.err.Error())}))
 		m.status = "compact skipped"
-		return m.withFlowTranscriptFlush(nil)
+		return m.flushAndArmBackground(nil)
 	}
 	if !msg.result.Compacted {
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: coreagent.CompactionSkippedMessage(msg.result.Reason)}))
 		m.status = "compact skipped"
-		return m.withFlowTranscriptFlush(nil)
+		return m.flushAndArmBackground(nil)
 	}
 
 	m.messages = msg.result.Messages
@@ -106,5 +106,5 @@ func (m chatModel) finishManualCompaction(msg chatCompactDoneMsg) (tea.Model, te
 	m.scroll = 0
 	m.flowPrintedLines = 0
 	m.status = "compacted"
-	return m.withFlowTranscriptFlush(nil)
+	return m.flushAndArmBackground(nil)
 }

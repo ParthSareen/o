@@ -277,9 +277,11 @@ func agentToolsRegistry(ctx context.Context, client *api.Client, modelName strin
 			// One manager per session, carried on the registry so every
 			// Session built from it can drain completions. Teardown paths call
 			// Registry.Close so Unix tasks cannot outlive the session (Windows is
-			// covered by job objects).
+			// covered by job objects). The same manager backs the poll tool:
+			// recurring checks whose new output interrupts in-flight runs.
 			bash.Background = agenttools.NewBackgroundManager()
 			registry.Background = bash.Background
+			registry.Register(&agenttools.Poll{Background: bash.Background})
 		}
 		registry.Register(bash)
 	}

@@ -20,7 +20,8 @@ func shellToolName() string {
 
 func shellToolDescription() string {
 	return "Execute a PowerShell command on the system. Use this to inspect files, run tests, and perform development tasks. " +
-		"Supports background=true for long-running commands (dev servers, builds): they write a log file and report completion in a [background task update] notice."
+		"Supports background=true for long-running commands (dev servers, builds): they write a log file and report completion in a [background task update] notice. " +
+		"For recurring checks (poll a build, watch for a change), use the poll tool instead of a background sleep loop."
 }
 
 func shellCommandDescription() string {
@@ -156,6 +157,24 @@ func releaseBashJob(pid int) {
 // context — the process must outlive the call that launched it.
 func newBackgroundBashCommand(command string) *exec.Cmd {
 	return exec.Command(
+		"powershell.exe",
+		"-NoLogo",
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy",
+		"Bypass",
+		"-Command",
+		powerShellBackgroundCommandScript(command),
+	)
+}
+
+// newPollTickCommand builds a one-shot command for one poll tick. It IS
+// bound to the tick's context (poll ticks must die on timeout/stop); the
+// caller's Cancel override releases the job object and kills the process
+// tree via killBashCommand.
+func newPollTickCommand(ctx context.Context, command string) *exec.Cmd {
+	return exec.CommandContext(
+		ctx,
 		"powershell.exe",
 		"-NoLogo",
 		"-NoProfile",

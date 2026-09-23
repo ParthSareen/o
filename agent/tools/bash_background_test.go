@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,5 +225,95 @@ func TestBackgroundSessionIDFromLog(t *testing.T) {
 	}
 	if id := backgroundSessionID(logPath); id != "" {
 		t.Fatalf("plain log: id = %q, want empty", id)
+	}
+}
+
+func TestBackgroundManagerWatcherBroadcast(t *testing.T) {
+	manager := NewBackgroundManager()
+	if got := manager.BackgroundVersion(); got != 0 {
+		t.Fatalf("fresh manager version = %d, want 0", got)
+	}
+	if manager.PendingBackground() {
+		t.Fatal("fresh manager reports pending completions")
+	}
+
+	// Multiple waiters must all observe one completion: the watcher surface
+	// broadcasts and must never consume the run-loop's signal token.
+	ctx := context.Background()
+	const waiters = 3
+	results := make(chan uint64, waiters)
+	for range waiters {
+		go func() {
+			version, err := manager.WaitBackgroundChange(ctx, 0)
+			if err != nil {
+				t.Errorf("WaitBackgroundChange: %v", err)
+				return
+			}
+			results <- version
+		}()
+	}
+	time.Sleep(20 * time.Millisecond) // let all waiters block before the event
+	manager.ping()
+	for range waiters {
+		select {
+		case version := <-results:
+			if version != 1 {
+				t.Errorf("waiter woke at version %d, want 1", version)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("waiter did not wake after ping")
+		}
+	}
+	select {
+	case <-manager.BackgroundSignals():
+	default:
+		t.Fatal("waiters consumed the run-loop signal token")
+	}
+
+	// An already-advanced version resolves immediately.
+	version, err := manager.WaitBackgroundChange(ctx, 0)
+	if err != nil || version != 1 {
+		t.Fatalf("WaitBackgroundChange(since=0) = %d, %v; want 1, nil", version, err)
+	}
+
+	// Cancellation while blocked reports ctx's error.
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := manager.WaitBackgroundChange(canceled, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WaitBackgroundChange on canceled ctx: %v, want context.Canceled", err)
+	}
+}
+
+func TestBackgroundManagerPendingBackground(t *testing.T) {
+	manager := NewBackgroundManager()
+
+	// A finished, undrained task is pending until a drain reports it.
+	task := &BackgroundTask{ID: "bg-1", Command: "true", done: make(chan struct{})}
+	close(task.done)
+	manager.mu.Lock()
+	manager.tasks[task.ID] = task
+	manager.mu.Unlock()
+	if !manager.PendingBackground() {
+		t.Fatal("finished undrained task should be pending")
+	}
+	if drained := manager.DrainCompletions(); len(drained) != 1 {
+		t.Fatalf("DrainCompletions returned %d completions, want 1", len(drained))
+	}
+	if manager.PendingBackground() {
+		t.Fatal("drained task should no longer be pending")
+	}
+
+	// A buffered poll publication behaves the same.
+	manager.mu.Lock()
+	manager.pollPubs["poll-1"] = pollPublication{pollID: "poll-1"}
+	manager.mu.Unlock()
+	if !manager.PendingBackground() {
+		t.Fatal("buffered poll publication should be pending")
+	}
+	if drained := manager.DrainCompletions(); len(drained) != 1 || !drained[0].Poll {
+		t.Fatalf("DrainCompletions = %+v, want one poll completion", drained)
+	}
+	if manager.PendingBackground() {
+		t.Fatal("drained poll publication should no longer be pending")
 	}
 }

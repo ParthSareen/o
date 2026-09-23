@@ -97,6 +97,12 @@ type Result struct {
 	Messages []api.Message
 }
 
+// maxUnattendedBackgroundRuns caps how many runs in a row may be triggered
+// by background completions with no user message in between: a runaway poll
+// (one printing fresh output every tick, say) must not burn tokens forever.
+// Any user-submitted run resets the count.
+const maxUnattendedBackgroundRuns = 6
+
 //nolint:containedctx // chatModel is a Bubble Tea session model; the context is the run-scoped cancellation root.
 type chatModel struct {
 	ctx          context.Context
@@ -108,50 +114,54 @@ type chatModel struct {
 	entries      []chatEntry
 	workingDir   string
 
-	input                []rune
-	inputCursor          int
-	inputCursorSet       bool
-	inputAttachments     []chatInputAttachment
-	inputPastedTexts     []chatInputPastedText
-	nextImageID          int
-	nextAudioID          int
-	nextPastedTextID     int
-	promptHistory        []string
-	promptCursor         int
-	promptDraft          []rune
-	promptActive         bool
-	running              bool
-	awaitingModel        bool
-	compacting           bool
-	cancel               context.CancelFunc
-	events               <-chan tea.Msg
-	compactEvents        <-chan tea.Msg
-	detectedToolCalls    []chatEntry
-	scroll               int
-	toolOutputMode       bool
-	toolOutputOpen       bool
-	flowPrintedLines     int
-	thinking             bool
-	thinkingTokens       int
-	compactingTokens     int
-	contextTokens        int
-	contextEstimate      bool
-	modelPicker          *chatModelPicker
-	sessionPicker        *chatModelPicker
-	modelPickerModels    []ModelOption
-	sessionPickerEntries []sessionListEntry
-	thinkPicker          *chatThinkPicker
-	promptDebug          *chatPromptDebug
-	approvalPrompt       *chatApprovalPrompt
-	approvalController   *chatApprovalController
-	approvalState        *coreagent.ApprovalState
-	cloudAuthPrompt      *cloudAuthPrompt
-	pendingModel         string
-	defaultAllowAll      bool
-	defaultAutoReview    bool
-	autoReviewer         *coreagent.AutoReviewer
-	permissionNotice     string
-	selection            chatSelection
+	input            []rune
+	inputCursor      int
+	inputCursorSet   bool
+	inputAttachments []chatInputAttachment
+	inputPastedTexts []chatInputPastedText
+	nextImageID      int
+	nextAudioID      int
+	nextPastedTextID int
+	promptHistory    []string
+	promptCursor     int
+	promptDraft      []rune
+	promptActive     bool
+	running          bool
+	awaitingModel    bool
+	compacting       bool
+	// unattendedBackgroundRuns counts consecutive runs started by background
+	// completions (chatBackgroundWakeMsg) with no user message in between,
+	// capped by maxUnattendedBackgroundRuns.
+	unattendedBackgroundRuns int
+	cancel                   context.CancelFunc
+	events                   <-chan tea.Msg
+	compactEvents            <-chan tea.Msg
+	detectedToolCalls        []chatEntry
+	scroll                   int
+	toolOutputMode           bool
+	toolOutputOpen           bool
+	flowPrintedLines         int
+	thinking                 bool
+	thinkingTokens           int
+	compactingTokens         int
+	contextTokens            int
+	contextEstimate          bool
+	modelPicker              *chatModelPicker
+	sessionPicker            *chatModelPicker
+	modelPickerModels        []ModelOption
+	sessionPickerEntries     []sessionListEntry
+	thinkPicker              *chatThinkPicker
+	promptDebug              *chatPromptDebug
+	approvalPrompt           *chatApprovalPrompt
+	approvalController       *chatApprovalController
+	approvalState            *coreagent.ApprovalState
+	cloudAuthPrompt          *cloudAuthPrompt
+	pendingModel             string
+	defaultAllowAll          bool
+	defaultAutoReview        bool
+	autoReviewer             *coreagent.AutoReviewer
+	permissionNotice         string
+	selection                chatSelection
 
 	systemPromptDisabled bool
 
@@ -287,6 +297,9 @@ func (m chatModel) Init() tea.Cmd {
 	if cmd := cloudModelPreflightCmd(m.ctx, m.opts, m.opts.Model, ""); cmd != nil && !m.openModelOnInit {
 		cmds = append(cmds, cmd)
 	}
+	// Watch for background completions so a poll or task that finishes while
+	// the chat idles can wake the model on its own.
+	cmds = append(cmds, m.armBackgroundWatcher())
 	return tea.Batch(cmds...)
 }
 
@@ -440,17 +453,52 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if wasCanceling || isChatContextCanceledError(msg.err) {
 			m.status = "Tell the model what to do instead."
-			return m.withFlowTranscriptFlush(nil)
+			return m.flushAndArmBackground(nil)
 		}
 		if msg.err != nil {
 			if !m.eventErrorRendered {
 				m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: msg.err.Error(), err: msg.err.Error()}))
 			}
 			m.status = "error"
-			return m.withFlowTranscriptFlush(nil)
+			return m.flushAndArmBackground(nil)
 		}
 		m.status = "ready"
-		return m.withFlowTranscriptFlush(nil)
+		return m.flushAndArmBackground(nil)
+
+	case chatBackgroundWakeMsg:
+		// Background work produced new output while the chat was idle: start
+		// a run so the model reacts now. The run's start drain renders the
+		// notice (agent.Session.Run); the chat only decides whether to wake.
+		if m.running || m.compacting {
+			// The active run injects mid-run and re-arms the watcher when it
+			// finishes (chatRunDoneMsg/finishManualCompaction).
+			return m, nil
+		}
+		if m.modelPicker != nil || m.sessionPicker != nil || m.cloudAuthPrompt != nil || m.preloadingModel != "" || m.quitting {
+			// Modal UI owns the chat right now; wait for the next change rather
+			// than starting a run underneath it. Block on the *next* event
+			// instead of arming generally: pending work left buffered would
+			// re-fire immediately and busy-loop until the modal closes.
+			return m, m.waitNextBackgroundChange()
+		}
+		watcher := m.backgroundWatcher()
+		if watcher == nil {
+			return m, nil
+		}
+		if !watcher.PendingBackground() {
+			// Stale wake: a finishing run's end-of-run drain already reported
+			// the completion. Keep watching.
+			return m, m.armBackgroundWatcher()
+		}
+		if m.unattendedBackgroundRuns >= maxUnattendedBackgroundRuns {
+			// Same blocking wait as the modal case above: pending work stays
+			// buffered, and an immediate re-arm would busy-loop on it.
+			m.status = fmt.Sprintf("background auto-runs paused after %d — send a message to resume", maxUnattendedBackgroundRuns)
+			return m, m.waitNextBackgroundChange()
+		}
+		m.unattendedBackgroundRuns++
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: "Background task update — starting a run."}))
+		return m.startRunWithMessages("", "", nil, "", "")
 
 	case chatCompactDoneMsg:
 		return m.finishManualCompaction(msg)
@@ -931,6 +979,58 @@ func (m chatModel) withFlowTranscriptFlush(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	return next, tea.Batch(printCmd, cmd)
 }
 
+// flushAndArmBackground bundles the transcript flush with re-arming the idle
+// background watcher whenever the chat returns to idle (after a run or a
+// compaction): the next buffered completion then wakes the model on its own.
+func (m chatModel) flushAndArmBackground(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	next, flush := m.withFlowTranscriptFlush(cmd)
+	return next, tea.Batch(flush, m.armBackgroundWatcher())
+}
+
+// backgroundWatcher returns the tool registry's BackgroundSource when it
+// supports idle wake-ups (agent.BackgroundWatcher), else nil.
+func (m *chatModel) backgroundWatcher() coreagent.BackgroundWatcher {
+	watcher, ok := m.opts.Tools.BackgroundSource().(coreagent.BackgroundWatcher)
+	if !ok {
+		return nil
+	}
+	return watcher
+}
+
+// armBackgroundWatcher waits for the next buffered background completion.
+// Work buffered between the last drain and now already missed its signal, so
+// it resolves immediately instead.
+func (m *chatModel) armBackgroundWatcher() tea.Cmd {
+	watcher := m.backgroundWatcher()
+	if watcher == nil {
+		return nil
+	}
+	if watcher.PendingBackground() {
+		return func() tea.Msg { return chatBackgroundWakeMsg{} }
+	}
+	return m.waitNextBackgroundChange()
+}
+
+// waitNextBackgroundChange blocks until a background task or poll buffers a
+// completion after now. Unlike armBackgroundWatcher it never fires for work
+// already buffered — callers on the defer/pause paths use it to avoid a
+// busy-loop of immediate wake messages.
+func (m *chatModel) waitNextBackgroundChange() tea.Cmd {
+	watcher := m.backgroundWatcher()
+	if watcher == nil {
+		return nil
+	}
+	since := watcher.BackgroundVersion()
+	ctx := m.ctx
+	return func() tea.Msg {
+		if _, err := watcher.WaitBackgroundChange(ctx, since); err != nil {
+			// Chat is shutting down; no message to deliver.
+			return nil
+		}
+		return chatBackgroundWakeMsg{}
+	}
+}
+
 func (m chatModel) withFlowTranscriptRepaint(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 	if m.scroll > 0 {
 		// the app-level scrollback viewport owns the screen; leave the printed
@@ -1113,6 +1213,8 @@ func (m *chatModel) resetWorkingDir() {
 }
 
 func (m *chatModel) startRun(input string) (tea.Model, tea.Cmd) {
+	// A user message resets the unattended background auto-run budget.
+	m.unattendedBackgroundRuns = 0
 	displayInput, message, err := m.userMessageFromInput(input, input)
 	if err != nil {
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: err.Error(), err: err.Error()}))
@@ -1179,6 +1281,7 @@ func pluralSuffix(count int) string {
 }
 
 func (m *chatModel) startSkillRun(name, prompt string) (tea.Model, tea.Cmd) {
+	m.unattendedBackgroundRuns = 0
 	name = strings.TrimSpace(name)
 	prompt = strings.TrimSpace(prompt)
 	// The skill instructions are delivered via the synthetic tool result that
@@ -1197,9 +1300,13 @@ func (m *chatModel) startSkillRun(name, prompt string) (tea.Model, tea.Cmd) {
 }
 
 func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newMessages []api.Message, extraSystemPrompt, skillName string) (tea.Model, tea.Cmd) {
-	m.addPromptHistory(historyInput)
-	m.persistPrompt(historyInput)
-	m.entries = append(m.entries, newChatEntry(chatEntry{role: "user", content: displayInput}))
+	if historyInput != "" {
+		m.addPromptHistory(historyInput)
+		m.persistPrompt(historyInput)
+	}
+	if displayInput != "" {
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "user", content: displayInput}))
+	}
 	if len(newMessages) > 1 {
 		m.entries = append(m.entries, entriesFromMessages(newMessages[1:])...)
 	}

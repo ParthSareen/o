@@ -15,7 +15,8 @@ func shellToolName() string {
 
 func shellToolDescription() string {
 	return "Execute a bash command on the system. Use this to inspect files, run tests, and perform development tasks. " +
-		"Supports background=true for long-running commands (dev servers, builds): they write a log file and report completion in a [background task update] notice."
+		"Supports background=true for long-running commands (dev servers, builds): they write a log file and report completion in a [background task update] notice. " +
+		"For recurring checks (poll a build, watch for a change), use the poll tool instead of a background sleep loop."
 }
 
 func shellCommandDescription() string {
@@ -56,6 +57,16 @@ func killBashCommand(cmd *exec.Cmd) error {
 // the session working directory.
 func newBackgroundBashCommand(command string) *exec.Cmd {
 	cmd := exec.Command("bash", "-c", command)
+	configureBashCommand(cmd)
+	return cmd
+}
+
+// newPollTickCommand builds a one-shot command for one poll tick. It IS
+// bound to the tick's context (poll ticks must die on timeout/stop) and
+// skips the working-directory wrapper for the same reason as background
+// commands. Setpgid lets the caller's Cancel override group-kill the tick.
+func newPollTickCommand(ctx context.Context, command string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	configureBashCommand(cmd)
 	return cmd
 }

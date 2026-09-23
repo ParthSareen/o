@@ -94,6 +94,10 @@ Both keys suspend the TUI and come back when you exit nvim. They need nvim in
 
 Background shell tasks (`background=true`) are killed when the session exits,
 so they cannot outlive o; use watchy for processes that should persist.
+Recurring checks should use the `poll` tool instead of background sleep loops:
+each tick re-runs the command once, and output that differs from the previous
+tick interrupts an in-flight run as a background-task notice (unchanged output
+is suppressed). Polls stop when the session exits.
 
 The chat renders markdown: headings, code fences, tables, emphasis, links,
 images (alt text only), lists, blockquotes, and horizontal rules.

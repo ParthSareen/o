@@ -66,6 +66,11 @@ type chatModelPreloadDoneMsg struct {
 
 type chatEventsClosedMsg struct{}
 
+// chatBackgroundWakeMsg fires when a background task finished or a poll
+// published while the chat was idle: the chat starts a run so the model
+// reacts now instead of at the user's next message.
+type chatBackgroundWakeMsg struct{}
+
 type chatTickMsg struct{}
 
 func (m *chatModel) applyAgentEvent(event coreagent.Event) {

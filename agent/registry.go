@@ -50,13 +50,19 @@ type Registry struct {
 	Background BackgroundSource
 }
 
-// BackgroundCompletion is one finished background task, reported to runs
-// via BackgroundSource.
+// BackgroundCompletion is one finished background task (or one poll tick
+// publication, when Poll is set), reported to runs via BackgroundSource.
 type BackgroundCompletion struct {
 	ID      string
 	Command string
+	// Poll marks this entry as a poll tick publication (a recurring check
+	// emitted new or changed output) rather than a finished process; Tick is
+	// the tick number and Tail carries the published output. ExitCode is the
+	// tick process's exit status.
+	Poll     bool
+	Tick     int
 	ExitCode int
-	Killed  bool
+	Killed   bool
 	// Failure is the process start/wait error, if any; ExitCode is not
 	// meaningful when Failure is set.
 	Failure  string
@@ -77,6 +83,37 @@ type BackgroundCompletion struct {
 // each completion exactly once across all drains.
 type BackgroundSource interface {
 	DrainCompletions() []BackgroundCompletion
+}
+
+// BackgroundSignaler is an optional BackgroundSource extension for sources
+// that can push: the channel receives a token whenever a new completion is
+// buffered, letting an in-flight run drain and inject it at the next model
+// step instead of waiting for run boundaries. Tokens coalesce (channel
+// capacity 1), so receivers must always call DrainCompletions after
+// observing one; a token may lead to an empty drain when another drain
+// already consumed the completions.
+type BackgroundSignaler interface {
+	BackgroundSignals() <-chan struct{}
+}
+
+// BackgroundWatcher is an optional BackgroundSource extension for frontends
+// that want to start a run when work completes while the agent is idle (a
+// poll publishing new output between turns, say). Unlike BackgroundSignaler's
+// single-consumer token channel, this surface is broadcast and
+// non-consuming: any number of waiters observe the same change, and using it
+// never steals a token an in-flight run is waiting on.
+type BackgroundWatcher interface {
+	// PendingBackground reports whether completions are buffered and
+	// undrained right now.
+	PendingBackground() bool
+	// BackgroundVersion is the monotonic count of buffered-completion events
+	// (coalescing applies only until it is read). Use it with
+	// WaitBackgroundChange to sleep until the next event.
+	BackgroundVersion() uint64
+	// WaitBackgroundChange blocks until BackgroundVersion advances past
+	// since (returning immediately if it already has) or ctx is done, and
+	// returns the version observed.
+	WaitBackgroundChange(ctx context.Context, since uint64) (uint64, error)
 }
 
 // BackgroundSource returns the registry's background completion source, or
