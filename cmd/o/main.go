@@ -38,13 +38,13 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs := flag.NewFlagSet("o", flag.ExitOnError)
 	fs.StringVar(&opts.system, "system", "", "override the model system prompt")
 	fs.BoolVar(&opts.allowAllTools, "allow-all-tools", false, "run tools without approval prompts")
-	fs.BoolVar(&opts.autoReview, "auto", false, "auto mode: a review model grades tool calls that would prompt for approval")
+	fs.BoolVar(&opts.autoReview, "auto", true, "auto mode (default): a review model grades tool calls that would prompt for approval; pass --auto=false to fall back to approval prompts")
 	fs.StringVar(&opts.reviewModel, "review-model", os.Getenv("O_REVIEW_MODEL"), "model that grades tool calls in --auto mode; \"selected\" (default) uses the session model")
 	fs.BoolVar(&opts.toolsDisabled, "no-tools", false, "disable tool use entirely")
 	fs.BoolVar(&opts.multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&opts.contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
 	fs.BoolVar(&opts.headless, "headless", false, "print the response and exit (prompt from args or stdin)")
-	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools unless --auto or it is set explicitly")
+	fs.BoolVar(&opts.pipe, "pipe", false, "machine-readable NDJSON session over stdio (for UI frontends); implies --allow-all-tools unless the flag is set explicitly; pass --auto for review-model grading")
 	fs.BoolVar(&opts.resume, "resume", false, "resume the most recent session")
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
@@ -186,12 +186,11 @@ HEADLESS OUTPUT CONTRACT
   exit 1   error, or a tool was denied (reason on stderr)
 
 AGENTS
-  ALWAYS pass --allow-all-tools or --auto when driving o headlessly. Most
-  tools (bash, edit, web_fetch, ...) require approval; there is no human at
-  the approval prompt headlessly, so without one of the flags the tool is
-  denied, the run stops, and o exits 1. --allow-all-tools runs everything;
-  --auto runs a review model over each call that would prompt, which keeps
-  dangerous commands blocked at the cost of a small grading delay.
+  Headless runs grade every tool call that would prompt with a review model
+  (--auto, which is on by default); reads and read-only commands skip
+  grading entirely. --allow-all-tools runs everything without grading;
+  --auto=false skips grading and denies any call that requires approval
+  headlessly — the run stops and o exits 1 with the reason on stderr.
 
   o --allow-all-tools glm-5.2:cloud "list the files in src/ and summarize them"
 

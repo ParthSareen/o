@@ -28,8 +28,9 @@ func (p headlessPrompter) PromptApproval(context.Context, coreagent.ApprovalRequ
 }
 
 // headlessApproval builds the approval state and prompter for headless
-// runs. Auto mode grades calls with the review model and denies when grading
-// fails; there is no human to fall back on.
+// runs. With auto on (the CLI default), auto mode grades calls with the
+// review model and denies when grading fails; there is no human to fall
+// back on.
 func headlessApproval(client coreagent.ChatClient, opts *agentTUIOptions) (*coreagent.ApprovalState, coreagent.ApprovalPrompter) {
 	state := &coreagent.ApprovalState{}
 	if opts.AllowAllTools {

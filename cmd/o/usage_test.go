@@ -47,3 +47,40 @@ func TestSystemPromptTeachesHeadlessDelegation(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoIsDefault(t *testing.T) {
+	_, opts := buildFlagSet()
+	if !opts.autoReview {
+		t.Fatal("auto review should default to on")
+	}
+	if opts.allowAllTools {
+		t.Fatal("--allow-all-tools must stay opt-in")
+	}
+}
+
+func TestApplyPipeDefaultsKeepAutoExplicit(t *testing.T) {
+	t.Run("no flags grants full access and no grading", func(t *testing.T) {
+		fs, opts := buildFlagSet()
+		_ = fs.Parse([]string{"--pipe", "m"})
+		applyPipeDefaults(fs, opts)
+		if !opts.allowAllTools || opts.autoReview {
+			t.Fatalf("pipe defaults: allow-all %v, auto %v", opts.allowAllTools, opts.autoReview)
+		}
+	})
+	t.Run("explicit --auto survives", func(t *testing.T) {
+		fs, opts := buildFlagSet()
+		_ = fs.Parse([]string{"--pipe", "--auto", "m"})
+		applyPipeDefaults(fs, opts)
+		if !opts.allowAllTools || !opts.autoReview {
+			t.Fatalf("explicit --auto lost: allow-all %v, auto %v", opts.allowAllTools, opts.autoReview)
+		}
+	})
+	t.Run("explicit --allow-all-tools=false without --auto denies", func(t *testing.T) {
+		fs, opts := buildFlagSet()
+		_ = fs.Parse([]string{"--pipe", "--allow-all-tools=false", "m"})
+		applyPipeDefaults(fs, opts)
+		if opts.allowAllTools || opts.autoReview {
+			t.Fatalf("denial-free launch became auto-graded: allow-all %v, auto %v", opts.allowAllTools, opts.autoReview)
+		}
+	})
+}

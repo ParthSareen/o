@@ -47,19 +47,22 @@ o --name <text> [model]  # start a new session with a name
 ```
 
 Flags: `--system`, `--allow-all-tools` (no approval prompts), `--auto`
-(review model grades tool calls), `--review-model` (grading model for auto
-mode), `--no-tools`, `--multimodal`, `--context-window`, `--headless`,
-`--pipe`, `--resume`, `--resume-id`, `--list`, `--name`. Run `o --help` for
-the full usage text, which includes rules for headless use by agents.
+(on by default: a review model grades tool calls; `--auto=false` falls back
+to approval prompts), `--review-model` (grading model for auto mode),
+`--no-tools`, `--multimodal`, `--context-window`, `--headless`, `--pipe`,
+`--resume`, `--resume-id`, `--list`, `--name`. Run `o --help` for the full
+usage text, which includes rules for headless use by agents.
 
 `--pipe` speaks a machine-readable NDJSON protocol over stdio (prompt/cancel
 commands in, the full agent event stream out) for UI frontends like `app/`.
-It implies `--allow-all-tools` unless you set it or `--auto` explicitly.
+It implies `--allow-all-tools` unless you set the flag explicitly; pass
+`--auto` there for review-model grading.
 
 ## Auto mode
 
-`--auto` sits between review mode (prompt for every tool call) and
-`--allow-all-tools` (run everything). Tool calls that would prompt go to a
+Auto mode is the default starting mode. It sits between review mode (prompt
+for every tool call via `--auto=false`) and `--allow-all-tools` (run
+everything). Tool calls that would prompt go to a
 review model instead of the terminal: reads and known read-only shell
 commands skip the model entirely, and everything else is graded with the
 same decision contract as the Codex Guardian setup in ollama's compat proxy
@@ -70,7 +73,7 @@ failed review falls back to the human prompt, headless runs deny.
 
 `--review-model` (or `O_REVIEW_MODEL`) picks the grading model; the default
 `selected` uses the session model. In the TUI, `shift+tab` cycles
-review → auto → full access. Every model-graded call leaves a `⟳ auto
+auto → full access → review. Every model-graded call leaves a `⟳ auto
 review` line in the transcript (outcome, risk, duration; `ctrl+o` expands
 the rationale), and headless runs log the same line to stderr.
 

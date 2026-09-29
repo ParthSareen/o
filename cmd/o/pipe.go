@@ -469,12 +469,18 @@ func (r *pipeRunner) emitInspect() {
 }
 
 // applyPipeDefaults applies pipe-mode defaults: full tool access is on unless
-// the user passed the flag explicitly.
+// the user passed the flag explicitly, and auto review stays off unless the
+// user passed --auto — unlike the interactive and headless entry points, a
+// pipe frontend owns the approval story (see OProcess), so the new CLI-level
+// default must not silently grade its tool calls.
 func applyPipeDefaults(fs *flag.FlagSet, opts *cliOptions) {
 	seen := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
 	if !seen["allow-all-tools"] {
 		opts.allowAllTools = true
+	}
+	if !seen["auto"] {
+		opts.autoReview = false
 	}
 }
 
