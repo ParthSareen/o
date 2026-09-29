@@ -38,65 +38,37 @@ usage text.
 
 `--pipe` speaks a machine-readable NDJSON protocol over stdio (prompt/cancel/
 compact/set_think/set_tools/inspect in, full agent event stream out) for UI
-frontends like `app/`. It implies `--allow-all-tools` unless set explicitly.
+frontends. It implies `--allow-all-tools` unless set explicitly.
 
 ## Test
 
 ```sh
 go test ./...
-cd app && swift test && cd ..    # macOS app (SwiftUI)
 ```
 
-CGO must stay enabled for the Go core — `sessionstore/` uses go-sqlite3.
-The app build script handles this; never set `CGO_ENABLED=0`.
-
-## macOS app
-
-Native SwiftUI shell over the agent core. Spawns bundled `o --pipe` and
-drives the session over NDJSON. See `app/README.md`.
-
-```sh
-sh app/scripts/build-app.sh             # bundle at app/build/O.app
-sh app/scripts/build-app.sh --install   # also copy to /Applications/O.app
-sh app/scripts/build-app.sh --dmg       # also produce app/build/O-<version>.dmg
-```
-
-Dev loop without bundling:
-
-```sh
-cd app && O_BINARY=/path/to/o swift run OApp
-```
+CGO must stay enabled for the Go core — `sessionstore/` uses go-sqlite3;
+never set `CGO_ENABLED=0`.
 
 Slash commands in the TUI: `/sessions` selects a session to resume,
 `/resume [<id|name>]` resumes the most recent or a matching session,
 `/name [set <text>]` shows or sets the session name, `/think` sets thinking
 mode, `/tools` toggles tools, `/compact` summarizes older context, `/copy`
-copies the last reply, `/help` lists all commands. The app composer supports
-`/copy`, `/compact`, `/think`, `/tools`, mid-line `/<skill>` tokens, and ↑/↓
-prompt-history recall; Esc or ⌘. cancels a run.
+copies the last reply, `/help` lists all commands; Esc cancels a run.
 
-The `update-o` skill (`.agents/skills/update-o/`) runs the full
-build/test/package/install/ship loop end to end.
+The `update-o` skill (`.agents/skills/update-o/`) runs the
+build/test/install/ship loop end to end.
 
 ## Worktrees
 
 Branch worktrees live under `~/.herdr/worktrees/o/<branch>/` — the `herdr`
-convention. The macOS app's binary lookup checks `~/.herdr/worktrees/o/ui/o`
-first, so keep a built `o` there for dev runs:
+convention:
 
 ```sh
 git worktree add ~/.herdr/worktrees/o/ui ui      # one-time
 cd ~/.herdr/worktrees/o/ui && go build -o o ./cmd/o
 ```
 
-`ui` is the primary dev branch — it and `main` move together. Per `update-o`,
-work in the `ui` worktree, then land on both:
-
-```sh
-git fetch origin main
-git merge origin/main -m "Merge branch 'main' into ui"   # if ui isn't current
-git push origin ui ui:main
-```
+`main` lands directly: commit, test, `git push origin main`.
 
 List current worktrees: `git worktree list`.
 
@@ -111,7 +83,6 @@ List current worktrees: `git worktree list`.
 | `cmd/launch/` | Trimmed shim: spinner + types the TUI uses. Integration runners are not included. |
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
-| `app/` | Native macOS app (SwiftUI). Bundles the agent core, talks over `o --pipe`. See `app/README.md`. |
 | `.agents/skills/` | Project skills (`update-o`). |
 | `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
@@ -125,7 +96,7 @@ launch or `/name set <text>` in the TUI). o upgrades an old database on open.
 
 ## TUI
 
-Slash commands and app-composer parity are listed under [Build & run].
+Slash commands are listed under [Build & run].
 
 Keys: `ctrl+t` opens nvim in the working directory (`O_NVIM` overrides);
 `ctrl+g` opens the nvim diff viewer (`nvim -c DiffviewOpen`, `O_NVIM_DIFF`

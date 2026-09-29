@@ -18,8 +18,7 @@ Most of the code is adapted from the ollama repo, with imports rewritten to
 | `cmd/launch/` | A trimmed shim: the spinner and the types that the TUI uses. The integration runners (claude, codex, …) are not included. |
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
-| `app/` | Native macOS app (SwiftUI). Bundles the agent core and talks to it over `o --pipe`. See `app/README.md`. |
-| `.agents/skills/` | Project skills. `update-o` runs the full build/test/package/install/ship loop for the app + CLI. |
+| `.agents/skills/` | Project skills. `update-o` runs the build/test/install/ship loop for the CLI. |
 | `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
 | `types/model/` | Model capabilities and names |
@@ -54,7 +53,7 @@ to approval prompts), `--review-model` (grading model for auto mode),
 usage text, which includes rules for headless use by agents.
 
 `--pipe` speaks a machine-readable NDJSON protocol over stdio (prompt/cancel
-commands in, the full agent event stream out) for UI frontends like `app/`.
+commands in, the full agent event stream out) for UI frontends.
 It implies `--allow-all-tools` unless you set the flag explicitly; pass
 `--auto` there for review-model grading.
 

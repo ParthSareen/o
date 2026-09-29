@@ -1,8 +1,8 @@
 package main
 
 // Pipe mode (`o --pipe`): a machine-readable NDJSON protocol over stdio for
-// UI frontends (the macOS app, scripts, other agents). One process hosts one
-// session; the frontend owns one process per window.
+// UI frontends (scripts, other agents, custom shells). One process hosts one
+// session; the frontend owns one process per session.
 //
 // Wire format — one JSON object per line.
 //
