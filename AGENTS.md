@@ -1,9 +1,7 @@
 # o
 
-**o** is a standalone workspace for Ollama's agent harness: the agent core,
-the tools, and the agent TUI, in one place you can change and test without
-touching the [ollama](https://github.com/ollama/ollama) repo. Most code is
-adapted from ollama with imports rewritten to `github.com/ParthSareen/o`.
+**o** is a minimal coding agent for Ollama: the agent core, the tools, and
+the agent TUI.
 
 This is NOT the ollama repo. Do not reach for ollama build/test commands here.
 
@@ -127,15 +125,15 @@ watchy logs o-ollama-11433
 watchy stop o-ollama-11433
 ```
 
-## Differences from upstream
+## Compared to ollama
 
 o adds on top of the ollama code: `sessionstore/`, `cmd/o/main.go` (new
 runner), `cmd/o/headless.go`, `cmd/o/model_helpers.go` (simplified copies),
 `cmd/launch/agent_shim.go` (hand-maintained types), `cmd/tui/chat/` (session
 names, nvim keys, extended markdown renderer), and
-`patches/17295-syntax-highlighting.diff` (ollama/ollama#17295 applied in-tree;
-delete the patch when the PR merges upstream).
+`patches/17295-syntax-highlighting.diff` (ollama/ollama#17295 syntax
+highlighting, applied in-tree).
 
-License: MIT (same as ollama).
+License: MIT.
 
 [watchy]: https://github.com/ParthSareen/watchy

@@ -1,13 +1,35 @@
 # o
 
-**o** is a workspace for Ollama's agent harness: the agent core, the tools,
-and the agent TUI, in one place you can change and test without touching the
-[ollama](https://github.com/ollama/ollama) repo.
+**o** is a minimal coding agent for [ollama](https://github.com/ollama/ollama):
+an agent core, tools, and a TUI.
+
+## Install
+
+Both binaries land in `~/go/bin` — keep it on `PATH`.
+
+**o**, the agent CLI:
+
+```sh
+go install github.com/ParthSareen/o/cmd/o@latest
+# or from a clone of this repo:
+git clone https://github.com/ParthSareen/o && cd o && go install ./cmd/o
+```
+
+**watchy**, optional but recommended: o uses it to run its dedicated ollama
+server on port 11433 (see [Dedicated server](#dedicated-server)). Without it,
+o falls back to a shared server on 11434.
+
+```sh
+git clone https://github.com/ParthSareen/watchy && cd watchy && go install ./cmd/watchy
+```
+
+Note: `go install github.com/ParthSareen/watchy/cmd/watchy@latest` does not
+work — watchy's `go.mod` declares the module as `github.com/parth/watchy`, so
+no published version resolves. Install from the clone instead.
 
 ## What is here
 
-Most of the code is adapted from the ollama repo, with imports rewritten to
-`github.com/ParthSareen/o`.
+One module: `github.com/ParthSareen/o`.
 
 | Path | Contains |
 | --- | --- |
@@ -25,13 +47,9 @@ Most of the code is adapted from the ollama repo, with imports rewritten to
 
 ## Run
 
-You need a local Ollama server. Start it with `ollama serve`.
-
-Install:
-
-```sh
-go install ./cmd/o
-```
+No manual setup: o starts its own dedicated ollama server on port 11433 via
+[watchy] and falls back to a shared server on 11434 only when it must — see
+[Dedicated server](#dedicated-server).
 
 Use:
 
@@ -78,9 +96,25 @@ the rationale), and headless runs log the same line to stderr.
 
 ## The TUI
 
-Slash commands: `/sessions` selects a session to resume, `/resume
-[<id|name>]` resumes the most recent or a matching session, `/name [set
-<text>]` shows or sets the session name, `/help` lists all commands.
+Slash commands (`/help` shows them in the TUI):
+
+| Command | Action |
+| --- | --- |
+| `/model` | Switch models |
+| `/new` | Start a new chat |
+| `/think` | Set thinking mode |
+| `/tools` | Toggle tools on or off |
+| `/system [on\|off]` | Show or set the built-in system prompt |
+| `/skills [import codex\|claude\|pi]` | List or import skills |
+| `/compact` | Summarize older context |
+| `/copy` | Copy last response to the clipboard |
+| `/prompt` | Show full prompt, tools, and messages |
+| `/save <filename>` | Save request JSON; saved as `<filename>.json` |
+| `/sessions` | List and resume past sessions |
+| `/resume [<id\|name>]` | Resume the most recent or a matching session |
+| `/name [set <text>]` | Show or set the session name |
+| `/help` | Show commands (`/?` is an alias) |
+| `/bye` | Exit (`/exit` is an alias) |
 
 Keys:
 
@@ -139,7 +173,7 @@ watchy logs o-ollama-11433
 watchy stop o-ollama-11433
 ```
 
-## Differences from upstream
+## Compared to ollama
 
 o adds these on top of the ollama code:
 
@@ -156,8 +190,8 @@ o adds these on top of the ollama code:
   (`ctrl+t`, `ctrl+g`), and the extended markdown renderer.
 - `patches/17295-syntax-highlighting.diff` — the changes from
   ollama/ollama#17295 (syntax highlighting in fenced code blocks), applied
-  in-tree. When the PR merges upstream, delete the patch.
+  in-tree.
 
-License: MIT (same as ollama).
+License: MIT.
 
 [watchy]: https://github.com/ParthSareen/watchy
