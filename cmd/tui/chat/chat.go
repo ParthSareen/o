@@ -436,7 +436,11 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result != nil {
 			m.messages = msg.result.Messages
 			m.liveMessages = nil
-			m.persistRunResult(msg.result.Messages)
+			// A journaled run committed its projection already; a replayed
+			// request changed nothing.
+			if !msg.result.Committed && !msg.result.Replayed {
+				m.persistRunResult(msg.result.Messages)
+			}
 			if msg.result.WorkingDir != "" {
 				m.workingDir = msg.result.WorkingDir
 			}
@@ -1334,6 +1338,10 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 	eventSinks := []coreagent.EventSink{chatEventSink{ctx: runCtx, ch: events, newMessagesPersisted: &newMessagesPersisted}}
 	eventSinks = append(eventSinks, m.opts.EventSinks...)
 
+	var journal coreagent.RunJournal
+	if m.store != nil && m.chatID != "" {
+		journal = m.store
+	}
 	session := &coreagent.Session{
 		Client:           m.opts.Client,
 		EventSinks:       eventSinks,
@@ -1344,6 +1352,7 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 		ApprovalState:    m.ensureApprovalState(),
 		WorkingDir:       m.currentWorkingDir(),
 		SupportsImages:   m.opts.MultiModal,
+		Journal:          journal,
 		Compactor:        m.opts.Compactor,
 		Background:       m.opts.Tools.BackgroundSource(),
 	}

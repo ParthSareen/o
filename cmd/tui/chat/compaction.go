@@ -99,6 +99,11 @@ func (m chatModel) finishManualCompaction(msg chatCompactDoneMsg) (tea.Model, te
 	m.liveMessages = nil
 	// Compaction rewrote the history in memory; persist the replacement so
 	// a later resume loads the compacted form instead of the full history.
+	// The compaction fact lands in the append-only record first, so the raw
+	// record keeps its watermark boundary; raw rows are never rewritten.
+	if m.store != nil && m.chatID != "" {
+		_ = m.store.RecordCompaction(coreagent.CompactionRecord{SessionID: m.chatID, Trigger: string(coreagent.CompactionTriggerForce), Summary: msg.result.Summary})
+	}
 	m.persistRunResult(m.messages)
 	m.entries = entriesFromMessages(m.messages)
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
