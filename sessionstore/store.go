@@ -68,10 +68,16 @@ func Open() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_journal_mode=WAL")
+	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sessions db: %w", err)
 	}
+	// Durability model: WAL + synchronous=NORMAL. Committed transactions
+	// survive process crashes, but they are not fsynced per commit, so a
+	// power loss can lose recent commits. Process-crash recovery is what the
+	// run journal relies on; a power-loss guarantee would require
+	// synchronous=FULL (at a significant per-commit cost).
+	//
 	// SQLite supports concurrent reads but only one writer. A single
 	// connection from the pool is sufficient for this CLI's usage pattern.
 	db.SetMaxOpenConns(1)
@@ -93,7 +99,12 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return err
 	}
-	return s.addColumnIfMissing("sessions", "name", "TEXT NOT NULL DEFAULT ''")
+	if err := s.addColumnIfMissing("sessions", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// Additive journal tables (runs, tool_calls, session_events, raw history,
+	// compactions, approvals, run locks) — older binaries ignore them.
+	return s.migrateJournal()
 }
 
 // addColumnIfMissing adds a column to a table if it is not already present.
