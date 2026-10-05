@@ -31,6 +31,8 @@ type cliOptions struct {
 	resumeID            string
 	listSessions        bool
 	name                string
+	requestID           string
+	pipeApprovals       bool
 }
 
 func buildFlagSet() (*flag.FlagSet, *cliOptions) {
@@ -49,6 +51,8 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.StringVar(&opts.resumeID, "resume-id", "", "resume a specific session by ID")
 	fs.BoolVar(&opts.listSessions, "list", false, "list saved sessions and exit")
 	fs.StringVar(&opts.name, "name", "", "set a human-readable name for a new session")
+	fs.StringVar(&opts.requestID, "request-id", "", "identify this prompt for retry deduplication (headless or the first pipe turn)")
+	fs.BoolVar(&opts.pipeApprovals, "pipe-approvals", false, "ask the pipe frontend for tool approvals (approval_requested/decided events); approval replies are persisted and never implied by disconnect or timeout")
 	return fs, opts
 }
 
@@ -266,6 +270,8 @@ func run(model, prompt string, opts *cliOptions) error {
 			MultiModal:          opts.multiModal,
 			ContextWindowTokens: opts.contextWindowTokens,
 			Options:             map[string]any{},
+			RequestID:           opts.requestID,
+			PipeApprovals:       opts.pipeApprovals,
 		}
 
 		info, err := prepareAgentModel(cmd, client, &agentOpts, false)
@@ -354,6 +360,8 @@ func run(model, prompt string, opts *cliOptions) error {
 		MultiModal:          opts.multiModal,
 		ContextWindowTokens: opts.contextWindowTokens,
 		Options:             map[string]any{},
+		RequestID:           opts.requestID,
+		PipeApprovals:       opts.pipeApprovals,
 	}
 
 	info, err := prepareAgentModel(cmd, client, &agentOpts, false)

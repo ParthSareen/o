@@ -45,6 +45,15 @@ type pipeCommand struct {
 	Text  string `json:"text,omitempty"`
 	Skill string `json:"skill,omitempty"` // activate a catalog skill for this turn ("/name" in the TUI)
 	Value string `json:"value,omitempty"` // argument for set_think / set_tools
+	// RequestID deduplicates retried prompts (optional). The same ID with
+	// the same input replays the committed run; the same ID with changed
+	// input is rejected as a conflict.
+	RequestID string `json:"requestId,omitempty"`
+	// ApprovalID / Allow / Reason carry a reply to an approval_requested
+	// event; only accepted with --pipe-approvals.
+	ApprovalID string `json:"approvalId,omitempty"`
+	Allow      bool   `json:"allow,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // cmdMsg is a parsed command line or a read error.
@@ -131,6 +140,8 @@ type pipeRunner struct {
 	chatID       string
 	systemPrompt string
 	history      []api.Message
+	// approver, when set, answers approval prompts from the frontend.
+	approver *pipeApprovalPrompter
 }
 
 // runPipe is the entry for a fresh session (`o --pipe <model> [prompt]`).
@@ -185,7 +196,32 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 	// Pipe mode grants full tool access by default; approval prompts have no
 	// channel back to the frontend, so a required approval would stall the
 	// run. --auto swaps the blanket grant for review-model grading.
+	// --pipe-approvals opens that channel: approvals are asked over the wire
+	// (falling back to review-model grading first when --auto is set).
 	state, approvalPrompter := headlessApproval(client, opts)
+	var approver *pipeApprovalPrompter
+	if opts.PipeApprovals {
+		var journal coreagent.RunJournal
+		if store != nil {
+			journal = store
+		}
+		approver = newPipeApprovalPrompter(sink, journal)
+		if opts.AutoReview {
+			state = &coreagent.ApprovalState{}
+			state.SetMode(coreagent.ApprovalModeAuto)
+			approvalPrompter = &coreagent.AutoReviewPrompter{
+				Reviewer: &coreagent.AutoReviewer{
+					Client: client,
+					Model:  coreagent.ResolveAutoReviewModel(opts.ReviewModel, opts.Model),
+				},
+				State: state,
+				Next:  approver,
+			}
+		} else {
+			state = &coreagent.ApprovalState{}
+			approvalPrompter = approver
+		}
+	}
 
 	session := &coreagent.Session{
 		Client:           client,
@@ -203,6 +239,9 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 		},
 		Background: registry.BackgroundSource(),
 	}
+	if store != nil {
+		session.Journal = store
+	}
 
 	r := &pipeRunner{
 		opts:         opts,
@@ -215,6 +254,7 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 		chatID:       chatID,
 		systemPrompt: systemPrompt,
 		history:      history,
+		approver:     approver,
 	}
 	var skills []coreagent.SkillInfo
 	if catalog != nil {
@@ -283,8 +323,10 @@ func (r *pipeRunner) commandLoop(ctx context.Context, stdin io.Reader, initialPr
 				r.setThink(m.cmd.Value)
 			case "set_tools":
 				r.setTools(m.cmd.Value)
+			case "approval":
+				r.deliverApprovalReply(m.cmd)
 			default:
-				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect|compact|set_think|set_tools)", m.cmd.Cmd))
+				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect|compact|set_think|set_tools|approval)", m.cmd.Cmd))
 			}
 		}
 	}
@@ -373,6 +415,7 @@ func (r *pipeRunner) runTurn(ctx context.Context, cmds chan cmdMsg, c pipeComman
 			Options:      r.opts.Options,
 			Think:        r.opts.Think,
 			KeepAlive:    r.opts.KeepAlive,
+			RequestID:    c.RequestID,
 		})
 		done <- turnResult{res, err}
 	}()
@@ -404,6 +447,8 @@ loop:
 			switch m.cmd.Cmd {
 			case "cancel":
 				cancel()
+			case "approval":
+				r.deliverApprovalReply(m.cmd)
 			case "inspect":
 				r.emitInspect()
 			case "set_think", "set_tools":
@@ -413,7 +458,7 @@ loop:
 			case "compact":
 				r.emitError("wait for the current response to finish before compacting")
 			default:
-				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect|compact|set_think|set_tools)", m.cmd.Cmd))
+				r.emitError(fmt.Sprintf("unknown command %q (want prompt|cancel|inspect|compact|set_think|set_tools|approval)", m.cmd.Cmd))
 			}
 		case <-ctx.Done():
 			cancel()
@@ -421,13 +466,17 @@ loop:
 		}
 	}
 
-	if result.res != nil && len(result.res.Messages) > 0 {
+	if result.res != nil && !result.res.Replayed {
 		// res.Messages is the full run history: replace the in-memory copy
 		// (appending would duplicate prior turns) and persist the delta — or
-		// the whole compacted form, if the run compacted the history.
+		// the whole compacted form, if the run compacted the history. A
+		// journaled run committed its state and history already; a replayed
+		// request changed nothing.
 		r.history = result.res.Messages
-		if err := r.store.SyncMessages(r.chatID, result.res.Messages); err != nil {
-			fmt.Fprintf(r.stderr, "warning: could not save session: %v\n", err)
+		if !result.res.Committed && r.store != nil && r.chatID != "" {
+			if err := r.store.SyncMessages(r.chatID, result.res.Messages); err != nil {
+				fmt.Fprintf(r.stderr, "warning: could not save session: %v\n", err)
+			}
 		}
 	}
 	for _, c := range deferred {
@@ -448,6 +497,23 @@ loop:
 
 func (r *pipeRunner) emitError(msg string) {
 	_ = r.sink.Emit(coreagent.Event{Type: coreagent.EventError, Error: msg})
+}
+
+// deliverApprovalReply routes an approval command to a waiting prompter, or
+// rejects it as stale. No reply can authorize anything without a pending
+// approval.
+func (r *pipeRunner) deliverApprovalReply(c pipeCommand) {
+	if r.approver == nil {
+		r.emitError(fmt.Sprintf("approval replies require --pipe-approvals (reply %q dropped; nothing was authorized)", c.ApprovalID))
+		return
+	}
+	if c.ApprovalID == "" {
+		r.emitError("approval reply requires an approvalId")
+		return
+	}
+	if !r.approver.Deliver(pipeApprovalReply{ApprovalID: c.ApprovalID, Allow: c.Allow, Reason: c.Reason}) {
+		r.emitError(fmt.Sprintf("stale approval reply %q: no matching pending approval; nothing was authorized", c.ApprovalID))
+	}
 }
 
 // emitInspect reports the session's system prompt, registered tools, and
@@ -472,11 +538,13 @@ func (r *pipeRunner) emitInspect() {
 // the user passed the flag explicitly, and auto review stays off unless the
 // user passed --auto — unlike the interactive and headless entry points, a
 // pipe frontend owns the approval story (see OProcess), so the new CLI-level
-// default must not silently grade its tool calls.
+// default must not silently grade its tool calls. With --pipe-approvals the
+// frontend can answer approvals, so the implicit blanket grant is dropped
+// and approval-needing tools prompt over the wire instead.
 func applyPipeDefaults(fs *flag.FlagSet, opts *cliOptions) {
 	seen := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
-	if !seen["allow-all-tools"] {
+	if !seen["allow-all-tools"] && !opts.pipeApprovals {
 		opts.allowAllTools = true
 	}
 	if !seen["auto"] {
@@ -569,6 +637,13 @@ loop:
 
 	if result.err == nil && result.res.Compacted {
 		r.history = result.res.Messages
+		// Record the compaction fact in the append-only record before
+		// syncing the projection, so raw history keeps its watermark boundary.
+		if r.store != nil && r.chatID != "" {
+			if err := r.store.RecordCompaction(coreagent.CompactionRecord{SessionID: r.chatID, Trigger: string(coreagent.CompactionTriggerForce), Summary: result.res.Summary}); err != nil {
+				fmt.Fprintf(r.stderr, "warning: could not record compaction: %v\n", err)
+			}
+		}
 		// Compaction rewrote the history; sync the stored messages so a later
 		// resume loads the compacted form instead of the full history.
 		if err := r.store.SyncMessages(r.chatID, result.res.Messages); err != nil {

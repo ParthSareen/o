@@ -43,6 +43,10 @@ type agentTUIOptions struct {
 	MultiModal          bool
 	ChatID              string
 	Messages            []api.Message
+	// RequestID identifies the first prompt for deduplication (headless).
+	RequestID string
+	// PipeApprovals enables frontend approval replies over the pipe.
+	PipeApprovals bool
 }
 
 func saveLastAgentModel(model string) error {
@@ -271,6 +275,11 @@ func agentToolsRegistry(ctx context.Context, client *api.Client, modelName strin
 	}
 
 	registry := &coreagent.Registry{}
+	if os.Getenv("OLLAMA_AGENT_DISABLE_CODEMODE") == "" {
+		// Sandboxed JS composition of the other registered tools; nested
+		// calls go through the run's approval/journaling path.
+		registry.Register(&agenttools.Codemode{})
+	}
 	if os.Getenv("OLLAMA_AGENT_DISABLE_SHELL") == "" {
 		bash := &agenttools.Bash{}
 		if os.Getenv("OLLAMA_AGENT_DISABLE_BACKGROUND_SHELL") == "" {

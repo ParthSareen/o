@@ -178,6 +178,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 	state, approvalPrompter := headlessApproval(client, opts)
 
 	renderer := newHeadlessRenderer(stdout, stderr, true)
+	var journal coreagent.RunJournal
 	session := &coreagent.Session{
 		Client:           client,
 		EventSinks:       []coreagent.EventSink{coreagent.EventSinkFunc(renderer.Emit)},
@@ -204,6 +205,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
 		} else {
 			chatID = sess.ID
+			journal = store
 			// Surface the saved session so a parent agent can follow up with
 			// o --resume-id; background logs rely on this line.
 			fmt.Fprintf(stderr, "session: %s\n", chatID)
@@ -212,6 +214,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 			}
 		}
 	}
+	session.Journal = journal
 
 	result, err := session.Run(ctx, coreagent.RunOptions{
 		ChatID:       chatID,
@@ -222,6 +225,7 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 		Options:      opts.Options,
 		Think:        opts.Think,
 		KeepAlive:    opts.KeepAlive,
+		RequestID:    opts.RequestID,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -230,10 +234,11 @@ func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *
 
 	fmt.Fprintln(stdout)
 
-	// Persist the conversation to the session store. The store row is empty
-	// for a fresh session, so this persists the full result; compaction, if
-	// any, already rewrote result.Messages.
-	if store != nil && chatID != "" && result != nil {
+	// Persist the conversation to the session store unless the journal
+	// already committed it. The store row is empty for a fresh session, so
+	// this persists the full result; compaction, if any, already rewrote
+	// result.Messages.
+	if store != nil && chatID != "" && result != nil && !result.Committed && !result.Replayed {
 		if err := store.SyncMessages(chatID, result.Messages); err != nil {
 			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
 		}
@@ -296,6 +301,9 @@ func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, 
 		},
 		Background: registry.BackgroundSource(),
 	}
+	if store != nil {
+		session.Journal = store
+	}
 
 	if store != nil {
 		if err := store.AddPrompt(sess.ID, prompt); err != nil {
@@ -313,6 +321,7 @@ func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, 
 		Options:      opts.Options,
 		Think:        opts.Think,
 		KeepAlive:    opts.KeepAlive,
+		RequestID:    opts.RequestID,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -321,9 +330,10 @@ func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, 
 
 	fmt.Fprintln(stdout)
 
-	if store != nil && result != nil {
+	if store != nil && result != nil && !result.Committed && !result.Replayed {
 		// SyncMessages replaces the store when the run compacted the history,
-		// so a later resume loads the compacted form.
+		// so a later resume loads the compacted form. A journaled run
+		// committed its projection already.
 		if err := store.SyncMessages(sess.ID, result.Messages); err != nil {
 			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
 		}
