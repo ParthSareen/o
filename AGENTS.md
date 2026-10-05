@@ -92,6 +92,15 @@ o saves sessions to `~/.o/sessions.db` (SQLite). Each session gets a UUID; o
 appends messages after each run. A session can have a name (`--name` at
 launch or `/name set <text>` in the TUI). o upgrades an old database on open.
 
+Runs are also journaled to the same database (additive tables: `runs`,
+`tool_calls`, `session_events`, raw history, `compactions`, `approvals`,
+run locks): admission commits before any model/tool work starts, tool intent
+commits before invocation, and terminal state commits before `run_finished`/`run_committed`
+publish. Retried pipe prompts can dedupe by `requestId`; a second process
+writing the same session is rejected by a run lock. Compaction rewrites the
+message projection, never the append-only raw record. Interruption recovery
+classifies unknown-outcome tool calls and refuses to blindly re-execute them.
+
 ## TUI
 
 Slash commands are listed under [Build & run].

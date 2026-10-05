@@ -67,15 +67,29 @@ Flags: `--system`, `--allow-all-tools` (no approval prompts), `--auto`
 (on by default: a review model grades tool calls; `--auto=false` falls back
 to approval prompts), `--review-model` (grading model for auto mode),
 `--no-tools`, `--multimodal`, `--context-window`, `--headless`, `--pipe`,
-`--resume`, `--resume-id`, `--list`, `--name`. Run `o --help` for the full
-usage text, which includes rules for headless use by agents.
+`--request-id`, `--pipe-approvals`, `--resume`, `--resume-id`, `--list`,
+`--name`. Run `o --help` for the full usage text, which includes rules for
+headless use by agents.
 
 `--pipe` speaks a machine-readable NDJSON protocol over stdio (prompt/cancel
 commands in, the full agent event stream out) for UI frontends.
 It implies `--allow-all-tools` unless you set the flag explicitly; pass
-`--auto` there for review-model grading.
+`--auto` there for review-model grading. Additive protocol pieces:
 
-## Auto mode
+- `prompt` commands may carry `requestId`; retrying the same ID with the
+  same input replays the committed run (`run_replayed` + `run_finished`
+  events, no new model or tool work), while reusing the ID with different
+  input is rejected as a request conflict.
+- Journaled runs emit `run_admitted` before work begins and `run_committed`
+  after the terminal state and history are durably committed (always after
+  `run_finished`, which is the live completion event as before).
+- `--pipe-approvals` opens an approval channel: approval-needing tool calls
+  emit `approval_requested` (`approvalId`, the correlated calls) and the
+  frontend answers with `{"cmd":"approval","approvalId":...,"allow":...}`.
+  Pending requests and decisions are persisted; disconnect, cancel, and
+  timeout settle as expired and never imply permission. Stale or duplicate
+  replies are rejected. Without this flag pipe keeps granting full tool
+  access (its default), and `--pipe-approvals` drops that implicit grant.
 
 Auto mode is the default starting mode. It sits between review mode (prompt
 for every tool call via `--auto=false`) and `--allow-all-tools` (run
@@ -87,7 +101,6 @@ same decision contract as the Codex Guardian setup in ollama's compat proxy
 reviewer's rationale back to the agent, critical-risk calls are denied even
 when the reviewer allows, and anything malformed fails closed — in the TUI a
 failed review falls back to the human prompt, headless runs deny.
-
 `--review-model` (or `O_REVIEW_MODEL`) picks the grading model; the default
 `selected` uses the session model. In the TUI, `shift+tab` cycles
 auto → full access → review. Every model-graded call leaves a `⟳ auto
