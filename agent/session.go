@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -38,6 +40,10 @@ type Session struct {
 	// boundaries: completions are injected into the conversation so the
 	// model sees (and can react to) them.
 	Background BackgroundSource
+	// Journal, when set, durably admits runs before work begins, journals
+	// tool intent and outcome, and commits terminal state before terminal
+	// events publish. A nil Journal keeps the pre-journal behavior unchanged.
+	Journal RunJournal
 }
 
 type RunOptions struct {
@@ -53,6 +59,11 @@ type RunOptions struct {
 	// SkillName loads a catalog skill as an ordered synthetic tool call/result
 	// before the first model request for this run.
 	SkillName string
+	// RequestID lets pipe/headless callers deduplicate retried prompts: the
+	// same request ID with the same input replays the committed run, a
+	// changed input conflicts. Empty for legacy callers, which get no
+	// retry-deduplication guarantee.
+	RequestID string
 	// MaxToolRounds limits consecutive model/tool cycles. A positive value is
 	// an explicit limit. Zero selects the model-specific default: local models
 	// use the default guard and cloud models are unlimited. A negative value
@@ -64,6 +75,12 @@ type RunResult struct {
 	Messages   []api.Message
 	Latest     api.ChatResponse
 	WorkingDir string
+	// Replayed reports a deduplicated request: a committed run with the same
+	// request ID and input already exists, so no model or tool work ran.
+	Replayed bool
+	// Committed reports that the journal durable-committed the terminal run
+	// state and history; callers can skip their own message sync.
+	Committed bool
 }
 
 const (
@@ -150,6 +167,16 @@ type run struct {
 	compactionSkipNotified  bool
 
 	finish runFinish
+
+	// admitted is set when the journal durably admitted this run.
+	admitted *RunAdmissionResult
+	// blockedTools refuses re-execution of a prior attempt's
+	// unknown-outcome tool calls, keyed by ToolArgsKey.
+	blockedTools map[string]BlockedTool
+	// rawBaseline is the index into r.messages where the current unflushed raw
+	// segment starts; compaction and run end flush each segment through the
+	// journal's append-only record.
+	rawBaseline int
 }
 
 type runFinish struct {
@@ -186,20 +213,63 @@ func (s *Session) Run(ctx context.Context, opts RunOptions) (*RunResult, error) 
 		s.ApprovalState = &ApprovalState{}
 	}
 	runID := uuid.NewString()
+
+	// Durable admission: commit the run identity (and dedupe by request ID)
+	// before any model or tool work begins. A failed admission commit never
+	// starts work.
+	var admitted *RunAdmissionResult
+	if s.Journal != nil && opts.ChatID != "" {
+		res, err := s.Journal.AdmitRun(RunAdmission{
+			ChatID:       opts.ChatID,
+			RequestID:    opts.RequestID,
+			Model:        opts.Model,
+			SystemPrompt: opts.SystemPrompt,
+			Skill:        opts.SkillName,
+			Format:       opts.Format,
+			Options:      opts.Options,
+			Think:        opts.Think,
+			Prompt:       runAdmissionPrompt(opts),
+		})
+		if err != nil {
+			s.emit(newErrorEvent(newEventMetadata(runID, opts), err.Error()))
+			return nil, err
+		}
+		if res.Replayed {
+			meta := newEventMetadata(res.RunID, opts)
+			_ = s.emit(newRunReplayed(meta, res.Status))
+			_ = s.emitIgnoringCanceled(ctx, newRunFinished(meta, RunStatus(res.Status)))
+			return &RunResult{Messages: opts.Messages, Replayed: true}, nil
+		}
+		if res.RunID != "" {
+			runID = res.RunID
+		}
+		admitted = &res
+	}
+
 	budget := s.runBudget(opts)
 	messages, err := s.buildRunMessages(ctx, runID, opts, budget)
 	if err != nil {
+		s.finishUnstartedRun(admitted, runID, opts.ChatID, err)
 		return nil, err
+	}
+	// The raw record for this run starts at the boundary between prior
+	// history and this run's additions (new prompt, skill activation,
+	// notices, and everything the run adds afterward).
+	rawBaseline := len(opts.Messages)
+	if admitted == nil {
+		rawBaseline = 0
 	}
 	activatedSkill, err := s.activateSkill(ctx, runID, opts)
 	if err != nil {
 		s.emit(newErrorEvent(newEventMetadata(runID, opts), err.Error()))
+		s.finishUnstartedRun(admitted, runID, opts.ChatID, err)
 		return nil, err
 	}
 	if len(activatedSkill) > 0 {
 		messages = append(messages, activatedSkill...)
 		if err := s.checkPreflightPromptBudget(budget, opts, messages); err != nil {
 			s.emit(newErrorEvent(newEventMetadata(runID, opts), err.Error()))
+			s.finishUnstartedRun(admitted, runID, opts.ChatID, err)
 			return nil, err
 		}
 	}
@@ -220,7 +290,25 @@ func (s *Session) Run(ctx context.Context, opts RunOptions) (*RunResult, error) 
 		messages:      messages,
 		budget:        budget,
 		maxToolRounds: resolvedMaxToolRounds(opts.Model, opts.MaxToolRounds),
+		rawBaseline:   rawBaseline,
 	}
+	if admitted != nil {
+		r.admitted = admitted
+		r.blockedTools = make(map[string]BlockedTool, len(admitted.BlockedTools))
+		for _, blocked := range admitted.BlockedTools {
+			r.blockedTools[blocked.ArgsKey] = blocked
+		}
+		// Admission is committed; publishing acceptance now is safe.
+		_ = s.emit(newRunAdmitted(newEventMetadata(runID, opts), admitted.Recovered))
+	}
+	// Composing tools (codemode) get a nested executor for this run, whether
+	// or not this run is journaled.
+	defer s.uninstallNestedExecutor()
+	s.installNestedExecutor(nestedRunIDs{
+		runID:   runID,
+		meta:    newEventMetadata(runID, opts),
+		blocked: r.blockedTools,
+	})
 	return r.run(ctx)
 }
 
@@ -379,7 +467,7 @@ func (r *run) runModelStep(ctx context.Context) error {
 }
 
 func (r *run) runToolStep(ctx context.Context) error {
-	batch, err := r.session.executeToolCalls(ctx, r.runID, r.opts, r.budget, r.messages, r.pendingToolCalls)
+	batch, err := r.session.executeToolCalls(ctx, r.runID, r.opts, r.budget, r.messages, r.pendingToolCalls, r.blockedTools)
 	if err != nil {
 		r.session.emit(newErrorEvent(newEventMetadata(r.runID, r.opts), err.Error()))
 		return err
@@ -395,10 +483,25 @@ func (r *run) runCompactionStep(ctx context.Context) error {
 	opts := r.opts
 	meta := newEventMetadata(r.runID, opts)
 	var err error
+	var compacted bool
+	var compactedMessages []api.Message
 	if r.toolBatch != nil && len(r.toolBatch.overflows) > 0 {
-		r.messages, r.compactionSkipNotified, err = r.session.compactForToolOutputOverflow(ctx, r.runID, opts, r.budget, r.messages, r.latest, r.assistant, r.toolBatch.messages, r.toolBatch.overflows, r.compactionSkipNotified)
+		compactedMessages, compacted, r.compactionSkipNotified, err = r.session.compactForToolOutputOverflow(ctx, r.runID, opts, r.budget, r.messages, r.latest, r.assistant, r.toolBatch.messages, r.toolBatch.overflows, r.compactionSkipNotified)
 	} else {
-		r.messages, r.compactionSkipNotified, err = r.session.maybeCompact(ctx, r.runID, opts, r.budget, r.messages, r.latest, r.compactionSkipNotified)
+		compactedMessages, compacted, r.compactionSkipNotified, err = r.session.maybeCompact(ctx, r.runID, opts, r.budget, r.messages, r.latest, r.compactionSkipNotified)
+	}
+	if compacted {
+		// The pre-compaction span of this run becomes its own raw segment;
+		// compaction rewrote the message list but not the append-only record.
+		if err := r.flushRawSegment(); err != nil {
+			r.session.emit(newErrorEvent(meta, err.Error()))
+			r.finishError(err)
+			return nil
+		}
+	}
+	r.messages = compactedMessages
+	if compacted {
+		r.flushRawSegment()
 	}
 	if err != nil {
 		r.session.emit(newErrorEvent(meta, err.Error()))
@@ -447,6 +550,28 @@ func (r *run) runCompactionStep(ctx context.Context) error {
 }
 
 func (r *run) finishRun(ctx context.Context) (*RunResult, error) {
+	result := &RunResult{Messages: r.messages, Latest: r.latest, WorkingDir: r.session.WorkingDir}
+	var commitSeq int64
+	if r.admitted != nil && r.session.Journal != nil {
+		r.flushRawSegment()
+		if err := r.flushRawSegment(); err != nil {
+			return result, err
+		}
+		commit, err := r.session.Journal.CommitRun(RunTerminal{
+			RunID:   r.runID,
+			ChatID:  r.opts.ChatID,
+			Status:  journalRunStatus(r.finish.status),
+			Err:     finishErrString(r.finish.err),
+			History: r.messages,
+		})
+		if err != nil {
+			// Terminal state is not committed; no terminal event publishes,
+			// so a client cannot mistake a failed commit for a finished run.
+			return result, fmt.Errorf("commit run: %w", err)
+		}
+		result.Committed = true
+		commitSeq = commit.Seq
+	}
 	if r.finish.status != "" {
 		event := newRunFinished(newEventMetadata(r.runID, r.opts), r.finish.status)
 		var err error
@@ -456,10 +581,45 @@ func (r *run) finishRun(ctx context.Context) (*RunResult, error) {
 			err = r.session.emit(event)
 		}
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 	}
-	return &RunResult{Messages: r.messages, Latest: r.latest, WorkingDir: r.session.WorkingDir}, r.finish.err
+	if result.Committed {
+		// Settled notification, published only after the terminal commit.
+		_ = r.session.emitIgnoringCanceled(ctx, newRunCommitted(newEventMetadata(r.runID, r.opts), commitSeq))
+	}
+	return result, r.finish.err
+}
+
+// finishErrString renders a run's terminal error for the journal row.
+func finishErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// runAdmissionPrompt extracts the admitted user-facing prompt: the last
+// non-empty user message in NewMessages, or the skill invocation form.
+func runAdmissionPrompt(opts RunOptions) string {
+	for i := len(opts.NewMessages) - 1; i >= 0; i-- {
+		if opts.NewMessages[i].Role == "user" && strings.TrimSpace(opts.NewMessages[i].Content) != "" {
+			return strings.TrimSpace(opts.NewMessages[i].Content)
+		}
+	}
+	if opts.SkillName != "" {
+		return "/" + opts.SkillName
+	}
+	return ""
+}
+
+// finishUnstartedRun commits a terminal-failed state for an admission whose
+// preflight checks failed before any model or tool work began.
+func (s *Session) finishUnstartedRun(admitted *RunAdmissionResult, runID, chatID string, err error) {
+	if admitted == nil || s == nil || s.Journal == nil {
+		return
+	}
+	_, _ = s.Journal.CommitRun(RunTerminal{RunID: runID, ChatID: chatID, Status: RunStatusFailed, Err: err.Error()})
 }
 
 // injectPendingBackgroundEvents delivers background work that finished (or
@@ -665,7 +825,7 @@ func buildChatRequest(opts RunOptions, messages []api.Message, tools api.Tools) 
 	return req
 }
 
-func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, calls []api.ToolCall) (toolBatchResult, error) {
+func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, calls []api.ToolCall, blocked map[string]BlockedTool) (toolBatchResult, error) {
 	meta := newEventMetadata(runID, opts)
 	batch := toolBatchResult{
 		messages: make([]api.Message, 0, len(calls)),
@@ -686,7 +846,7 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 	}
 	plans := make([]plannedToolCall, 0, len(calls))
 	batchWorkingDir := s.currentWorkingDir()
-	approvalReq := ApprovalRequest{WorkingDir: batchWorkingDir, Task: latestUserMessageContent(messages)}
+	approvalReq := ApprovalRequest{RunID: runID, WorkingDir: batchWorkingDir, Task: latestUserMessageContent(messages)}
 	for _, call := range calls {
 		toolName := call.Function.Name
 		args := call.Function.Arguments.ToMap()
@@ -728,6 +888,14 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 				content = "Tool execution denied."
 			}
 			for _, plan := range plans {
+				// Denial is a settled outcome: journal intent and decision
+				// before publishing it.
+				if err := s.journalToolIntent(runID, plan.call.ID, plan.tool, plan.toolName, plan.args); err != nil {
+					return toolBatchResult{}, journalErr(meta, "tool intent", err)
+				}
+				if err := s.journalToolOutcome(runID, plan.call.ID, ToolJournalDenied, "", content); err != nil {
+					return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+				}
 				msg := budget.FitToolResult(plan.toolName, plan.call.ID, content, historyTokens+batchTokens, CeilingThreshold)
 				batch.messages = append(batch.messages, msg)
 				batchTokens += estimateMessagesTokens([]api.Message{msg})
@@ -755,6 +923,12 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			return batch, nil
 		}
 		if plan.tool == nil {
+			if err := s.journalToolIntent(runID, call.ID, nil, toolName, args); err != nil {
+				return toolBatchResult{}, journalErr(meta, "tool intent", err)
+			}
+			if err := s.journalToolOutcome(runID, call.ID, ToolJournalFailed, "", fmt.Sprintf("unknown tool: %s", toolName)); err != nil {
+				return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+			}
 			content := fmt.Sprintf("Error: unknown tool: %s", toolName)
 			msg := budget.FitToolResult(toolName, call.ID, content, historyTokens+batchTokens, CeilingThreshold)
 			batch.messages = append(batch.messages, msg)
@@ -769,13 +943,42 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			continue
 		}
 
+		// Journal the intent of this attempt (blocked calls included, as
+		// audit evidence) before any further work.
+		if err := s.journalToolIntent(runID, call.ID, plan.tool, toolName, args); err != nil {
+			return toolBatchResult{}, journalErr(meta, "tool intent", err)
+		}
+		if plan.tool != nil {
+			if prior, isBlocked := blocked[ToolArgsKey(toolName, args)]; isBlocked {
+				reason := blockedToolReason(prior)
+				if err := s.journalToolOutcome(runID, call.ID, ToolJournalBlocked, "", reason); err != nil {
+					return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+				}
+				blockedContent := "Error: " + reason + ". Reconcile the interrupted run manually, or retry with a new request."
+				msg := budget.FitToolResult(toolName, call.ID, blockedContent, historyTokens+batchTokens, CeilingThreshold)
+				batch.messages = append(batch.messages, msg)
+				batchTokens += estimateMessagesTokens([]api.Message{msg})
+				content := msg.Content
+				if toolOutputFullyOmitted(content) {
+					batch.overflows = append(batch.overflows, toolOutputOverflow{toolName: toolName, toolCallID: call.ID, content: blockedContent})
+				}
+				if emitErr := s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusSkipped, call.ID, toolName, plan.workingDir, args, content, reason)); emitErr != nil {
+					return toolBatchResult{}, emitErr
+				}
+				continue
+			}
+		}
+
 		if err := s.emit(newToolStarted(meta, call.ID, toolName, plan.workingDir, args)); err != nil {
 			return toolBatchResult{}, err
 		}
 
-		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir, SupportsImages: s.SupportsImages}, call)
+		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir, SupportsImages: s.SupportsImages, ToolCallID: call.ID}, call)
 		if err != nil {
 			rawContent := fmt.Sprintf("Error: %v", err)
+			if err := s.journalToolOutcome(runID, call.ID, ToolJournalFailed, "", err.Error()); err != nil {
+				return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+			}
 			msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)
 			batch.messages = append(batch.messages, msg)
 			batchTokens += estimateMessagesTokens([]api.Message{msg})
@@ -803,6 +1006,9 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			eventWorkingDir = s.WorkingDir
 		}
 		rawContent := result.Content
+		if err := s.journalToolOutcome(runID, call.ID, ToolJournalDone, rawContent, ""); err != nil {
+			return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+		}
 
 		msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)
 		msg.Images = result.Images
@@ -839,6 +1045,10 @@ func (s *Session) disabledToolCalls(ctx context.Context, runID string, opts RunO
 	for _, call := range calls {
 		toolName := call.Function.Name
 		args := call.Function.Arguments.ToMap()
+		_ = s.journalToolIntent(runID, call.ID, nil, toolName, args)
+		if err := s.journalToolOutcome(runID, call.ID, ToolJournalDisabled, "", ""); err != nil {
+			return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+		}
 		msg := budget.FitToolResult(toolName, call.ID, toolExecutionDisabledMessage, historyTokens+batchTokens, CeilingThreshold)
 		batch.messages = append(batch.messages, msg)
 		batchTokens += estimateMessagesTokens([]api.Message{msg})
@@ -855,6 +1065,10 @@ func (s *Session) skipToolCalls(ctx context.Context, runID string, opts RunOptio
 	for _, call := range calls {
 		toolName := call.Function.Name
 		args := call.Function.Arguments.ToMap()
+		_ = s.journalToolIntent(runID, call.ID, nil, toolName, args)
+		if err := s.journalToolOutcome(runID, call.ID, ToolJournalSkipped, "", content); err != nil {
+			return nil, journalErr(meta, "tool outcome", err)
+		}
 		msg := toolMessage(toolName, call.ID, content)
 		toolMessages = append(toolMessages, msg)
 		if emitErr := s.emitIgnoringCanceled(ctx, newToolFinished(meta, "skipped", call.ID, toolName, "", args, msg.Content, msg.Content)); emitErr != nil {
@@ -915,9 +1129,9 @@ func isContextCanceledError(ctx context.Context, err error) bool {
 	return ctx != nil && errors.Is(ctx.Err(), context.Canceled) && strings.Contains(err.Error(), "context canceled")
 }
 
-func (s *Session) maybeCompact(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse, skipNotified bool) ([]api.Message, bool, error) {
+func (s *Session) maybeCompact(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse, skipNotified bool) ([]api.Message, bool, bool, error) {
 	if s.Compactor == nil {
-		return messages, skipNotified, nil
+		return messages, false, skipNotified, nil
 	}
 	req := s.compactionRequest(runID, opts, budget, messages, latest)
 	trigger := s.autoCompactionTrigger(req)
@@ -933,7 +1147,7 @@ func (s *Session) maybeCompact(ctx context.Context, runID string, opts RunOption
 			s.emitCompactionSkipped(runID, opts, trigger, result.Reason)
 			skipNotified = true
 		}
-		return messages, skipNotified, nil
+		return messages, false, skipNotified, nil
 	}
 	if !result.Compacted {
 		if result.Due && !skipNotified {
@@ -943,18 +1157,21 @@ func (s *Session) maybeCompact(ctx context.Context, runID string, opts RunOption
 			s.emitCompactionSkipped(runID, opts, trigger, result.Reason)
 			skipNotified = true
 		}
-		return messages, skipNotified, nil
+		return messages, false, skipNotified, nil
 	}
 	s.emitCompacted(runID, opts, result.Messages, trigger, result.Summary)
-	if err := s.checkPostCompactionPromptBudget(budget, opts, result.Messages); err != nil {
-		return result.Messages, skipNotified, err
+	if err := s.recordCompaction(runID, opts.ChatID, trigger, result.Summary); err != nil {
+		return result.Messages, true, skipNotified, err
 	}
-	return result.Messages, skipNotified, nil
+	if err := s.checkPostCompactionPromptBudget(budget, opts, result.Messages); err != nil {
+		return result.Messages, true, skipNotified, err
+	}
+	return result.Messages, true, skipNotified, nil
 }
 
-func (s *Session) compactForToolOutputOverflow(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse, assistant api.Message, toolMessages []api.Message, overflows []toolOutputOverflow, skipNotified bool) ([]api.Message, bool, error) {
+func (s *Session) compactForToolOutputOverflow(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse, assistant api.Message, toolMessages []api.Message, overflows []toolOutputOverflow, skipNotified bool) ([]api.Message, bool, bool, error) {
 	if s.Compactor == nil {
-		return messages, skipNotified, nil
+		return messages, false, skipNotified, nil
 	}
 
 	keepUserTurns := 0
@@ -969,14 +1186,14 @@ func (s *Session) compactForToolOutputOverflow(ctx context.Context, runID string
 			s.emitCompactionSkipped(runID, opts, CompactionTriggerToolOutput, result.Reason)
 			skipNotified = true
 		}
-		return messages, skipNotified, nil
+		return messages, false, skipNotified, nil
 	}
 	if !result.Compacted {
 		if result.Due && !skipNotified {
 			s.emitCompactionSkipped(runID, opts, CompactionTriggerToolOutput, result.Reason)
 			skipNotified = true
 		}
-		return messages, skipNotified, nil
+		return messages, false, skipNotified, nil
 	}
 
 	overflowByID := make(map[string]toolOutputOverflow, len(overflows))
@@ -1007,10 +1224,13 @@ func (s *Session) compactForToolOutputOverflow(ctx context.Context, runID string
 	}
 
 	s.emitCompacted(runID, opts, compacted, CompactionTriggerToolOutput, result.Summary)
-	if err := s.checkPostCompactionPromptBudget(budget, opts, compacted); err != nil {
-		return compacted, skipNotified, err
+	if err := s.recordCompaction(runID, opts.ChatID, CompactionTriggerToolOutput, result.Summary); err != nil {
+		return compacted, true, skipNotified, err
 	}
-	return compacted, skipNotified, nil
+	if err := s.checkPostCompactionPromptBudget(budget, opts, compacted); err != nil {
+		return compacted, true, skipNotified, err
+	}
+	return compacted, true, skipNotified, nil
 }
 
 func (s *Session) compactionRequest(runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse) CompactionRequest {
@@ -1182,6 +1402,7 @@ func truncHint(hint string) string {
 	if !strings.HasSuffix(hint, ".") {
 		hint += "."
 	}
+
 	return " " + hint
 }
 
@@ -1221,4 +1442,230 @@ func ApproximateTokens(n int) int {
 
 func messageEmpty(msg api.Message) bool {
 	return msg.Content == "" && msg.Thinking == "" && len(msg.ToolCalls) == 0
+}
+
+// journalToolIntent records the intent to invoke one call. A nil tool (or nil
+// journal) records with the conservative non-replay-safe classification.
+func (s *Session) journalToolIntent(runID, callID string, tool Tool, toolName string, args map[string]any) error {
+	if s == nil || s.Journal == nil {
+		return nil
+	}
+	return s.Journal.RecordToolIntent(ToolIntent{
+		RunID:      runID,
+		ToolCallID: callID,
+		Name:       toolName,
+		Args:       args,
+		ReplaySafe: toolReplaySafe(tool),
+	})
+}
+
+// journalToolOutcome records a settled tool-call outcome.
+func (s *Session) journalToolOutcome(runID, callID, status, result, errMsg string) error {
+	if s == nil || s.Journal == nil {
+		return nil
+	}
+	return s.Journal.RecordToolOutcome(ToolOutcome{RunID: runID, ToolCallID: callID, Status: status, Result: result, Err: errMsg})
+}
+
+// journalErr wraps a journal write failure:
+// un-journaled state must not be treated as execution state.
+func journalErr(meta eventMetadata, what string, err error) error {
+	return fmt.Errorf("journal %s: %w", what, err)
+}
+
+// toolReplaySafe reports whether a tool explicitly declares that re-running
+// it with an unknown earlier outcome is safe. Everything unclassified is
+// treated as unsafe.
+func toolReplaySafe(tool Tool) bool {
+	if safe, ok := tool.(ReplaySafeTool); ok {
+		return safe.ReplaySafe()
+	}
+	return false
+}
+
+// blockedToolReason explains why a prior attempt's call is refused.
+func blockedToolReason(blocked BlockedTool) string {
+	return fmt.Sprintf("tool call has an unknown outcome from interrupted run %s (prior call %s); refusing to re-execute automatically", blocked.PriorRunID, blocked.PriorCallID)
+}
+
+// recordCompaction journals one compaction fact; raw history stays append-
+// only around it.
+func (s *Session) recordCompaction(runID, chatID string, trigger CompactionTrigger, summary string) error {
+	if s == nil || s.Journal == nil {
+		return nil
+	}
+	return s.Journal.RecordCompaction(CompactionRecord{RunID: runID, SessionID: chatID, Trigger: string(trigger), Summary: summary})
+}
+
+// flushRawSegment journals the run's messages added since the last flush
+// point (run end, and around each compaction) and reseats the baseline.
+func (r *run) flushRawSegment() error {
+	if r.admitted == nil || r.session.Journal == nil {
+		r.rawBaseline = len(r.messages)
+		return nil
+	}
+	if r.rawBaseline >= len(r.messages) {
+		r.rawBaseline = len(r.messages)
+		return nil
+	}
+	segment := append([]api.Message(nil), r.messages[r.rawBaseline:]...)
+	r.rawBaseline = len(r.messages)
+	if err := r.session.Journal.RecordRawSegment(r.runID, segment); err != nil {
+		return fmt.Errorf("record raw segment: %w", err)
+	}
+	return nil
+}
+
+// nestedRunIDs carries what a composing tool's nested calls need to route
+// through the run's normal execution path.
+type nestedRunIDs struct {
+	runID   string
+	meta    eventMetadata
+	blocked map[string]BlockedTool
+}
+
+// installNestedExecutor wires composing tools (codemode) to this run's
+// nested-call path. Executed per run and uninstalled on return, so a leaked
+// executor cannot outlive the run it belongs to.
+func (s *Session) installNestedExecutor(config nestedRunIDs) func() {
+	if s == nil || s.Tools == nil {
+		return func() {}
+	}
+	exec := runNestedExecutor{session: s, config: config}
+	var setters []NestedExecutorSetter
+	s.Tools.VisitTools(func(tool Tool) {
+		if setter, ok := tool.(NestedExecutorSetter); ok {
+			setter.SetNestedExecutor(exec)
+			setters = append(setters, setter)
+		}
+	})
+	return func() {
+		for _, setter := range setters {
+			setter.SetNestedExecutor(nil)
+		}
+	}
+}
+
+// uninstallNestedExecutor clears executor state left behind if Run exits
+// before its deferred undo (it is idempotent).
+func (s *Session) uninstallNestedExecutor() {
+	if s == nil || s.Tools == nil {
+		return
+	}
+	s.Tools.VisitTools(func(tool Tool) {
+		if setter, ok := tool.(NestedExecutorSetter); ok {
+			setter.SetNestedExecutor(nil)
+		}
+	})
+}
+
+// runNestedExecutor points composing tools at the session's nested-call path.
+type runNestedExecutor struct {
+	session *Session
+	config  nestedRunIDs
+}
+
+func (e runNestedExecutor) ExecuteNested(ctx context.Context, parentToolCallID, toolName string, args map[string]any) (ToolResult, error) {
+	return e.session.executeNestedToolCall(ctx, e.config, parentToolCallID, toolName, args)
+}
+
+// executeNestedToolCall runs one tool call nested inside a composing call
+// (e.g. codemode) through the same authorization, journaling, blocking, and
+// cancellation rules as top-level calls, with the parent correlation for the
+// journal.
+func (s *Session) executeNestedToolCall(ctx context.Context, config nestedRunIDs, parentToolCallID, toolName string, args map[string]any) (ToolResult, error) {
+	meta := config.meta
+	callID := "nested-" + uuid.NewString()
+	tool, ok := s.Tools.Get(toolName)
+	if !ok {
+		return ToolResult{}, fmt.Errorf("unknown tool: %s", toolName)
+	}
+	if s.DisableTools {
+		return ToolResult{}, errors.New(toolExecutionDisabledMessage)
+	}
+	if s.Journal != nil {
+		if err := s.Journal.RecordToolIntent(ToolIntent{RunID: config.runID, ToolCallID: callID, ParentToolCallID: parentToolCallID, Name: toolName, Args: args, ReplaySafe: toolReplaySafe(tool)}); err != nil {
+			return ToolResult{}, fmt.Errorf("journal nested tool intent: %w", err)
+		}
+		if prior, isBlocked := config.blocked[ToolArgsKey(toolName, args)]; isBlocked {
+			reason := blockedToolReason(prior)
+			if err := s.journalToolOutcome(config.runID, callID, ToolJournalBlocked, "", reason); err != nil {
+				return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
+			}
+			return ToolResult{}, errors.New(reason)
+		}
+	}
+	if s.needsApproval(tool, toolName, args) {
+		req := ApprovalRequest{RunID: config.runID, WorkingDir: s.currentWorkingDir(), Calls: []ApprovalToolCall{{
+			ToolCallID:    callID,
+			ToolName:      toolName,
+			Args:          args,
+			ApprovalScope: toolApprovalScope(tool, toolName, args),
+		}}}
+		result, err := s.authorizeToolCalls(ctx, req)
+		if err != nil {
+			_ = s.journalToolOutcome(config.runID, callID, ToolJournalFailed, "", err.Error())
+			return ToolResult{}, err
+		}
+		if result.Review != nil {
+			_ = s.emit(newApprovalReviewed(meta, result.Review))
+		}
+		if !result.Allow {
+			reason := result.Reason
+			if reason == "" {
+				reason = "Tool execution denied."
+			}
+			if err := s.journalToolOutcome(config.runID, callID, ToolJournalDenied, "", reason); err != nil {
+				return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
+			}
+			_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusDenied, callID, toolName, "", args, reason, reason))
+			return ToolResult{}, errors.New(reason)
+		}
+	}
+	_ = s.emit(newToolStarted(meta, callID, toolName, s.currentWorkingDir(), args))
+	result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: s.currentWorkingDir(), SupportsImages: s.SupportsImages, ToolCallID: callID}, api.ToolCall{
+		ID: callID,
+		Function: api.ToolCallFunction{
+			Name:      toolName,
+			Arguments: argsToToolCallArguments(args),
+		},
+	})
+	if err != nil {
+		if err := s.journalToolOutcome(config.runID, callID, ToolJournalFailed, "", err.Error()); err != nil {
+			return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
+		}
+		_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusFailed, callID, toolName, "", args, fmt.Sprintf("Error: %v", err), err.Error()))
+		return ToolResult{}, err
+	}
+	capped := capNestedResult(result.Content)
+	if err := s.journalToolOutcome(config.runID, callID, ToolJournalDone, capped, ""); err != nil {
+		return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
+	}
+	_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusDone, callID, toolName, s.currentWorkingDir(), args, capped, ""))
+	result.Content = capped
+	return result, nil
+}
+
+// nestedResultMaxRunes bounds a nested call's result payload, both in the
+// journal and toward the calling script.
+const nestedResultMaxRunes = 16384
+
+// capNestedResult truncates a nested result to a bounded head+tail form.
+func capNestedResult(content string) string {
+	return Truncate(content, TruncateConfig{
+		MaxRunes: nestedResultMaxRunes,
+		HeadTail: true,
+		HeadPct:  75,
+		Label:    "tool output",
+	})
+}
+
+// argsToToolCallArguments converts a plain args map into the ordered
+// arguments struct tools receive, iterating keys sorted for determinism.
+func argsToToolCallArguments(args map[string]any) api.ToolCallFunctionArguments {
+	tc := api.NewToolCallFunctionArguments()
+	for _, key := range slices.Sorted(maps.Keys(args)) {
+		tc.Set(key, args[key])
+	}
+	return tc
 }

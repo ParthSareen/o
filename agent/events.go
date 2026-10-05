@@ -44,6 +44,25 @@ const (
 	// lazily gets its store row on the first prompt. UI frontends key
 	// sessions by id, and the id doesn't exist before then.
 	EventSessionAssigned EventType = "session_assigned"
+	// EventRunAdmitted is emitted when a run's admission is durably committed,
+	// just before the run begins. It carries Recovered when admission
+	// classified state left behind by an interrupted earlier process.
+	EventRunAdmitted EventType = "run_admitted"
+	// EventRunReplayed is emitted when a prompt request ID matches a run that
+	// is already committed: no new model or tool work starts. A run_finished
+	// event with the original terminal status follows it.
+	EventRunReplayed EventType = "run_replayed"
+	// EventRunCommitted follows run_finished when the terminal run state and
+	// history are durably committed. CommittedSeq is the session event
+	// sequence; frontends can treat it as the durable-completion ack.
+	EventRunCommitted EventType = "run_committed"
+	// EventApprovalRequested is emitted when a frontend-backed approval is
+	// pending; the frontend must reply with an approval command carrying the
+	// same approvalId. Only emitted when approvals are enabled.
+	EventApprovalRequested EventType = "approval_requested"
+	// EventApprovalDecided reports a persisted approval decision:
+	// approved, denied, or expired (disconnect/timeout never imply permission).
+	EventApprovalDecided EventType = "approval_decided"
 )
 
 // ToolInfo is a UI-facing summary of one registered tool, carried on
@@ -136,6 +155,18 @@ type Event struct {
 	Error  string         `json:"error,omitempty"`
 	// Review carries the auto-review verdict on approval_reviewed events.
 	Review *ReviewDecision `json:"review,omitempty"`
+	// ApprovalID correlates approval_requested/decided events with the
+	// approval command reply.
+	ApprovalID string `json:"approvalId,omitempty"`
+	// ApprovalCalls summarizes the calls an approval covers.
+	ApprovalCalls []ApprovalToolCall `json:"approvalCalls,omitempty"`
+	// Replayed is set on run_finished emitted for a deduplicated request.
+	Replayed bool `json:"replayed,omitempty"`
+	// CommittedSeq is the durable session event sequence, set on
+	// run_committed events.
+	CommittedSeq int64 `json:"committedSeq,omitempty"`
+	// Recovered lists recovery findings, set on run_admitted events.
+	Recovered []string `json:"recovered,omitempty"`
 }
 
 type EventSink interface {
@@ -196,6 +227,46 @@ func newRunFinished(m eventMetadata, status RunStatus) Event {
 
 func newErrorEvent(m eventMetadata, errMsg string) Event {
 	return Event{Type: EventError, RunID: m.runID, ChatID: m.chatID, Model: m.model, Error: errMsg}
+}
+
+func newRunAdmitted(m eventMetadata, recovered []string) Event {
+	return Event{Type: EventRunAdmitted, RunID: m.runID, ChatID: m.chatID, Model: m.model, Recovered: recovered}
+}
+
+// newRunReplayed carries the existing terminal status as one of the typed
+// RunStatus values; other terminal classifications come through as plain
+// text in nothing — the typed field only holds known run statuses.
+func newRunReplayed(m eventMetadata, status string) Event {
+	ev := Event{Type: EventRunReplayed, RunID: m.runID, ChatID: m.chatID, Model: m.model, Replayed: true}
+	switch RunStatus(status) {
+	case RunStatusDone, RunStatusDenied, RunStatusCanceled:
+		ev.Status = RunStatus(status)
+	}
+	return ev
+}
+
+func newRunCommitted(m eventMetadata, seq int64) Event {
+	return Event{Type: EventRunCommitted, RunID: m.runID, ChatID: m.chatID, Model: m.model, CommittedSeq: seq}
+}
+
+func newApprovalRequested(m eventMetadata, approvalID string, calls []ApprovalToolCall) Event {
+	return Event{Type: EventApprovalRequested, RunID: m.runID, ChatID: m.chatID, Model: m.model, ApprovalID: approvalID, ApprovalCalls: calls}
+}
+
+func newApprovalDecided(m eventMetadata, approvalID, decision string) Event {
+	return Event{Type: EventApprovalDecided, RunID: m.runID, ChatID: m.chatID, Model: m.model, ApprovalID: approvalID, Content: decision}
+}
+
+// approvalDecisionStatus is the wire status of a persisted approval decision.
+func approvalDecisionStatus(approved, expired bool) string {
+	switch {
+	case expired:
+		return "expired"
+	case approved:
+		return "approved"
+	default:
+		return "denied"
+	}
 }
 
 func newBackgroundTasks(m eventMetadata, content string) Event {

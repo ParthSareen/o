@@ -15,6 +15,9 @@ type ToolContext struct {
 	// Tools that can return image data (e.g. read on an image file) should
 	// only attach it when set.
 	SupportsImages bool
+	// ToolCallID is the ID of the call being executed, set by the session.
+	// Composing tools use it as the parent correlation for nested calls.
+	ToolCallID string
 }
 type ToolResult struct {
 	Content    string
@@ -153,6 +156,16 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	}
 	tool, ok := r.tools[name]
 	return tool, ok
+}
+
+// VisitTools calls fn for each registered tool. Order is unspecified.
+func (r *Registry) VisitTools(fn func(Tool)) {
+	if r == nil {
+		return
+	}
+	for _, tool := range r.tools {
+		fn(tool)
+	}
 }
 
 func (r *Registry) Names() []string {

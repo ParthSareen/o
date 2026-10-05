@@ -9,6 +9,9 @@ import (
 )
 
 type ApprovalRequest struct {
+	// RunID is the run whose calls are being authorized, for correlated
+	// approval records in frontends that can answer prompts.
+	RunID      string
 	WorkingDir string
 	// Task is the most recent user message, giving auto review the context
 	// of what the agent was asked to do.
