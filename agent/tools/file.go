@@ -16,6 +16,7 @@ import (
 
 	"github.com/ParthSareen/o/agent"
 	"github.com/ParthSareen/o/api"
+	"github.com/pmezard/go-difflib/difflib"
 )
 
 const (
@@ -23,6 +24,13 @@ const (
 	// maxReadImageBytes caps image attachments, mirroring the 100MB limit the
 	// chat input path applies to pasted/dropped images (filedata.GetData).
 	maxReadImageBytes = 100 * 1024 * 1024
+	// editDiffMaxLines caps the unified diff appended to a successful edit
+	// result; whole middle hunks are elided beyond it.
+	editDiffMaxLines = 200
+	// editDiffMaxBytes skips the appended diff when either content version is
+	// too large to diff cheaply. The edit path already rejects files over
+	// maxReadBytes, so this guards the diff rendering itself.
+	editDiffMaxBytes = 1 << 20
 )
 
 type Read struct{}
@@ -315,7 +323,11 @@ func (e *Edit) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[
 		return agent.ToolResult{}, err
 	}
 
-	return agent.ToolResult{Content: fmt.Sprintf("Updated %s (%d edit%s, %d replacement%s).", path, len(edits), plural(len(edits)), replacements, plural(replacements))}, nil
+	message := fmt.Sprintf("Updated %s (%d edit%s, %d replacement%s).", path, len(edits), plural(len(edits)), replacements, plural(replacements))
+	if diff := editUnifiedDiff(path, content, updated); diff != "" {
+		message += "\n" + diff
+	}
+	return agent.ToolResult{Content: message}, nil
 }
 
 // editReplacement is one targeted replacement within an edit call.
@@ -425,6 +437,217 @@ func editAmbiguousError(path string, editIndex, totalEdits, occurrences int) err
 		return fmt.Errorf("old_text matched %d times in %s; set replace_all to true to replace every match", occurrences, path)
 	}
 	return fmt.Errorf("edits[%d].old_text matched %d times in %s; each edit must match exactly once, so provide more surrounding context", editIndex, occurrences, path)
+}
+
+// editUnifiedDiff renders a standard unified diff (--- a/<path>, +++ b/<path>,
+// @@ hunks, three context lines) from the original file content to the edited
+// content. It returns "" when there is nothing to append: identical content,
+// or content too large to diff.
+func editUnifiedDiff(path, original, updated string) string {
+	if len(original) > editDiffMaxBytes || len(updated) > editDiffMaxBytes {
+		return ""
+	}
+	text, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+		A:        diffLines(original),
+		B:        diffLines(updated),
+		FromFile: "a/" + path,
+		ToFile:   "b/" + path,
+		Context:  3,
+	})
+	if err != nil || text == "" {
+		return ""
+	}
+	return truncateUnifiedDiff(text, editDiffMaxLines)
+}
+
+// diffLines splits content into newline-terminated lines so every line the
+// diff prints ends with a newline. Unlike difflib.SplitLines it emits no
+// phantom trailing line for content that already ends with a newline.
+func diffLines(s string) []string {
+	lines := strings.SplitAfter(s, "\n")
+	if len(lines) == 0 {
+		return lines
+	}
+	if last := len(lines) - 1; lines[last] == "" {
+		return lines[:last]
+	} else if !strings.HasSuffix(lines[last], "\n") {
+		lines[last] += "\n"
+	}
+	return lines
+}
+
+// truncateUnifiedDiff caps a complete unified diff at maxLines. Whole middle
+// hunks are dropped behind a single elision line; when even the first hunk
+// does not fit, its opening lines are kept with the range header recomputed.
+func truncateUnifiedDiff(text string, maxLines int) string {
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	if len(lines) <= maxLines {
+		return text
+	}
+
+	header, hunks := unifiedDiffHunks(lines)
+	remaining := maxLines - 1 // reserve a line for the elision note
+	remaining -= len(header)
+
+	lead := 0
+	for lead < len(hunks) && len(hunks[lead]) <= remaining {
+		remaining -= len(hunks[lead])
+		lead++
+	}
+	tail := len(hunks)
+	for tail > lead && len(hunks[tail-1]) <= remaining {
+		remaining -= len(hunks[tail-1])
+		tail--
+	}
+
+	elided := 0
+	for _, hunk := range hunks[lead:tail] {
+		elided += len(hunk)
+	}
+	var trimmed []string
+	if lead == 0 && tail == len(hunks) {
+		// Not even the first hunk fits; keep its opening lines so some detail
+		// survives a single huge rewrite.
+		if candidate, ok := trimHunk(hunks[0], remaining); ok {
+			trimmed = candidate
+			elided -= len(trimmed)
+		}
+	}
+
+	var out strings.Builder
+	for _, line := range header {
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	for _, hunk := range hunks[:lead] {
+		for _, line := range hunk {
+			out.WriteString(line)
+			out.WriteByte('\n')
+		}
+	}
+	for _, line := range trimmed {
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	out.WriteString(fmt.Sprintf("... [%d diff lines elided] ...\n", elided))
+	for _, hunk := range hunks[tail:] {
+		for _, line := range hunk {
+			out.WriteString(line)
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
+}
+
+// unifiedDiffHunks splits unified diff lines into the ---/+++ file headers and
+// the hunks, with each hunk running from its @@ range line to the next.
+func unifiedDiffHunks(lines []string) (header []string, hunks [][]string) {
+	var hunk []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "@@ ") {
+			if hunk != nil {
+				hunks = append(hunks, hunk)
+			}
+			hunk = []string{line}
+			continue
+		}
+		if hunk != nil {
+			hunk = append(hunk, line)
+		} else {
+			header = append(header, line)
+		}
+	}
+	if hunk != nil {
+		hunks = append(hunks, hunk)
+	}
+	return header, hunks
+}
+
+// trimHunk keeps only the opening lineLimit lines of an oversized hunk
+// (counting its @@ range line), recomputing the range counts so the
+// shortened hunk stays parseable.
+func trimHunk(hunk []string, lineLimit int) ([]string, bool) {
+	if lineLimit <= 1 || len(hunk) <= lineLimit {
+		return nil, false
+	}
+	body := hunk[1:lineLimit]
+	oldShown, newShown := 0, 0
+	for _, line := range body {
+		switch line[0] {
+		case ' ':
+			oldShown++
+			newShown++
+		case '-':
+			oldShown++
+		case '+':
+			newShown++
+		}
+	}
+	header, ok := rewriteHunkRange(hunk[0], oldShown, newShown)
+	if !ok {
+		return nil, false
+	}
+	return append([]string{header}, body...), true
+}
+
+// rewriteHunkRange rebuilds a hunk header with new line counts. It accepts
+// headers difflib emits, including single-line ranges lacking a count such as
+// `@@ -5 +5,20 @@`, and drops any leading count for the trimmed range.
+func rewriteHunkRange(header string, oldCount, newCount int) (string, bool) {
+	rest, ok := strings.CutPrefix(header, "@@ -")
+	if !ok {
+		return "", false
+	}
+	var oldStart, newStart int
+	oldStart, rest, ok = parseHunkRange(rest)
+	if !ok {
+		return "", false
+	}
+	rest, ok = strings.CutPrefix(rest, " +")
+	if !ok {
+		return "", false
+	}
+	newStart, rest, ok = parseHunkRange(rest)
+	if !ok {
+		return "", false
+	}
+	if !strings.HasPrefix(rest, " @@") {
+		return "", false
+	}
+	return fmt.Sprintf("@@ -%d,%d +%d,%d @@", oldStart, oldCount, newStart, newCount), true
+}
+
+// parseHunkRange parses the leading <start>[,<count>] of a hunk range,
+// returning the start line and the remainder.
+func parseHunkRange(s string) (int, string, bool) {
+	start, rest, ok := scanInt(s)
+	if !ok {
+		return 0, s, false
+	}
+	if countPart, found := strings.CutPrefix(rest, ","); found {
+		_, next, ok := scanInt(countPart)
+		if !ok {
+			return 0, s, false
+		}
+		rest = next
+	}
+	return start, rest, true
+}
+
+// scanInt reads a leading non-negative integer, returning the remainder.
+func scanInt(s string) (int, string, bool) {
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, s, false
+	}
+	n, err := strconv.Atoi(s[:end])
+	if err != nil {
+		return 0, s, false
+	}
+	return n, s[end:], true
 }
 
 func cleanRelativePath(path string) (string, error) {

@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -32,6 +33,15 @@ func TestEditReplacesUniqueText(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "Updated note.txt") {
 		t.Fatalf("result = %q", result.Content)
+	}
+	// Single edits also append a unified diff of the change.
+	for _, want := range []string{
+		"Updated note.txt (1 edit, 1 replacement).\n--- a/note.txt\n+++ b/note.txt\n",
+		"@@ -1 +1 @@\n-hello world\n+hi world\n",
+	} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("result missing %q, got %q", want, result.Content)
+		}
 	}
 
 	content, err := os.ReadFile(path)
@@ -293,6 +303,229 @@ func TestEditRejectsNoChange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no changes") {
 		t.Fatalf("err = %v", err)
+	}
+	// The no-change path fails before any diff is built, so the error stays bare.
+	if strings.Contains(err.Error(), "--- a/") || strings.Contains(err.Error(), "diff lines elided") {
+		t.Fatalf("no-change error should not carry diff info: %v", err)
+	}
+}
+
+func TestEditAppendsUnifiedDiffForMultiEdit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("one\ntwo\nthree\nfour\nfive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&Edit{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path": "note.txt",
+		"edits": []any{
+			map[string]any{"old_text": "two", "new_text": "TWO"},
+			map[string]any{"old_text": "four", "new_text": "FOUR"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Updated note.txt (2 edits, 2 replacements).\n" +
+		"--- a/note.txt\n+++ b/note.txt\n" +
+		"@@ -1,5 +1,5 @@\n one\n-two\n+TWO\n three\n-four\n+FOUR\n five\n"
+	if result.Content != want {
+		t.Fatalf("result = %q", result.Content)
+	}
+}
+
+func TestEditAppendsUnifiedDiffForReplaceAll(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("aa bb aa\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&Edit{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path":        "note.txt",
+		"replace_all": true,
+		"edits": []any{
+			map[string]any{"old_text": "aa", "new_text": "xx"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Updated note.txt (1 edit, 2 replacements).\n" +
+		"--- a/note.txt\n+++ b/note.txt\n" +
+		"@@ -1 +1 @@\n-aa bb aa\n+xx bb xx\n"
+	if result.Content != want {
+		t.Fatalf("result = %q", result.Content)
+	}
+}
+
+// TestEditTruncatesLargeDiff builds three hunks around a giant middle hunk
+// and checks the result stays capped, keeping the outer hunks and eliding the
+// middle one behind a single note.
+func TestEditTruncatesLargeDiff(t *testing.T) {
+	dir := t.TempDir()
+
+	var content strings.Builder
+	content.WriteString("alpha\n")
+	for i := 0; i < 38; i++ {
+		fmt.Fprintf(&content, "fill-a-%02d\n", i)
+	}
+	content.WriteString("charlie\n")
+	for i := 0; i < 38; i++ {
+		fmt.Fprintf(&content, "fill-b-%02d\n", i)
+	}
+	content.WriteString("echo\n")
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&content, "fill-c-%02d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte(content.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bulk := strings.Repeat(strings.Repeat("x", 50)+"\n", 250)
+	updated := strings.Replace(content.String(), "alpha", "ALPHA", 1)
+	updated = strings.Replace(updated, "charlie", bulk, 1)
+	updated = strings.Replace(updated, "echo", "ECHO", 1)
+
+	result, err := (&Edit{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path": "note.txt",
+		"edits": []any{
+			map[string]any{"old_text": "alpha", "new_text": "ALPHA"},
+			map[string]any{"old_text": "charlie", "new_text": bulk},
+			map[string]any{"old_text": "echo", "new_text": "ECHO"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.Content, "Updated note.txt (3 edits, 3 replacements).\n--- a/note.txt\n+++ b/note.txt\n") {
+		t.Fatalf("missing message and diff header: %q", result.Content)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(result.Content, "\n"), "\n")
+	if len(lines) > 1+editDiffMaxLines {
+		t.Fatalf("result = %d lines, want at most %d", len(lines), 1+editDiffMaxLines)
+	}
+	if strings.Count(result.Content, "@@ -") != 2 {
+		t.Fatalf("expected 2 kept hunks, result = %q", result.Content)
+	}
+	for _, want := range []string{"-alpha\n+ALPHA\n", "-echo\n+ECHO\n"} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("missing kept hunk %q, result = %q", want, result.Content)
+		}
+	}
+	if strings.Contains(result.Content, strings.Repeat("x", 50)) {
+		t.Fatalf("middle hunk should be elided, result = %q", result.Content)
+	}
+
+	elided := -1
+	for _, line := range lines {
+		var n int
+		if _, err := fmt.Sscanf(line, "... [%d diff lines elided] ...", &n); err == nil {
+			elided = n
+		}
+	}
+	if elided <= 0 {
+		t.Fatalf("expected an elision note with a positive count, result = %q", result.Content)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "note.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != updated {
+		t.Fatal("file content does not match the edited version")
+	}
+}
+
+// TestEditTrimsOversizedSingleHunk covers a rewrite too large to keep even as
+// one hunk: its opening lines survive with the range header recomputed.
+func TestEditTrimsOversizedSingleHunk(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("alpha\ncharlie\ndelta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bulk := strings.Repeat("bulk\n", 500)
+	result, err := (&Edit{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path":     "note.txt",
+		"old_text": "charlie",
+		"new_text": bulk,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.Content, "Updated note.txt (1 edit, 1 replacement).\n") {
+		t.Fatalf("missing message: %q", result.Content)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(result.Content, "\n"), "\n")
+	if len(lines) > 1+editDiffMaxLines {
+		t.Fatalf("result = %d lines, want at most %d", len(lines), 1+editDiffMaxLines)
+	}
+	if !strings.Contains(result.Content, "... ") || !strings.Contains(result.Content, "diff lines elided") {
+		t.Fatalf("missing elision note, result = %q", result.Content)
+	}
+	if strings.Count(result.Content, "+bulk\n") == 0 {
+		t.Fatal("expected trimmed hunk to keep some added lines")
+	}
+
+	if !strings.HasPrefix(result.Content, "Updated note.txt (1 edit, 1 replacement).\n--- a/note.txt\n+++ b/note.txt\n") {
+		t.Fatalf("missing message and diff header, result = %q", result.Content)
+	}
+
+	// The trimmed hunk's range header must match the lines it shows.
+	header := lines[3]
+	var oldStart, oldCount, newStart, newCount int
+	if n, err := fmt.Sscanf(header, "@@ -%d,%d +%d,%d @@", &oldStart, &oldCount, &newStart, &newCount); err != nil || n != 4 {
+		t.Fatalf("hunk header %q does not list counts", header)
+	}
+	oldShown, newShown := 0, 0
+	for _, line := range lines[4:] { // body starts after message, ---/+++, and the @@ line
+		if strings.HasPrefix(line, "... ") {
+			break
+		}
+		switch line[0] {
+		case ' ':
+			oldShown++
+			newShown++
+		case '-':
+			oldShown++
+		case '+':
+			newShown++
+		}
+	}
+	if oldShown != oldCount || newShown != newCount {
+		t.Fatalf("hunk header %s does not match shown lines (old=%d new=%d)", header, oldShown, newShown)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "note.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The original line's trailing newline survives the replacement.
+	if string(got) != "alpha\n"+bulk+"\ndelta\n" {
+		t.Fatal("file content does not match the edited version")
+	}
+}
+
+func TestEditUnifiedDiff(t *testing.T) {
+	// Identical content yields no diff.
+	if diff := editUnifiedDiff("x.txt", "same\n", "same\n"); diff != "" {
+		t.Fatalf("diff = %q, want empty", diff)
+	}
+	// Content beyond the byte cap yields no diff on either side.
+	big := strings.Repeat("a", editDiffMaxBytes+1)
+	if diff := editUnifiedDiff("x.txt", big, "same\n"); diff != "" {
+		t.Fatalf("oversized original gave diff %q", diff)
+	}
+	if diff := editUnifiedDiff("x.txt", "same\n", big); diff != "" {
+		t.Fatalf("oversized updated gave diff %q", diff)
+	}
+
+	diff := editUnifiedDiff("x.txt", "one\ntwo\nthree\n", "one\nTWO\nthree\n")
+	want := "--- a/x.txt\n+++ b/x.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"
+	if diff != want {
+		t.Fatalf("diff = %q, want %q", diff, want)
 	}
 }
 
