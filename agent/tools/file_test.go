@@ -658,7 +658,7 @@ func TestReadDefaultsToEntireFile(t *testing.T) {
 	}
 }
 
-func TestReadAllowsAbsolutePath(t *testing.T) {
+func TestReadAllowsAbsolutePathInsideWorkingDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "note.txt")
 	content := "one\ntwo\nthree\n"
@@ -666,7 +666,7 @@ func TestReadAllowsAbsolutePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: t.TempDir()}, map[string]any{
+	result, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
 		"path": path,
 	})
 	if err != nil {
@@ -674,6 +674,106 @@ func TestReadAllowsAbsolutePath(t *testing.T) {
 	}
 	if result.Content != content {
 		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+func TestReadRejectsAbsolutePathOutsideWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(path, []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: t.TempDir()}, map[string]any{
+		"path": path,
+	})
+	if err == nil {
+		t.Fatal("expected absolute path outside the working directory to fail")
+	}
+	if !strings.Contains(err.Error(), "path escapes working directory") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReadAllowsAbsolutePathThroughSymlinkedWorkingDir(t *testing.T) {
+	realDir := t.TempDir()
+	path := filepath.Join(realDir, "note.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realDir, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	result, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: alias}, map[string]any{
+		"path": path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "hello\n" {
+		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+func TestReadRejectsAbsolutePathThroughParentSymlink(t *testing.T) {
+	workDir := t.TempDir()
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(workDir, "escape")
+	if err := os.Symlink(outsideDir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: workDir}, map[string]any{
+		"path": filepath.Join(link, "secret.txt"),
+	})
+	if err == nil {
+		t.Fatal("expected a path through an escaping symlink to fail")
+	}
+	if !strings.Contains(err.Error(), "path escapes working directory") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReadAllowsAbsolutePathWithInnerDotDot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path": filepath.Join(dir, "sub", "..", "note.txt"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "hello\n" {
+		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+func TestReadRejectsAbsoluteDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path": filepath.Join(dir, "sub"),
+	})
+	if err == nil {
+		t.Fatal("expected absolute directory to fail")
+	}
+	if !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -688,7 +788,7 @@ func TestReadRejectsAbsoluteSymlink(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: t.TempDir()}, map[string]any{
+	_, err := (&Read{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
 		"path": link,
 	})
 	if err == nil {
@@ -696,6 +796,28 @@ func TestReadRejectsAbsoluteSymlink(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("err = %v, want symlink rejection", err)
+	}
+}
+
+func TestEditRejectsAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(path, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&Edit{}).Execute(context.Background(), agent.ToolContext{WorkingDir: dir}, map[string]any{
+		"path": path,
+		"edits": []any{map[string]any{
+			"old_text": "hello",
+			"new_text": "goodbye",
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected edit to reject an absolute path")
+	}
+	if !strings.Contains(err.Error(), "absolute paths are not allowed") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

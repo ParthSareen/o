@@ -40,14 +40,14 @@ func (r *Read) Name() string {
 }
 
 func (r *Read) Description() string {
-	return "Read a text file from the current working directory. When the model supports images, image files (png, jpeg, webp) are returned as image data the model can see."
+	return "Read a text file. Relative paths resolve from the working directory; absolute paths are accepted only when they point inside it. When the model supports images, image files (png, jpeg, webp) are returned as image data the model can see."
 }
 
 func (r *Read) Schema() api.ToolFunction {
 	props := api.NewToolPropertiesMap()
 	props.Set("path", api.ToolProperty{
 		Type:        api.PropertyType{"string"},
-		Description: "Path to the file to read, relative to the working directory.",
+		Description: "Path to the file to read, relative to the working directory. Absolute paths inside the working directory are also accepted.",
 	})
 	props.Set("start", api.ToolProperty{
 		Type:        api.PropertyType{"integer"},
@@ -665,40 +665,51 @@ func cleanRelativePath(path string) (string, error) {
 	return cleaned, nil
 }
 
+// resolveWithinWorkingDir maps an absolute path to a path relative to the
+// canonical working directory, rejecting paths outside it. Relative paths are
+// returned after the existing escape checks.
+func resolveWithinWorkingDir(workingDir, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path parameter is required")
+	}
+	if !filepath.IsAbs(path) {
+		return cleanRelativePath(path)
+	}
+
+	root, err := workingDirAbs(workingDir)
+	if err != nil {
+		return "", err
+	}
+	cleaned := filepath.Clean(path)
+	parent, base := filepath.Dir(cleaned), filepath.Base(cleaned)
+	// Resolve the parent only: a symlink in the final component must stay
+	// visible so regularRootFileInfo can reject it.
+	canonicalParent, err := canonicalPath(parent)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, filepath.Join(canonicalParent, base))
+	if err != nil || filepath.IsAbs(rel) || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path escapes working directory")
+	}
+	return rel, nil
+}
+
+func resolveToolPath(workingDir, path string, allowAbsolute bool) (string, error) {
+	if !allowAbsolute {
+		return cleanRelativePath(path)
+	}
+	return resolveWithinWorkingDir(workingDir, path)
+}
+
 func openRegularFile(workingDir, path string, allowAbsolute bool) (*os.File, os.FileInfo, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, nil, fmt.Errorf("path parameter is required")
 	}
-	if allowAbsolute && filepath.IsAbs(path) {
-		cleaned := filepath.Clean(path)
-		info, err := os.Lstat(cleaned)
-		if err != nil {
-			return nil, nil, err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, nil, fmt.Errorf("%s is a symlink; read the target file directly", path)
-		}
-		if err := rejectNonRegularFile(path, info); err != nil {
-			return nil, nil, err
-		}
-		file, err := os.Open(cleaned)
-		if err != nil {
-			return nil, nil, err
-		}
-		info, err = file.Stat()
-		if err != nil {
-			file.Close()
-			return nil, nil, err
-		}
-		if err := rejectNonRegularFile(path, info); err != nil {
-			file.Close()
-			return nil, nil, err
-		}
-		return file, info, nil
-	}
-
-	rel, err := cleanRelativePath(path)
+	rel, err := resolveToolPath(workingDir, path, allowAbsolute)
 	if err != nil {
 		return nil, nil, err
 	}

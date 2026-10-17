@@ -110,6 +110,47 @@ func TestAutoReviewerStaticTierSkipsModel(t *testing.T) {
 	}
 }
 
+func TestAutoReviewStaticallySafe(t *testing.T) {
+	tests := []struct {
+		name string
+		req  ApprovalRequest
+		want bool
+	}{
+		{
+			name: "relative read",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "read", Args: map[string]any{"path": "main.go"}}}},
+			want: true,
+		},
+		{
+			name: "absolute read is graded",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "read", Args: map[string]any{"path": "/etc/passwd"}}}},
+			want: false,
+		},
+		{
+			name: "safe bash",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "git status && ls src"}}}},
+			want: true,
+		},
+		{
+			name: "unsafe bash",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "rm -rf build"}}}},
+			want: false,
+		},
+		{
+			name: "unknown tool",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "edit", Args: map[string]any{"path": "main.go"}}}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := autoReviewStaticallySafe(tt.req); got != tt.want {
+				t.Fatalf("autoReviewStaticallySafe() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAutoReviewerGradesWithModel(t *testing.T) {
 	client := &fakeClient{responses: [][]api.ChatResponse{
 		{decisionResponse("deny", "high", "force push rewrites shared history")},
