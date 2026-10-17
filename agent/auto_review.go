@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ParthSareen/o/api"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -449,116 +450,266 @@ func autoReviewStaticallySafe(req ApprovalRequest) bool {
 
 // readOnlyBashBinaries are commands with no write or execute side effects.
 var readOnlyBashBinaries = map[string]bool{
-	"cat": true, "cd": true, "diff": true, "du": true, "echo": true,
-	"file": true, "find": true, "grep": true, "head": true, "ls": true,
-	"pwd": true, "rg": true, "stat": true, "tail": true, "wc": true,
-	"which": true,
+	"cat": true, "du": true, "echo": true, "grep": true, "head": true,
+	"ls": true, "pwd": true, "stat": true, "wc": true, "which": true,
 }
 
-// readOnlyGitSubcommands are git invocations that only read.
-var readOnlyGitSubcommands = map[string]bool{
-	"diff": true, "log": true, "show": true, "status": true,
-}
-
-// findWriteFlags make find mutate or execute, disqualifying it from the
+// findUnsafeFlags make find mutate or execute, disqualifying it from the
 // static tier.
-var findWriteFlags = map[string]bool{
-	"-delete": true, "-exec": true, "-execdir": true, "-fprint": true,
-	"-fprintf": true, "-ok": true, "-okdir": true,
+var findUnsafeFlags = map[string]bool{
+	"-delete": true, "-exec": true, "-execdir": true, "-ok": true,
+	"-okdir": true, "-fprint": true, "-fprint0": true, "-fprintf": true,
+	"-fls": true, "-files0-from": true,
 }
 
 // bashCommandReadOnly reports whether the command is provably read-only:
-// only allowlisted read-only binaries over relative paths, with no
-// redirections, substitutions, backgrounding, or absolute paths. Commands
-// that fail any check are simply graded by the reviewer instead.
+// only allowlisted read-only binaries over literal, relative arguments, with
+// no redirections, substitutions, assignments, or other shell constructs.
+// Anything uncertain is graded by the reviewer instead.
 func bashCommandReadOnly(command string) bool {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false
 	}
-	if strings.ContainsAny(command, "`><") || strings.Contains(command, "$(") {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).
+		Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) == 0 {
 		return false
 	}
-	for _, part := range strings.Split(command, "&&") {
-		for _, alt := range strings.Split(part, "||") {
-			if strings.Contains(alt, "&") {
+	safe := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil || !safe {
+			return false
+		}
+		switch n := node.(type) {
+		case *syntax.Redirect, *syntax.Assign, *syntax.ParamExp, *syntax.CmdSubst,
+			*syntax.ProcSubst, *syntax.ArithmExp, *syntax.ArithmCmd, *syntax.ExtGlob,
+			*syntax.Subshell, *syntax.Block, *syntax.IfClause, *syntax.ForClause,
+			*syntax.WhileClause, *syntax.CaseClause, *syntax.FuncDecl,
+			*syntax.TestClause, *syntax.TestDecl, *syntax.DeclClause,
+			*syntax.LetClause, *syntax.TimeClause, *syntax.CoprocClause:
+			safe = false
+		case *syntax.Stmt:
+			if n.Negated || n.Background || n.Coprocess || n.Disown {
+				safe = false
+			}
+		case *syntax.BinaryCmd:
+			if n.Op != syntax.AndStmt && n.Op != syntax.OrStmt && n.Op != syntax.Pipe {
+				safe = false
+			}
+		case *syntax.CallExpr:
+			if !bashCallReadOnly(n) {
+				safe = false
+			}
+		}
+		return safe
+	})
+	return safe
+}
+
+func bashCallReadOnly(call *syntax.CallExpr) bool {
+	if call == nil || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return false
+	}
+	name, ok := literalWord(call.Args[0])
+	if !ok || !validReadOnlyBinaryName(name) {
+		return false
+	}
+	args := make([]string, 0, len(call.Args)-1)
+	for _, word := range call.Args[1:] {
+		arg, ok := literalWord(word)
+		if !ok || !bashPathArgSafe(arg) {
+			return false
+		}
+		args = append(args, arg)
+	}
+	switch name {
+	case "cd":
+		return len(args) == 1 && !strings.HasPrefix(args[0], "-")
+	case "git":
+		return gitArgsReadOnly(args)
+	case "find":
+		for _, arg := range args {
+			flag, _, _ := strings.Cut(arg, "=")
+			if findUnsafeFlags[flag] {
 				return false
 			}
-			for _, statement := range splitBashStatements(alt) {
-				for _, segment := range strings.Split(statement, "|") {
-					if strings.TrimSpace(segment) == "" {
-						continue
-					}
-					if !bashSegmentReadOnly(segment) {
-						return false
-					}
-				}
+		}
+		return true
+	case "rg":
+		for _, arg := range args {
+			if rgUnsafeFlag(arg) {
+				return false
 			}
 		}
-	}
-	return true
-}
-
-func splitBashStatements(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool { return r == ';' || r == '\n' })
-}
-
-// bashSegmentReadOnly checks one pipe-free command segment. Env assignments
-// may prefix the binary; every argument must avoid variable expansion, home
-// shortcuts, and absolute paths.
-func bashSegmentReadOnly(segment string) bool {
-	fields := strings.Fields(segment)
-	i := 0
-	for i < len(fields) && isEnvAssignment(fields[i]) {
-		i++
-	}
-	if i >= len(fields) {
-		return false
-	}
-	rest := fields[i:]
-	binary := rest[0]
-	if strings.ContainsAny(segment, "$~") {
-		return false
-	}
-	for _, field := range rest {
-		if strings.HasPrefix(field, "/") {
-			return false
+		return true
+	case "file":
+		for _, arg := range args {
+			if fileUnsafeFlag(arg) {
+				return false
+			}
 		}
-	}
-	switch binary {
-	case "git":
-		if len(rest) < 2 {
-			return false
+		return true
+	case "tail":
+		for _, arg := range args {
+			if tailUnsafeFlag(arg) {
+				return false
+			}
 		}
-		return readOnlyGitSubcommands[rest[1]]
-	case "find":
-		for _, field := range rest[1:] {
-			if findWriteFlags[field] {
+		return true
+	case "diff":
+		for _, arg := range args {
+			if diffUnsafeFlag(arg) {
 				return false
 			}
 		}
 		return true
 	default:
-		return readOnlyBashBinaries[binary]
+		return readOnlyBashBinaries[name]
 	}
 }
 
-func isEnvAssignment(field string) bool {
-	name, _, ok := strings.Cut(field, "=")
-	return ok && name != "" && isEnvName(name)
+// literalWord returns an argument only when it has no expansion or glob
+// syntax. Brace expansion and globbing happen at runtime without an AST node,
+// and the lexer keeps backslashes verbatim, so both are rejected textually.
+func literalWord(word *syntax.Word) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	var b strings.Builder
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(p.Value, "\\{}*?[") {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			if p.Dollar {
+				return "", false
+			}
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			if p.Dollar {
+				return "", false
+			}
+			for _, inner := range p.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok || strings.ContainsRune(lit.Value, '\\') {
+					return "", false
+				}
+				b.WriteString(lit.Value)
+			}
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
 }
 
-func isEnvName(s string) bool {
-	for i, r := range s {
-		if i == 0 {
-			if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
-				return false
-			}
-			continue
-		}
-		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+func validReadOnlyBinaryName(name string) bool {
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, "-") {
+		return false
+	}
+	return !strings.ContainsAny(name, "/\\*?[]{}~\t\n\r ") && !strings.Contains(name, "..")
+}
+
+// bashPathArgSafe rejects arguments that can name a path outside the working
+// directory, including paths hidden after an option's '='.
+func bashPathArgSafe(arg string) bool {
+	value := arg
+	if _, after, ok := strings.Cut(arg, "="); ok {
+		value = after
+	}
+	if value == "" {
+		return true
+	}
+	if filepath.IsAbs(value) || filepath.VolumeName(value) != "" ||
+		strings.HasPrefix(value, "~") {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == ".." {
 			return false
 		}
 	}
 	return true
+}
+
+func shortClusterHas(arg string, flag rune) bool {
+	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || arg == "-" {
+		return false
+	}
+	return strings.ContainsRune(arg[1:], flag)
+}
+
+func rgUnsafeFlag(arg string) bool {
+	flag, _, _ := strings.Cut(arg, "=")
+	return flag == "--pre" || flag == "--pre-glob" || flag == "--search-zip" ||
+		shortClusterHas(arg, 'z')
+}
+
+func fileUnsafeFlag(arg string) bool {
+	return arg == "--compile" || shortClusterHas(arg, 'C')
+}
+
+func tailUnsafeFlag(arg string) bool {
+	return strings.HasPrefix(arg, "--follow") || strings.HasPrefix(arg, "--pid") ||
+		arg == "--retry" || shortClusterHas(arg, 'f') || shortClusterHas(arg, 'F')
+}
+
+func diffUnsafeFlag(arg string) bool {
+	return arg == "--paginate" || shortClusterHas(arg, 'l')
+}
+
+func gitArgsReadOnly(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "status", "rev-parse":
+		return true
+	case "branch":
+		return gitBranchArgsReadOnly(args[1:])
+	default:
+		return false
+	}
+}
+
+func gitBranchArgsReadOnly(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" || !strings.HasPrefix(arg, "-") {
+			return false
+		}
+		if strings.HasPrefix(arg, "--") {
+			if !gitBranchLongFlagReadOnly(arg) {
+				return false
+			}
+			continue
+		}
+		for _, r := range arg[1:] {
+			switch r {
+			case 'a', 'r', 'v', 'l':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func gitBranchLongFlagReadOnly(arg string) bool {
+	flag, _, _ := strings.Cut(arg, "=")
+	switch flag {
+	case "--list", "--all", "--remotes", "--verbose", "--show-current",
+		"--no-color", "--no-column", "--no-abbrev", "--omit-empty",
+		"--ignore-case", "--no-ignore-case", "--contains", "--no-contains",
+		"--merged", "--no-merged", "--points-at", "--sort", "--format",
+		"--color", "--column", "--abbrev":
+		return true
+	default:
+		return false
+	}
 }
