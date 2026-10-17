@@ -46,6 +46,15 @@ type namedApprovalTestTool struct {
 	name string
 }
 
+type contextScopedApprovalTestTool struct {
+	namedApprovalTestTool
+}
+
+func (t contextScopedApprovalTestTool) ApprovalScopeIn(args map[string]any, workingDir string) string {
+	command, _ := args["command"].(string)
+	return t.name + "\x00" + workingDir + "\x00" + strings.TrimSpace(command)
+}
+
 type cwdTestTool struct{}
 
 type largeTool struct{}
@@ -2190,7 +2199,7 @@ func TestSessionAllowShellApprovalScopesToExactCommand(t *testing.T) {
 	registry.Register(namedApprovalTestTool{name: "bash"})
 	prompter := &recordingApprovalPrompter{
 		results: []Approval{
-			{AllowScopes: []string{toolApprovalScope(namedApprovalTestTool{name: "bash"}, "bash", map[string]any{"command": "pwd"})}},
+			{AllowScopes: []string{toolApprovalScope(namedApprovalTestTool{name: "bash"}, "bash", map[string]any{"command": "pwd"}, "")}},
 			{Allow: true},
 		},
 	}
@@ -2222,6 +2231,61 @@ func TestSessionAllowShellApprovalScopesToExactCommand(t *testing.T) {
 	}
 	if got := prompter.requests[1].Calls[0].ApprovalScope; got != "bash\x00ls" {
 		t.Fatalf("second approval scope = %q, want ls command scope", got)
+	}
+}
+
+func TestSessionApprovalScopeIncludesWorkingDir(t *testing.T) {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("command", "pwd")
+	toolCall := func(id string) api.Message {
+		return api.Message{Role: "assistant", ToolCalls: []api.ToolCall{{
+			ID:       id,
+			Function: api.ToolCallFunction{Name: "bash", Arguments: args},
+		}}}
+	}
+	done := api.Message{Role: "assistant", Content: "done"}
+	client := &fakeClient{responses: [][]api.ChatResponse{
+		{{Message: toolCall("call-1")}}, {{Message: done}},
+		{{Message: toolCall("call-2")}}, {{Message: done}},
+		{{Message: toolCall("call-3")}}, {{Message: done}},
+	}}
+	registry := &Registry{}
+	registry.Register(contextScopedApprovalTestTool{namedApprovalTestTool{name: "bash"}})
+	prompter := &recordingApprovalPrompter{results: []Approval{
+		{AllowScopes: []string{"bash\x00/one\x00pwd"}},
+		{Allow: true},
+	}}
+	session := &Session{
+		Client:           client,
+		Tools:            registry,
+		ApprovalPrompter: prompter,
+		WorkingDir:       "/one",
+	}
+
+	for range 2 {
+		if _, err := session.Run(context.Background(), RunOptions{
+			Model:       "model",
+			NewMessages: []api.Message{{Role: "user", Content: "check the directory"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(prompter.requests) != 1 {
+		t.Fatalf("approval prompts = %d, want 1", len(prompter.requests))
+	}
+
+	session.WorkingDir = "/two"
+	if _, err := session.Run(context.Background(), RunOptions{
+		Model:       "model",
+		NewMessages: []api.Message{{Role: "user", Content: "check the directory again"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompter.requests) != 2 {
+		t.Fatalf("approval prompts = %d, want a re-prompt after the directory change", len(prompter.requests))
+	}
+	if got := prompter.requests[1].Calls[0].ApprovalScope; got != "bash\x00/two\x00pwd" {
+		t.Fatalf("second approval scope = %q, want the /two scope", got)
 	}
 }
 

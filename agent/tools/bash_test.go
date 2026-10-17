@@ -256,3 +256,18 @@ func TestNormalizeBashWorkingDirWindowsDriveLetter(t *testing.T) {
 		t.Fatalf("working dir = %q, want %q", got, want)
 	}
 }
+
+func TestBashApprovalScopeInIncludesWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	root, err := workingDirAbs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash := &Bash{}
+	if got, want := bash.ApprovalScopeIn(map[string]any{"command": " pwd "}, dir), "bash\x00"+root+"\x00pwd"; got != want {
+		t.Fatalf("scope = %q, want %q", got, want)
+	}
+	if got, want := bash.ApprovalScopeIn(map[string]any{}, dir), "bash"; got != want {
+		t.Fatalf("empty command scope = %q, want %q", got, want)
+	}
+}

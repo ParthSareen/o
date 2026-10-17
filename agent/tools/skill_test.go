@@ -72,7 +72,7 @@ func TestModelSkillLoadRequiresApproval(t *testing.T) {
 					t.Fatalf("approval prompts = %d, want %d", got, tt.wantPrompts)
 				}
 				request := prompter.requests[0]
-				if len(request.Calls) != 1 || request.Calls[0].ToolName != "skill" || request.Calls[0].ApprovalScope != "skill" || request.Calls[0].Args["name"] != "release-notes" {
+				if len(request.Calls) != 1 || request.Calls[0].ToolName != "skill" || request.Calls[0].ApprovalScope != "skill\x00release-notes" || request.Calls[0].Args["name"] != "release-notes" {
 					t.Fatalf("approval request = %#v", request)
 				}
 			}

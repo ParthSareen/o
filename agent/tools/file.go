@@ -72,6 +72,11 @@ func (r *Read) RequiresApproval(map[string]any) bool {
 	return true
 }
 
+func (r *Read) ApprovalScopeIn(args map[string]any, workingDir string) string {
+	path, _ := args["path"].(string)
+	return fileApprovalScope(r.Name(), workingDir, path, true)
+}
+
 func (r *Read) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
 	// TODO: use shared agent.RequiredStringArg / agent.OptionalIntArg for args (see agent package cleanup plan).
 	path, ok := args["path"].(string)
@@ -222,6 +227,11 @@ func (e *Edit) Schema() api.ToolFunction {
 
 func (e *Edit) RequiresApproval(map[string]any) bool {
 	return true
+}
+
+func (e *Edit) ApprovalScopeIn(args map[string]any, workingDir string) string {
+	path, _ := args["path"].(string)
+	return fileApprovalScope(e.Name(), workingDir, path, false)
 }
 
 func (e *Edit) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
@@ -702,6 +712,24 @@ func resolveToolPath(workingDir, path string, allowAbsolute bool) (string, error
 		return cleanRelativePath(path)
 	}
 	return resolveWithinWorkingDir(workingDir, path)
+}
+
+// fileApprovalScope keys approval to the resolved target path, so "always
+// allow" on one file does not grant access to the rest of the tree.
+func fileApprovalScope(toolName, workingDir, path string, allowAbsolute bool) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return toolName
+	}
+	root, err := workingDirAbs(workingDir)
+	if err != nil {
+		return toolName + "\x00" + strings.TrimSpace(workingDir) + "\x00" + path
+	}
+	rel, err := resolveToolPath(workingDir, path, allowAbsolute)
+	if err != nil {
+		return toolName + "\x00" + root + "\x00" + path
+	}
+	return toolName + "\x00" + filepath.Join(root, rel)
 }
 
 func openRegularFile(workingDir, path string, allowAbsolute bool) (*os.File, os.FileInfo, error) {

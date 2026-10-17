@@ -821,6 +821,48 @@ func TestEditRejectsAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestFileApprovalScopesUseResolvedTargets(t *testing.T) {
+	dir := t.TempDir()
+	root, err := workingDirAbs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := &Read{}
+	edit := &Edit{}
+	target := "read\x00" + filepath.Join(root, "notes.txt")
+
+	if got := read.ApprovalScopeIn(map[string]any{"path": "notes.txt"}, dir); got != target {
+		t.Fatalf("relative read scope = %q, want %q", got, target)
+	}
+	if got := read.ApprovalScopeIn(map[string]any{"path": filepath.Join(root, "notes.txt")}, dir); got != target {
+		t.Fatalf("absolute read scope = %q, want the same scope as the relative read", got)
+	}
+	if got := read.ApprovalScopeIn(map[string]any{"path": "other.txt"}, dir); got == target {
+		t.Fatalf("scopes collapsed across paths: %q", got)
+	}
+	if got, want := edit.ApprovalScopeIn(map[string]any{"path": "notes.txt"}, dir), "edit\x00"+filepath.Join(root, "notes.txt"); got != want {
+		t.Fatalf("edit scope = %q, want %q", got, want)
+	}
+	if got := edit.ApprovalScopeIn(map[string]any{"path": filepath.Join(root, "notes.txt")}, dir); got == edit.ApprovalScopeIn(map[string]any{"path": "notes.txt"}, dir) {
+		t.Fatalf("absolute edit path collapsed into the relative scope: %q", got)
+	}
+
+	escapeA := read.ApprovalScopeIn(map[string]any{"path": "../a"}, dir)
+	escapeB := read.ApprovalScopeIn(map[string]any{"path": "../b"}, dir)
+	if escapeA == escapeB {
+		t.Fatalf("escaping paths collapsed to the same scope: %q", escapeA)
+	}
+	if want := "read\x00" + root + "\x00../a"; escapeA != want {
+		t.Fatalf("escaping scope = %q, want %q", escapeA, want)
+	}
+	if got := read.ApprovalScopeIn(map[string]any{}, dir); got != "read" {
+		t.Fatalf("empty path scope = %q, want read", got)
+	}
+	if got := edit.ApprovalScopeIn(map[string]any{}, dir); got != "edit" {
+		t.Fatalf("empty path scope = %q, want edit", got)
+	}
+}
+
 func TestReadStartEnd(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("one\ntwo\nthree\nfour\n"), 0o644); err != nil {

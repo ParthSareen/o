@@ -45,6 +45,12 @@ type ScopedTool interface {
 	ApprovalScope(args map[string]any) string
 }
 
+// ContextScopedTool optionally narrows the approval scope with the tool's
+// execution context. toolApprovalScope prefers it over ScopedTool.
+type ContextScopedTool interface {
+	ApprovalScopeIn(args map[string]any, workingDir string) string
+}
+
 type Registry struct {
 	tools map[string]Tool
 	// Background surfaces completions from background tool work (e.g.

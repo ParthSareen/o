@@ -488,6 +488,17 @@ func (p *Poll) ApprovalScope(args map[string]any) string {
 	return p.Name() + "\x00" + strings.TrimSpace(interval) + "\x00" + strings.TrimSpace(command)
 }
 
+// ApprovalScopeIn also keys on the canonical working directory.
+func (p *Poll) ApprovalScopeIn(args map[string]any, workingDir string) string {
+	command, _ := args["command"].(string)
+	interval, _ := args["interval"].(string)
+	wd, err := workingDirAbs(workingDir)
+	if err != nil {
+		wd = strings.TrimSpace(workingDir)
+	}
+	return p.Name() + "\x00" + wd + "\x00" + strings.TrimSpace(interval) + "\x00" + strings.TrimSpace(command)
+}
+
 func (p *Poll) Execute(_ context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
 	action, _ := args["action"].(string)
 	action = strings.ToLower(strings.TrimSpace(action))
