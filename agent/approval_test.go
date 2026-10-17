@@ -36,6 +36,13 @@ func TestToolApprovalScopeUsesScopedTool(t *testing.T) {
 		},
 	}
 	plainTool := mockTool{name: "edit"}
+	contextTool := mockContextScopedTool{
+		mockScopedTool: shellTool,
+		scopeIn: func(args map[string]any, workingDir string) string {
+			cmd, _ := args["command"].(string)
+			return "bash\x00" + workingDir + "\x00" + strings.TrimSpace(cmd)
+		},
+	}
 
 	tests := []struct {
 		tool Tool
@@ -45,10 +52,11 @@ func TestToolApprovalScopeUsesScopedTool(t *testing.T) {
 	}{
 		{shellTool, "bash", map[string]any{"command": " pwd "}, "bash\x00pwd"},
 		{shellTool, "bash", map[string]any{"command": "Get-ChildItem"}, "bash\x00Get-ChildItem"},
+		{contextTool, "bash", map[string]any{"command": " pwd "}, "bash\x00/work\x00pwd"},
 		{plainTool, "edit", map[string]any{"path": "README.md"}, "edit"},
 	}
 	for _, tt := range tests {
-		if got := toolApprovalScope(tt.tool, tt.name, tt.args); got != tt.want {
+		if got := toolApprovalScope(tt.tool, tt.name, tt.args, "/work"); got != tt.want {
 			t.Fatalf("toolApprovalScope(%q) = %q, want %q", tt.name, got, tt.want)
 		}
 	}
@@ -61,6 +69,15 @@ type mockScopedTool struct {
 
 func (m mockScopedTool) ApprovalScope(args map[string]any) string {
 	return m.scope(args)
+}
+
+type mockContextScopedTool struct {
+	mockScopedTool
+	scopeIn func(args map[string]any, workingDir string) string
+}
+
+func (m mockContextScopedTool) ApprovalScopeIn(args map[string]any, workingDir string) string {
+	return m.scopeIn(args, workingDir)
 }
 
 func TestSessionApplyApprovalScopes(t *testing.T) {

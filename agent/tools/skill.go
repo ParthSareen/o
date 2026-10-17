@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/ParthSareen/o/agent"
 	"github.com/ParthSareen/o/api"
@@ -27,6 +28,15 @@ func (t *Skill) Schema() api.ToolFunction {
 }
 
 func (t *Skill) RequiresApproval(map[string]any) bool { return true }
+
+func (t *Skill) ApprovalScopeIn(args map[string]any, _ string) string {
+	if name, ok := args["name"].(string); ok {
+		if name = strings.TrimSpace(name); name != "" {
+			return t.Name() + "\x00" + name
+		}
+	}
+	return t.Name()
+}
 
 func (t *Skill) Execute(_ context.Context, _ agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
 	name, ok := args["name"].(string)

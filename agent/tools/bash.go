@@ -83,6 +83,22 @@ func (b *Bash) ApprovalScope(args map[string]any) string {
 	return name
 }
 
+// ApprovalScopeIn also keys on the canonical working directory, so a grant
+// made in one directory does not carry over after a cd elsewhere.
+func (b *Bash) ApprovalScopeIn(args map[string]any, workingDir string) string {
+	name := b.Name()
+	command, _ := args["command"].(string)
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return name
+	}
+	wd, err := workingDirAbs(workingDir)
+	if err != nil {
+		wd = strings.TrimSpace(workingDir)
+	}
+	return name + "\x00" + wd + "\x00" + command
+}
+
 func (b *Bash) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
 	// TODO: use shared agent.RequiredStringArg for the "command" parameter (see agent package cleanup plan).
 	command, ok := args["command"].(string)

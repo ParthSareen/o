@@ -219,8 +219,8 @@ func latestUserMessageContent(messages []api.Message) string {
 	return ""
 }
 
-func (s *Session) needsApproval(tool Tool, name string, args map[string]any) bool {
-	return ToolRequiresApproval(tool, args) && !s.allows(toolApprovalScope(tool, name, args))
+func (s *Session) needsApproval(tool Tool, name string, args map[string]any, workingDir string) bool {
+	return ToolRequiresApproval(tool, args) && !s.allows(toolApprovalScope(tool, name, args, workingDir))
 }
 
 // allows reports whether scope is permitted by the session's accumulated approval state.
@@ -264,10 +264,14 @@ func (s *Session) authorizeToolCalls(ctx context.Context, req ApprovalRequest) (
 }
 
 // toolApprovalScope returns the approval scope key for a tool invocation.
-// If the tool implements ScopedTool, its ApprovalScope method determines the
-// scope (e.g. shell tools scope to "<tool>\x00<command>"). Otherwise the scope
-// is the trimmed tool name.
-func toolApprovalScope(tool Tool, toolName string, args map[string]any) string {
+// If the tool implements ContextScopedTool, its ApprovalScopeIn method
+// determines the scope (e.g. shell tools scope to
+// "<tool>\x00<working dir>\x00<command>"). Otherwise ScopedTool is used, and
+// the fallback is the trimmed tool name.
+func toolApprovalScope(tool Tool, toolName string, args map[string]any, workingDir string) string {
+	if scoped, ok := tool.(ContextScopedTool); ok {
+		return scoped.ApprovalScopeIn(args, workingDir)
+	}
 	if scoped, ok := tool.(ScopedTool); ok {
 		return scoped.ApprovalScope(args)
 	}

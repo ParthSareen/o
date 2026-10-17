@@ -858,8 +858,8 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			args:       args,
 			workingDir: batchWorkingDir,
 		})
-		if ok && s.needsApproval(tool, toolName, args) {
-			approvalReq.AddToolCall(call.ID, toolName, toolApprovalScope(tool, toolName, args), args)
+		if ok && s.needsApproval(tool, toolName, args, batchWorkingDir) {
+			approvalReq.AddToolCall(call.ID, toolName, toolApprovalScope(tool, toolName, args, batchWorkingDir), args)
 		}
 	}
 
@@ -1595,12 +1595,13 @@ func (s *Session) executeNestedToolCall(ctx context.Context, config nestedRunIDs
 			return ToolResult{}, errors.New(reason)
 		}
 	}
-	if s.needsApproval(tool, toolName, args) {
-		req := ApprovalRequest{RunID: config.runID, WorkingDir: s.currentWorkingDir(), Calls: []ApprovalToolCall{{
+	workingDir := s.currentWorkingDir()
+	if s.needsApproval(tool, toolName, args, workingDir) {
+		req := ApprovalRequest{RunID: config.runID, WorkingDir: workingDir, Calls: []ApprovalToolCall{{
 			ToolCallID:    callID,
 			ToolName:      toolName,
 			Args:          args,
-			ApprovalScope: toolApprovalScope(tool, toolName, args),
+			ApprovalScope: toolApprovalScope(tool, toolName, args, workingDir),
 		}}}
 		result, err := s.authorizeToolCalls(ctx, req)
 		if err != nil {
@@ -1622,8 +1623,8 @@ func (s *Session) executeNestedToolCall(ctx context.Context, config nestedRunIDs
 			return ToolResult{}, errors.New(reason)
 		}
 	}
-	_ = s.emit(newToolStarted(meta, callID, toolName, s.currentWorkingDir(), args))
-	result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: s.currentWorkingDir(), SupportsImages: s.SupportsImages, ToolCallID: callID}, api.ToolCall{
+	_ = s.emit(newToolStarted(meta, callID, toolName, workingDir, args))
+	result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: workingDir, SupportsImages: s.SupportsImages, ToolCallID: callID}, api.ToolCall{
 		ID: callID,
 		Function: api.ToolCallFunction{
 			Name:      toolName,

@@ -275,6 +275,19 @@ func TestPollApprovalOnlyForStart(t *testing.T) {
 	}
 }
 
+func TestPollApprovalScopeInIncludesWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	root, err := workingDirAbs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := &Poll{}
+	got := poll.ApprovalScopeIn(map[string]any{"command": " gh ci ", "interval": " 5m "}, dir)
+	if want := "poll\x00" + root + "\x005m\x00gh ci"; got != want {
+		t.Fatalf("scope = %q, want %q", got, want)
+	}
+}
+
 func TestPollDrainCoalescesAndReportsOncePerPublication(t *testing.T) {
 	manager := NewBackgroundManager()
 	t.Cleanup(func() { _ = manager.Close() })
