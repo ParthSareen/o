@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -428,8 +429,12 @@ func autoReviewStaticallySafe(req ApprovalRequest) bool {
 	for _, call := range req.Calls {
 		switch strings.TrimSpace(call.ToolName) {
 		case "read":
-			// The read tool confines paths to the working directory and
-			// rejects symlinks pointing outside it.
+			// Relative reads are confined by the tool. Grade absolute paths
+			// rather than trusting the tool's resolver here.
+			path, _ := call.Args["path"].(string)
+			if filepath.IsAbs(strings.TrimSpace(path)) {
+				return false
+			}
 		case "bash":
 			command, _ := call.Args["command"].(string)
 			if !bashCommandReadOnly(command) {
