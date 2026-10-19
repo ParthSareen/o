@@ -558,9 +558,25 @@ type Metrics struct {
 	TotalDuration      time.Duration `json:"total_duration,omitempty"`
 	LoadDuration       time.Duration `json:"load_duration,omitempty"`
 	PromptEvalCount    int           `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration time.Duration `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int           `json:"eval_count,omitempty"`
-	EvalDuration       time.Duration `json:"eval_duration,omitempty"`
+	// PromptEvalCachedCount is the number of prompt tokens served from the
+	// KV cache instead of being evaluated (Ollama >= the release that
+	// carried #16428). Nil means the server did not report it: older local
+	// servers and Ollama Cloud leave it unset. When set, prompt_eval_count
+	// carries the full prompt (cached plus newly evaluated).
+	PromptEvalCachedCount *int          `json:"prompt_eval_cached_count,omitempty"`
+	PromptEvalDuration    time.Duration `json:"prompt_eval_duration,omitempty"`
+	EvalCount             int           `json:"eval_count,omitempty"`
+	EvalDuration          time.Duration `json:"eval_duration,omitempty"`
+}
+
+// CachedPromptTokens reports the cached prompt token count and whether the
+// server reported a value at all. Older local servers and Ollama Cloud do
+// not report it.
+func (m Metrics) CachedPromptTokens() (int, bool) {
+	if m.PromptEvalCachedCount == nil {
+		return 0, false
+	}
+	return max(0, *m.PromptEvalCachedCount), true
 }
 
 // Options specified in [GenerateRequest].  If you add a new option here, also

@@ -146,6 +146,10 @@ type chatModel struct {
 	compactingTokens         int
 	contextTokens            int
 	contextEstimate          bool
+	// lastTurnMetrics carries the most recent chat POST's usage from
+	// metrics events: input (full prompt) tokens, output tokens, and the
+	// cached portion of the input when the server reported it.
+	lastTurnMetrics *api.Metrics
 	modelPicker              *chatModelPicker
 	sessionPicker            *chatModelPicker
 	modelPickerModels        []ModelOption
@@ -1199,6 +1203,7 @@ func (m *chatModel) resetChat(status string) (tea.Model, tea.Cmd) {
 	m.thinkingTokens = 0
 	m.contextTokens = 0
 	m.contextEstimate = true
+	m.lastTurnMetrics = nil
 	m.scroll = 0
 	m.flowPrintedLines = 0
 	// A new chat starts unnamed even if the launcher passed --name for the

@@ -22,6 +22,12 @@ const (
 	EventCompactionSkipped  EventType = "compaction_skipped"
 	EventRunFinished        EventType = "run_finished"
 	EventError              EventType = "error"
+	// EventMetrics is emitted after each completed Ollama chat POST (one
+	// per tool-loop round) with that round's final streaming chunk usage:
+	// input tokens evaluated, output tokens generated, and — when the
+	// server reports it — how many input tokens were served from the KV
+	// cache. UIs use it to keep I/O and cache-hit readouts current.
+	EventMetrics EventType = "metrics"
 	// EventBackgroundTasks carries a background-task completion notice: the
 	// content of the synthetic message the session injected after draining a
 	// BackgroundSource. UIs render it as a muted entry so the notice is
@@ -149,10 +155,14 @@ type Event struct {
 	// System is the assembled system prompt; set on inspect events only.
 	System string `json:"system,omitempty"`
 	// Tools lists the registered tools; set on inspect events only.
-	Tools  []ToolInfo     `json:"tools,omitempty"`
-	Args   map[string]any `json:"args,omitempty"`
+	Tools []ToolInfo     `json:"tools,omitempty"`
+	Args  map[string]any `json:"args,omitempty"`
 	Tokens int            `json:"tokens,omitempty"`
-	Error  string         `json:"error,omitempty"`
+	// Metrics carries the completed chat POST's usage; set on metrics
+	// events only. PromptEvalCachedCount is nil when the server does not
+	// report cached tokens.
+	Metrics *api.Metrics `json:"metrics,omitempty"`
+	Error   string       `json:"error,omitempty"`
 	// Review carries the auto-review verdict on approval_reviewed events.
 	Review *ReviewDecision `json:"review,omitempty"`
 	// ApprovalID correlates approval_requested/decided events with the
@@ -223,6 +233,16 @@ func newToolFinished(m eventMetadata, status ToolStatus, callID, toolName, worki
 
 func newRunFinished(m eventMetadata, status RunStatus) Event {
 	return Event{Type: EventRunFinished, RunID: m.runID, ChatID: m.chatID, Model: m.model, Status: status}
+}
+
+// newMetricsEvent carries a completed chat round's usage metrics. It copies
+// the metrics so later stream responses cannot mutate the emitted event.
+func newMetricsEvent(m eventMetadata, metrics *api.Metrics) Event {
+	var copy api.Metrics
+	if metrics != nil {
+		copy = *metrics
+	}
+	return Event{Type: EventMetrics, RunID: m.runID, ChatID: m.chatID, Model: m.model, Metrics: &copy}
 }
 
 func newErrorEvent(m eventMetadata, errMsg string) Event {
