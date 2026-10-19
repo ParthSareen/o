@@ -345,6 +345,9 @@ func (m chatModel) renderModelStatusLines(width int) []string {
 	if contextStatus := m.contextStatus(); contextStatus != "" {
 		parts = append(parts, contextStatus)
 	}
+	if turnMetrics := m.turnMetricsStatus(); turnMetrics != "" {
+		parts = append(parts, turnMetrics)
+	}
 	if notice := m.permissionModeNotice(); notice != "" {
 		parts = append(parts, notice)
 	}
@@ -1788,6 +1791,30 @@ func formatTokenCount(count int) string {
 		return "1 token"
 	}
 	return fmt.Sprintf("%d tokens", count)
+}
+
+// turnMetricsStatus renders the last chat POST's usage segment for the
+// status line: input tokens the server evaluated (the full prompt on
+// servers that report cached tokens), output tokens it generated, and the
+// cache hit rate as a percentage of the input. The segment is omitted
+// until Ollama reports usage, and the cache hit is omitted when the server
+// does not report cached tokens (older local servers and Ollama Cloud).
+func (m chatModel) turnMetricsStatus() string {
+	metrics := m.lastTurnMetrics
+	if metrics == nil {
+		return ""
+	}
+	input := max(metrics.PromptEvalCount, 0)
+	output := max(metrics.EvalCount, 0)
+	if input <= 0 && output <= 0 {
+		return ""
+	}
+	status := "in " + formatContextTokenCount(input) + "  out " + formatContextTokenCount(output)
+	if cached, ok := metrics.CachedPromptTokens(); ok && input > 0 {
+		hit := (cached*100 + input/2) / input
+		status += fmt.Sprintf("  ch %d%%", min(hit, 100))
+	}
+	return status
 }
 
 func (m chatModel) contextStatus() string {

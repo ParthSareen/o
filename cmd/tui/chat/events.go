@@ -212,6 +212,12 @@ func (m *chatModel) applyAgentEvent(event coreagent.Event) {
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: event.Content}))
 		m.liveMessages = append(m.liveMessages, api.Message{Role: "user", Content: event.Content})
 		contextChanged = true
+	case coreagent.EventMetrics:
+		// Usage from the just-finished Ollama chat POST. Keep the values
+		// even after the run end so the status line shows the last turn.
+		if event.Metrics != nil {
+			m.lastTurnMetrics = event.Metrics
+		}
 	case coreagent.EventError:
 		m.resetRunState()
 		m.eventErrorRendered = true

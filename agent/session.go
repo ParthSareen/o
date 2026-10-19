@@ -793,7 +793,23 @@ func (s *Session) chatRound(ctx context.Context, runID string, opts RunOptions, 
 		return assistant, pendingToolCalls, false, err
 	}
 
+	// Report the round's usage to UIs: the final streaming chunk carries the
+	// Ollama metrics (input tokens, output tokens, and cached prompt tokens
+	// when the server reports them). Skip rounds with no usage at all —
+	// e.g. cloud models that report nothing — so silent UIs stay silent.
+	if metrics := latest.Metrics; hasUsageMetrics(metrics) {
+		_ = s.emit(newMetricsEvent(meta, &metrics))
+	}
+
 	return assistant, pendingToolCalls, false, nil
+}
+
+// hasUsageMetrics reports whether the final streaming chunk carried any
+// token counts. Metrics that only measure wall-clock durations still count:
+// input/output token display is the point, so require at least one count.
+func hasUsageMetrics(metrics api.Metrics) bool {
+	return metrics.PromptEvalCount > 0 || metrics.EvalCount > 0 ||
+		(metrics.PromptEvalCachedCount != nil && *metrics.PromptEvalCachedCount > 0)
 }
 
 func buildChatRequest(opts RunOptions, messages []api.Message, tools api.Tools) api.ChatRequest {
