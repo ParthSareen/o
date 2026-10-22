@@ -66,6 +66,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/sessions", description: "list and resume past sessions"},
 	{name: "/resume", usage: "/resume [<id|name>]", description: "resume the most recent or a matching session"},
 	{name: "/name", usage: "/name [set <text>]", description: "show or set the session name"},
+	{name: "/reviewer", usage: "/reviewer [model <name>|selected]", description: "show or set the auto review model"},
 }
 
 var skillsImportCompletions = []chatCompletion{
@@ -160,6 +161,8 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return *m, nil
 	case command == "/model":
 		return m.openModelPicker(args)
+	case command == "/reviewer":
+		return m.handleReviewerCommand(args)
 	case command == "/think" && args == "":
 		return m.openThinkPicker()
 	case command == "/think":
@@ -1324,6 +1327,9 @@ func (m chatModel) slashCompletions() []chatCompletion {
 	if completions := matchingSkillsImportCompletions(input); completions != nil {
 		return completions
 	}
+	if completions := reviewerCommandCompletions(input); completions != nil {
+		return completions
+	}
 
 	completions := m.slashNameCompletions(input)
 	if len(completions) == 0 {
@@ -1360,6 +1366,39 @@ func matchingSkillsImportCompletions(input string) []chatCompletion {
 	}
 	if len(completions) == 0 {
 		return []chatCompletion{{label: "No matching skill sources"}}
+	}
+	return completions
+}
+
+// reviewerCommandCompletions fills the argument position of /reviewer. Returning
+// nil means the input is not a /reviewer argument (fall through to the next
+// completion source); an empty slice hides the menu so a model name can be
+// typed freely after "model".
+func reviewerCommandCompletions(input string) []chatCompletion {
+	lower := strings.ToLower(input)
+	if lower == "/reviewer" {
+		return nil // Enter on /reviewer shows the current setting.
+	}
+	if !strings.HasPrefix(lower, "/reviewer ") {
+		return nil
+	}
+	// After "model" the rest is a free-form model name; nothing matches it.
+	if strings.HasPrefix(lower, "/reviewer model") {
+		return []chatCompletion{}
+	}
+	prefix := strings.TrimPrefix(lower, "/reviewer ")
+	options := []chatCompletion{
+		{value: "/reviewer model", label: "/reviewer model <name>", description: "set the model grading tool calls in auto mode"},
+		{value: "/reviewer selected", label: "/reviewer selected", description: "grade with the session model again"},
+	}
+	completions := make([]chatCompletion, 0, len(options))
+	for _, option := range options {
+		if strings.HasPrefix(strings.TrimPrefix(option.value, "/reviewer "), prefix) {
+			completions = append(completions, option)
+		}
+	}
+	if len(completions) == 0 {
+		return []chatCompletion{}
 	}
 	return completions
 }

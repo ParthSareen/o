@@ -1436,3 +1436,30 @@ func TestChatNameCommandClearsName(t *testing.T) {
 		t.Fatalf("stored name = %q, want empty", list[0].Name)
 	}
 }
+
+func TestChatReviewCommandCompletions(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  []string
+	}{
+		{input: "/reviewer", want: []string{"/reviewer"}},
+		{input: "/reviewer ", want: []string{"/reviewer model", "/reviewer selected"}},
+		{input: "/reviewer mo", want: []string{"/reviewer model"}},
+		{input: "/reviewer se", want: []string{"/reviewer selected"}},
+		{input: "/reviewer model", want: []string{}},
+		{input: "/reviewer model ", want: []string{}},
+		{input: "/reviewer model gpt", want: []string{}},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			m := chatModel{input: []rune(test.input)}
+			completions := m.slashCompletions()
+			got := make([]string, 0, len(completions))
+			for _, completion := range completions {
+				got = append(got, completion.value)
+			}
+			if strings.Join(got, "\n") != strings.Join(test.want, "\n") {
+				t.Fatalf("completions = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}

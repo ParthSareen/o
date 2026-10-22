@@ -50,7 +50,8 @@ never set `CGO_ENABLED=0`.
 Slash commands in the TUI: `/sessions` selects a session to resume,
 `/resume [<id|name>]` resumes the most recent or a matching session,
 `/name [set <text>]` shows or sets the session name, `/think` sets thinking
-mode, `/tools` toggles tools, `/compact` summarizes older context, `/copy`
+mode, `/tools` toggles tools, `/reviewer [model <name>|selected]` shows or sets
+the auto review model, `/compact` summarizes older context, `/copy`
 copies the last reply, `/help` lists all commands; Esc cancels a run.
 
 The `update-o` skill (`.agents/skills/update-o/`) runs the

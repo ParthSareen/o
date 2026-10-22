@@ -72,12 +72,12 @@ func (m *chatModel) resetApprovalState() {
 	m.approvalState = m.newDefaultApprovalState()
 }
 
-// ensureAutoReviewer lazily builds and caches the reviewer for auto mode,
-// grading with the current model unless a review model is configured.
+// ensureAutoReviewer lazily builds the reviewer for auto mode, grading with
+// the current model unless a review model is configured. The reviewer
+// rebuilds whenever the resolved model changes so a /model switch (the
+// default review model follows the session model) or a /reviewer model
+// override applies to the next run instead of grading with the old model.
 func (m *chatModel) ensureAutoReviewer() *coreagent.AutoReviewer {
-	if m.autoReviewer != nil {
-		return m.autoReviewer
-	}
 	if m.opts.Client == nil {
 		return nil
 	}
@@ -85,7 +85,10 @@ func (m *chatModel) ensureAutoReviewer() *coreagent.AutoReviewer {
 	if model == "" {
 		return nil
 	}
-	m.autoReviewer = &coreagent.AutoReviewer{Client: m.opts.Client, Model: model}
+	// Rebuild when the resolved model changed; AutoReviewer is stateless.
+	if m.autoReviewer == nil || m.autoReviewer.Model != model {
+		m.autoReviewer = &coreagent.AutoReviewer{Client: m.opts.Client, Model: model}
+	}
 	return m.autoReviewer
 }
 
@@ -122,6 +125,53 @@ func (m chatModel) permissionMode() coreagent.ApprovalMode {
 
 func (m *chatModel) autoReviewAvailable() bool {
 	return m.ensureAutoReviewer() != nil
+}
+
+// handleReviewerCommand implements /reviewer: with no args it reports the
+// current auto review model; "/reviewer model <name>" sets it, and "selected"
+// follows the session model again. The bare name form ("/reviewer <name>") is
+// accepted as a short hand. The override lasts for this session; start with
+// --review-model to set one up front.
+func (m *chatModel) handleReviewerCommand(args string) (tea.Model, tea.Cmd) {
+	switch fields := strings.Fields(strings.TrimSpace(args)); {
+	case len(fields) == 0 || (len(fields) == 1 && fields[0] == "model"):
+		m.entries = append(m.entries, newSlashEntry(m.reviewModelStatus()+"\n\nUsage: /reviewer model <name> (or `selected` to grade with the session model)"))
+		m.status = "ready"
+	case len(fields) == 1 && fields[0] == "selected", len(fields) == 2 && fields[0] == "model":
+		m.setReviewModel(fields[len(fields)-1])
+	case len(fields) == 1:
+		m.setReviewModel(fields[0])
+	default:
+		m.status = "error"
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: "usage: /reviewer [model <name>|selected]"}))
+	}
+	return *m, nil
+}
+
+// setReviewModel overrides the model that grades tool calls in auto mode and
+// drops the cached reviewer so the change applies on the next run.
+func (m *chatModel) setReviewModel(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	m.opts.ReviewModel = name
+	m.autoReviewer = nil
+	m.entries = append(m.entries, newSlashEntry(m.reviewModelStatus()))
+	m.status = "review model set"
+}
+
+// reviewModelStatus reports what grades tool calls in auto mode now.
+func (m chatModel) reviewModelStatus() string {
+	configured := strings.TrimSpace(m.opts.ReviewModel)
+	effective := coreagent.ResolveAutoReviewModel(configured, m.opts.Model)
+	if effective == "" {
+		effective = "(no model selected)"
+	}
+	if configured == "" || strings.EqualFold(configured, "selected") {
+		return "Auto review model: session model (" + effective + ")"
+	}
+	return "Auto review model: " + effective
 }
 
 func (m *chatModel) setAllowAllTools(allowAll bool) {

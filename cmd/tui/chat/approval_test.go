@@ -767,3 +767,108 @@ func TestChatAutoReviewSessionPrompterFallsBackToHuman(t *testing.T) {
 		t.Fatalf("approval = %#v, want the human approval", result)
 	}
 }
+
+func TestChatAutoReviewerFollowsModelSwitch(t *testing.T) {
+	state := testApprovalState(false, nil)
+	m := chatModel{
+		opts:          Options{Client: &fakeReviewChatClient{}, Model: "model-a"},
+		approvalState: state,
+	}
+	if got := m.ensureAutoReviewer().Model; got != "model-a" {
+		t.Fatalf("reviewer model = %q, want model-a", got)
+	}
+
+	if err := m.applyModelSelection("model-b", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.ensureAutoReviewer().Model; got != "model-b" {
+		t.Fatalf("reviewer model = %q after switching models, want model-b", got)
+	}
+}
+
+func TestChatAutoReviewerKeepsConfiguredReviewModel(t *testing.T) {
+	m := chatModel{
+		opts: Options{Client: &fakeReviewChatClient{}, Model: "model-a", ReviewModel: "reviewer-x"},
+	}
+	if got := m.ensureAutoReviewer().Model; got != "reviewer-x" {
+		t.Fatalf("reviewer model = %q, want reviewer-x", got)
+	}
+
+	if err := m.applyModelSelection("model-b", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.ensureAutoReviewer().Model; got != "reviewer-x" {
+		t.Fatalf("reviewer model = %q after switching models, want configured reviewer-x", got)
+	}
+}
+
+func TestChatReviewCommand(t *testing.T) {
+	t.Run("show", func(t *testing.T) {
+		m := chatModel{opts: Options{Model: "session-model"}}
+		updated, cmd := m.handleReviewerCommand("")
+		if cmd != nil {
+			t.Fatal("/reviewer should not return a command")
+		}
+		m = updated.(chatModel)
+		if m.opts.ReviewModel != "" {
+			t.Fatalf("review model = %q, want unchanged", m.opts.ReviewModel)
+		}
+		last := m.entries[len(m.entries)-1]
+		if last.role != "slash" || !strings.Contains(last.content, "session model (session-model)") {
+			t.Fatalf("entry = %#v, want the current review model status", last)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		m := chatModel{opts: Options{Client: &fakeReviewChatClient{}, Model: "session-model"}}
+		m.handleReviewerCommand("model reviewer-x")
+		if m.opts.ReviewModel != "reviewer-x" {
+			t.Fatalf("review model = %q, want reviewer-x", m.opts.ReviewModel)
+		}
+		if got := m.ensureAutoReviewer().Model; got != "reviewer-x" {
+			t.Fatalf("reviewer model = %q, want reviewer-x", got)
+		}
+		last := m.entries[len(m.entries)-1]
+		if !strings.Contains(last.content, "Auto review model: reviewer-x") {
+			t.Fatalf("entry = %#v, want the new review model", last)
+		}
+	})
+
+	t.Run("set selected", func(t *testing.T) {
+		m := chatModel{opts: Options{Client: &fakeReviewChatClient{}, Model: "session-model", ReviewModel: "old-reviewer"}}
+		m.handleReviewerCommand("model selected")
+		if m.opts.ReviewModel != "selected" {
+			t.Fatalf("review model = %q, want selected", m.opts.ReviewModel)
+		}
+		if got := m.ensureAutoReviewer().Model; got != "session-model" {
+			t.Fatalf("reviewer model = %q, want the session model", got)
+		}
+	})
+
+	t.Run("set bare name and bare selected", func(t *testing.T) {
+		m := chatModel{opts: Options{Client: &fakeReviewChatClient{}, Model: "session-model"}}
+		m.handleReviewerCommand("reviewer-x")
+		if m.opts.ReviewModel != "reviewer-x" {
+			t.Fatalf("review model = %q, want reviewer-x", m.opts.ReviewModel)
+		}
+		m.handleReviewerCommand("selected")
+		if m.opts.ReviewModel != "selected" {
+			t.Fatalf("review model = %q, want selected", m.opts.ReviewModel)
+		}
+	})
+
+	t.Run("usage error", func(t *testing.T) {
+		m := chatModel{opts: Options{Model: "session-model"}}
+		m.handleReviewerCommand("model one two")
+		if m.status != "error" {
+			t.Fatalf("status = %q, want error", m.status)
+		}
+		last := m.entries[len(m.entries)-1]
+		if last.role != "error" || !strings.Contains(last.content, "usage: /reviewer") {
+			t.Fatalf("entry = %#v, want usage help", last)
+		}
+		if m.opts.ReviewModel != "" {
+			t.Fatalf("review model = %q, want unchanged", m.opts.ReviewModel)
+		}
+	})
+}

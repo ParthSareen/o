@@ -41,7 +41,7 @@ func buildFlagSet() (*flag.FlagSet, *cliOptions) {
 	fs.StringVar(&opts.system, "system", "", "override the model system prompt")
 	fs.BoolVar(&opts.allowAllTools, "allow-all-tools", false, "run tools without approval prompts")
 	fs.BoolVar(&opts.autoReview, "auto", true, "auto mode (default): a review model grades tool calls that would prompt for approval; pass --auto=false to fall back to approval prompts")
-	fs.StringVar(&opts.reviewModel, "review-model", os.Getenv("O_REVIEW_MODEL"), "model that grades tool calls in --auto mode; \"selected\" (default) uses the session model")
+	fs.StringVar(&opts.reviewModel, "review-model", os.Getenv("O_REVIEW_MODEL"), "model that grades tool calls in --auto mode; \"selected\" (default) uses the session model; settable in the TUI with /reviewer model")
 	fs.BoolVar(&opts.toolsDisabled, "no-tools", false, "disable tool use entirely")
 	fs.BoolVar(&opts.multiModal, "multimodal", false, "enable multimodal input")
 	fs.IntVar(&opts.contextWindowTokens, "context-window", 0, "context window tokens (0 = model default)")
