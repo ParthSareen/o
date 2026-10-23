@@ -158,6 +158,9 @@ func (m chatModel) selectModel() (tea.Model, tea.Cmd) {
 	if m.modelPicker == nil {
 		return m, nil
 	}
+	if m.pane {
+		return m.selectPaneModel()
+	}
 	selectedItem, ok := m.modelPicker.SelectedItem()
 	if !ok {
 		return m, nil

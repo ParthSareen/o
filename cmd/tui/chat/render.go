@@ -263,7 +263,8 @@ func (m chatModel) viewSize() (int, int) {
 }
 
 func (m chatModel) transcriptHeight() int {
-	width, height := m.viewSize()
+	width := m.transcriptWidth()
+	_, height := m.viewSize()
 	lineCount := len(m.transcriptLines(width))
 	baseHeaderHeight := 2
 	baseMaxHeight := height - baseHeaderHeight
@@ -278,8 +279,19 @@ func (m chatModel) transcriptHeight() int {
 	return max(0, statusMaxHeight-len(statusBottomLines)-transcriptInputGap(statusMaxHeight, len(statusBottomLines), lineCount))
 }
 
-func (m chatModel) transcriptLayout() (top, height int) {
+// transcriptWidth is the width of the root transcript: the full terminal
+// normally, the left column while the side split is showing.
+func (m chatModel) transcriptWidth() int {
 	width, height := m.viewSize()
+	if m.side != nil && width >= minSideSplitWidth && height >= 8 {
+		width, _ = splitPaneWidths(width)
+	}
+	return width
+}
+
+func (m chatModel) transcriptLayout() (top, height int) {
+	width := m.transcriptWidth()
+	_, height = m.viewSize()
 	headerHeight := len(m.headerLines())
 	bottomLines := m.bottomLines(width, height-headerHeight)
 	transcriptLineCount := len(m.transcriptLines(width))

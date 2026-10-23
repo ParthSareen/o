@@ -7,7 +7,6 @@ import (
 	"hash/fnv"
 	"os"
 	"os/exec"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -20,8 +19,6 @@ import (
 )
 
 var chatSpinnerFrames = []string{".", "..", "..."}
-
-var chatRuntimeGOOS = runtime.GOOS
 
 const (
 	maxPickerItems            = 8
@@ -149,23 +146,23 @@ type chatModel struct {
 	// lastTurnMetrics carries the most recent chat POST's usage from
 	// metrics events: input (full prompt) tokens, output tokens, and the
 	// cached portion of the input when the server reported it.
-	lastTurnMetrics *api.Metrics
-	modelPicker              *chatModelPicker
-	sessionPicker            *chatModelPicker
-	modelPickerModels        []ModelOption
-	sessionPickerEntries     []sessionListEntry
-	thinkPicker              *chatThinkPicker
-	promptDebug              *chatPromptDebug
-	approvalPrompt           *chatApprovalPrompt
-	approvalController       *chatApprovalController
-	approvalState            *coreagent.ApprovalState
-	cloudAuthPrompt          *cloudAuthPrompt
-	pendingModel             string
-	defaultAllowAll          bool
-	defaultAutoReview        bool
-	autoReviewer             *coreagent.AutoReviewer
-	permissionNotice         string
-	selection                chatSelection
+	lastTurnMetrics      *api.Metrics
+	modelPicker          *chatModelPicker
+	sessionPicker        *chatModelPicker
+	modelPickerModels    []ModelOption
+	sessionPickerEntries []sessionListEntry
+	thinkPicker          *chatThinkPicker
+	promptDebug          *chatPromptDebug
+	approvalPrompt       *chatApprovalPrompt
+	approvalController   *chatApprovalController
+	approvalState        *coreagent.ApprovalState
+	cloudAuthPrompt      *cloudAuthPrompt
+	pendingModel         string
+	defaultAllowAll      bool
+	defaultAutoReview    bool
+	autoReviewer         *coreagent.AutoReviewer
+	permissionNotice     string
+	selection            chatSelection
 
 	systemPromptDisabled bool
 
@@ -184,6 +181,18 @@ type chatModel struct {
 	eventErrorRendered bool
 	err                error
 	store              *sessionstore.Store
+	// side is the forked conversation shown in the split pane, and sideFocus
+	// routes the keyboard to it. fork is a pane's inherited snapshot, used by
+	// /clear to reset it.
+	side      *chatModel
+	sideFocus bool
+	fork      []api.Message
+	// pane marks a chatModel rendered as the side pane instead of owning the
+	// terminal scrollback. route wraps a pane's async messages so the root
+	// update loop can tell them apart.
+	pane    bool
+	focused bool
+	route   func(tea.Msg) tea.Msg
 }
 
 type chatSelectionPoint struct {
@@ -280,13 +289,14 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		m.preloadingModel = strings.TrimSpace(opts.Model)
 	}
 
-	p := tea.NewProgram(m, tea.WithReportFocus())
+	p := tea.NewProgram(m, tea.WithReportFocus(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	if err != nil {
 		return nil, err
 	}
 
 	fm := finalModel.(chatModel)
+	fm.dropSidePane()
 	if fm.err != nil {
 		return nil, fm.err
 	}
@@ -314,11 +324,23 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case chatSideMsg:
+		return m.updateSide(msg.msg)
+
+	case chatSideCloseMsg:
+		return m.closeSidePane()
+
 	case tea.WindowSizeMsg:
 		wasSet := m.width > 0 || m.height > 0
 		resized := wasSet && (m.width != msg.Width || m.height != msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.side != nil {
+			_, sideWidth := splitPaneWidths(msg.Width)
+			m.side.width = sideWidth
+			m.side.height = msg.Height
+			return m, nil
+		}
 		if resized {
 			return m.withFlowTranscriptRepaint(nil)
 		}
@@ -374,9 +396,9 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyAgentEvent(msg.event)
 		m.anchorScrollToAppendedLines(anchorBefore)
 		if m.scroll > 0 {
-			return m, waitForChatMsg(m.events)
+			return m, m.waitEvents(m.events)
 		}
-		return m.withFlowTranscriptRefreshAfter(printedTranscript, printedLines, waitForChatMsg(m.events))
+		return m.withFlowTranscriptRefreshAfter(printedTranscript, printedLines, m.waitEvents(m.events))
 
 	case chatClipboardErrorMsg:
 		if msg.err != nil {
@@ -515,7 +537,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.tokens > m.compactingTokens {
 			m.compactingTokens = msg.tokens
 		}
-		return m, waitForChatMsg(m.compactEvents)
+		return m, m.waitEvents(m.compactEvents)
 
 	case chatEventsClosedMsg:
 		if m.compacting {
@@ -590,6 +612,24 @@ func (m chatModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.side != nil {
+		width, height := m.viewSize()
+		if width >= minSideSplitWidth && height >= 8 {
+			mainWidth, _ := splitPaneWidths(width)
+			sideDragging := m.side.selection.active && m.side.selection.dragging
+			rootDragging := m.selection.active && m.selection.dragging
+			switch {
+			case sideDragging:
+				return m.updateSideMouse(msg, max(0, msg.X-(mainWidth+1)))
+			case rootDragging:
+				// Keep delivering the drag to the pane it started in.
+			case msg.X >= mainWidth:
+				return m.updateSideMouse(msg, max(0, msg.X-(mainWidth+1)))
+			case msg.Type == tea.MouseLeft:
+				m.sideFocus = false
+			}
+		}
+	}
 	if !m.mouseInTranscript(msg) && !m.selection.active {
 		return m.handleTranscriptScrollKey(msg)
 	}
@@ -619,7 +659,7 @@ func (m chatModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (m chatModel) mouseInTranscript(msg tea.MouseMsg) bool {
 	top, height := m.transcriptLayout()
-	if msg.X < 0 || msg.X >= m.viewWidth() {
+	if msg.X < 0 || msg.X >= m.transcriptWidth() {
 		return false
 	}
 	return msg.Y >= top && msg.Y < top+height
@@ -628,7 +668,7 @@ func (m chatModel) mouseInTranscript(msg tea.MouseMsg) bool {
 func (m chatModel) mouseTranscriptPoint(msg tea.MouseMsg) chatSelectionPoint {
 	top, height := m.transcriptLayout()
 	visibleY := clamp(msg.Y-top, 0, max(0, height-1))
-	line := m.visibleTranscriptStartLine(m.viewWidth(), height) + visibleY
+	line := m.visibleTranscriptStartLine(m.transcriptWidth(), height) + visibleY
 	col := max(0, msg.X)
 	return chatSelectionPoint{line: line, col: col}
 }
@@ -650,10 +690,10 @@ func (m *chatModel) dragTranscriptSelection(msg tea.MouseMsg) {
 
 func (m *chatModel) finishTranscriptSelection(msg tea.MouseMsg) tea.Cmd {
 	finishChatSelection(&m.selection, msg, m.mouseTranscriptPoint)
-	if chatRuntimeGOOS != "windows" || !m.selection.active {
+	if !m.selection.active {
 		return nil
 	}
-	selected := m.selectedTranscriptText(m.viewWidth())
+	selected := m.selectedTranscriptText(m.transcriptWidth())
 	if strings.TrimSpace(selected) == "" {
 		m.selection = chatSelection{}
 		return nil
@@ -666,6 +706,14 @@ func (m *chatModel) finishTranscriptSelection(msg tea.MouseMsg) tea.Cmd {
 func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.promptDebug != nil {
 		return m.updatePromptDebug(msg)
+	}
+	if !m.rootModalOpen() {
+		if handled, cmd := m.handleSideShortcut(msg); handled {
+			return m, cmd
+		}
+		if m.side != nil && (m.sideFocus || m.side.paneModalOpen()) {
+			return m.updateSideKey(msg)
+		}
 	}
 	if msg.Type == tea.KeyCtrlO {
 		m.toggleInlineToolOutput()
@@ -812,6 +860,25 @@ func (m *chatModel) toggleInlineToolOutput() {
 }
 
 func (m chatModel) updateCtrlC() (tea.Model, tea.Cmd) {
+	if m.pane {
+		switch {
+		case len(m.input) > 0:
+			m.clearInput()
+			m.resetPromptHistoryCursor()
+			m.disarmQuit()
+			m.status = "ready"
+			return m, nil
+		case (m.running || m.compacting) && m.cancel != nil:
+			m.cancel()
+			m.disarmQuit()
+			m.status = "canceling"
+			return m, nil
+		case !m.quitArmed || m.quitArmedKey != "ctrl+c":
+			m.armQuit("ctrl+c", "press ctrl+c again to close the side chat")
+			return m, nil
+		}
+		return m, func() tea.Msg { return chatSideCloseMsg{} }
+	}
 	if len(m.input) > 0 {
 		m.clearInput()
 		m.resetPromptHistoryCursor()
@@ -830,10 +897,21 @@ func (m chatModel) updateCtrlC() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.quitting = true
+	m.dropSidePane()
 	return m, m.quitCmd()
 }
 
 func (m chatModel) updateCtrlD() (tea.Model, tea.Cmd) {
+	if m.pane {
+		if len(m.input) > 0 {
+			return m, nil
+		}
+		if !m.quitArmed || m.quitArmedKey != "ctrl+d" {
+			m.armQuit("ctrl+d", "press ctrl+d again to close the side chat")
+			return m, nil
+		}
+		return m, func() tea.Msg { return chatSideCloseMsg{} }
+	}
 	if len(m.input) > 0 {
 		return m, nil
 	}
@@ -842,6 +920,7 @@ func (m chatModel) updateCtrlD() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.quitting = true
+	m.dropSidePane()
 	if (m.running || m.compacting) && m.cancel != nil {
 		m.cancel()
 	}
@@ -859,6 +938,15 @@ func (m *chatModel) armQuit(key, status string) {
 }
 
 func (m chatModel) updateEsc() (tea.Model, tea.Cmd) {
+	if m.pane && !m.running && !m.compacting && len(m.input) == 0 {
+		if !m.escArmed {
+			m.escArmed = true
+			m.status = "press esc again to close the side chat"
+			return m, nil
+		}
+		m.escArmed = false
+		return m, func() tea.Msg { return chatSideCloseMsg{} }
+	}
 	if (m.running || m.compacting) && m.cancel != nil {
 		m.cancel()
 		m.disarmQuit()
@@ -957,6 +1045,9 @@ func (m chatModel) View() string {
 	if m.thinkPicker != nil {
 		return m.renderThinkPicker(width)
 	}
+	if m.side != nil {
+		return m.splitView(width, height)
+	}
 	if m.scroll > 0 {
 		return m.scrolledView(width, height)
 	}
@@ -978,6 +1069,9 @@ func (m chatModel) flowView(width int) string {
 }
 
 func (m chatModel) withFlowTranscriptFlush(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.pane || m.side != nil {
+		return m, cmd
+	}
 	if m.scroll > 0 {
 		// flow printing is suspended while the app-level scrollback viewport
 		// is showing; pending lines print when the user returns to the bottom
@@ -1009,6 +1103,9 @@ func (m *chatModel) backgroundWatcher() coreagent.BackgroundWatcher {
 // Work buffered between the last drain and now already missed its signal, so
 // it resolves immediately instead.
 func (m *chatModel) armBackgroundWatcher() tea.Cmd {
+	if m.pane {
+		return nil
+	}
 	watcher := m.backgroundWatcher()
 	if watcher == nil {
 		return nil
@@ -1040,6 +1137,9 @@ func (m *chatModel) waitNextBackgroundChange() tea.Cmd {
 }
 
 func (m chatModel) withFlowTranscriptRepaint(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.pane || m.side != nil {
+		return m, cmd
+	}
 	if m.scroll > 0 {
 		// the app-level scrollback viewport owns the screen; leave the printed
 		// scrollback untouched and repaint on return to the bottom
@@ -1054,6 +1154,9 @@ func (m chatModel) withFlowTranscriptRepaint(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 }
 
 func (m chatModel) withFlowTranscriptRefreshAfter(before []string, printed int, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.pane || m.side != nil {
+		return m, cmd
+	}
 	next, printCmd := m.flowTranscriptRefreshAfterCmd(before, printed)
 	return next, tea.Batch(printCmd, cmd)
 }
@@ -1111,6 +1214,9 @@ func flowTranscriptRewriteSequence(rewind int, lines []string) string {
 }
 
 func (m chatModel) flowTranscriptFlushCmd() (chatModel, tea.Cmd) {
+	if m.pane || m.side != nil {
+		return m, nil
+	}
 	if m.promptDebug != nil || m.modelPicker != nil || m.sessionPicker != nil || m.thinkPicker != nil || m.cloudAuthPrompt != nil {
 		return m, nil
 	}
@@ -1164,6 +1270,9 @@ func (m chatModel) flowTranscriptHoldEntryIndex() int {
 }
 
 func (m chatModel) emptyChatHint() string {
+	if m.pane {
+		return "ask a side question; this chat inherited the conversation"
+	}
 	if len(chatEmptyPrompts) == 0 {
 		return "Try asking the agent to inspect files, run tools, or explain a repo."
 	}
@@ -1174,10 +1283,14 @@ func (m chatModel) emptyChatHint() string {
 }
 
 func (m chatModel) headerLines() []string {
+	if m.pane {
+		return m.paneHeaderLines(m.viewWidth())
+	}
 	return nil
 }
 
 func (m *chatModel) resetChat(status string) (tea.Model, tea.Cmd) {
+	m.dropSidePane()
 	m.messages = nil
 	m.resetSession()
 	m.liveMessages = nil
@@ -1389,7 +1502,7 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 	tickCmd := m.scheduleTick()
 	flushModel, flushCmd := m.flowTranscriptFlushCmd()
 	*m = flushModel
-	return *m, tea.Batch(flushCmd, waitForChatMsg(events), tickCmd)
+	return *m, tea.Batch(flushCmd, m.waitEvents(events), tickCmd)
 }
 
 func (m *chatModel) finishLiveMessagesForStoppedRun(promote bool, persistedMessages []api.Message) {

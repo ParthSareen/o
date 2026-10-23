@@ -52,7 +52,8 @@ Slash commands in the TUI: `/sessions` selects a session to resume,
 `/name [set <text>]` shows or sets the session name, `/think` sets thinking
 mode, `/tools` toggles tools, `/reviewer [model <name>|selected]` shows or sets
 the auto review model, `/compact` summarizes older context, `/copy`
-copies the last reply, `/help` lists all commands; Esc cancels a run.
+copies the last reply, `/side [close]` forks the conversation into a side
+pane, `/help` lists all commands; Esc cancels a run.
 
 The `update-o` skill (`.agents/skills/update-o/`) runs the
 build/test/install/ship loop end to end.
@@ -109,6 +110,16 @@ Slash commands are listed under [Build & run].
 Keys: `ctrl+t` opens nvim in the working directory (`O_NVIM` overrides);
 `ctrl+g` opens the nvim diff viewer (`nvim -c DiffviewOpen`, `O_NVIM_DIFF`
 overrides). Both suspend the TUI and resume when nvim exits. Need nvim in PATH.
+
+`opt+]` (or `ctrl+]`) opens a side chat: a fork of the conversation rendered in
+a split pane that runs its own agent loop with its own tool registry, so both
+chats can stream at once. The fork inherits a snapshot of the messages, system
+prompt, working directory, and model; it is ephemeral (no store row) and never
+writes into the root history. The same key switches pane focus, and Esc twice
+(or ctrl+c twice) closes an idle side chat. Don't bind `opt+[`: terminals encode it as the `ESC [` CSI
+prefix, which the input parser swallows along with the next keypress. Mouse
+reporting is enabled so panes are clickable; drag selections are copied by the
+app (the terminal's native selection needs Option-drag).
 
 The chat renders markdown: headings, code fences, tables, emphasis, links,
 images (alt text only), lists, blockquotes, horizontal rules.

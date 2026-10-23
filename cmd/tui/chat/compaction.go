@@ -71,7 +71,7 @@ func (m *chatModel) startManualCompaction() (tea.Model, tea.Cmd) {
 		}
 	}()
 	tickCmd := m.scheduleTick()
-	return *m, tea.Batch(waitForChatMsg(events), tickCmd)
+	return *m, tea.Batch(m.waitEvents(events), tickCmd)
 }
 
 func (m chatModel) finishManualCompaction(msg chatCompactDoneMsg) (tea.Model, tea.Cmd) {

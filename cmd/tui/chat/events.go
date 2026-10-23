@@ -339,6 +339,23 @@ func (s chatEventSink) Emit(event coreagent.Event) error {
 	}
 }
 
+// waitEvents is waitForChatMsg with the pane route applied: a side pane's
+// messages must reach the root loop tagged, so the root can hand them back.
+func (m chatModel) waitEvents(ch <-chan tea.Msg) tea.Cmd {
+	cmd := waitForChatMsg(ch)
+	if cmd == nil || m.route == nil {
+		return cmd
+	}
+	route := m.route
+	return func() tea.Msg {
+		msg := cmd()
+		if msg == nil {
+			return nil
+		}
+		return route(msg)
+	}
+}
+
 func waitForChatMsg(ch <-chan tea.Msg) tea.Cmd {
 	if ch == nil {
 		return nil
@@ -357,7 +374,18 @@ func (m *chatModel) scheduleTick() tea.Cmd {
 		return nil
 	}
 	m.tickActive = true
-	return chatTickCmd()
+	cmd := chatTickCmd()
+	if m.route == nil {
+		return cmd
+	}
+	route := m.route
+	return func() tea.Msg {
+		msg := cmd()
+		if msg == nil {
+			return nil
+		}
+		return route(msg)
+	}
 }
 
 func chatTickCmd() tea.Cmd {
