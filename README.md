@@ -119,6 +119,7 @@ Slash commands (`/help` shows them in the TUI):
 | `/tools` | Toggle tools on or off |
 | `/system [on\|off]` | Show or set the built-in system prompt |
 | `/skills [import codex\|claude\|pi]` | List or import skills |
+| `/side [close]` | Open a side chat forked from this conversation |
 | `/compact` | Summarize older context |
 | `/copy` | Copy last response to the clipboard |
 | `/prompt` | Show full prompt, tools, and messages |
@@ -136,10 +137,22 @@ Keys:
 | `ctrl+t` | Open nvim in the working directory. `O_NVIM` overrides the command. |
 | `ctrl+g` | Open the nvim diff viewer (`nvim -c DiffviewOpen`). `O_NVIM_DIFF` overrides the command. |
 | `ctrl+o` | Toggle inline tool output, thinking text, and auto-review rationales. |
+| `opt+]` / `ctrl+]` | Open a side chat, or switch focus between the two panes. |
+| `esc` (twice) | Close an idle side chat. |
 
 Both keys suspend the TUI and come back when you exit nvim. They need nvim in
 `PATH`. `/nvim` and `/diffview` do the same but are hidden: they are not in
 `/help` or in the completions.
+
+**Side chats.** `/side` forks the conversation into a right-hand pane. The fork
+inherits a snapshot of the messages, system prompt, working directory, and
+model at the moment it opens, then runs its own agent loop with its own tools,
+so the two chats stream in parallel and neither writes into the other's
+history. Side chats are ephemeral (no session row) and disappear when the pane
+closes; `/clear` resets one back to its inherited context, `/model` switches
+only the fork's model, and clicking a pane focuses it. Pane focus keys are
+`opt+]` or `ctrl+]` because `opt+[` collides with the `ESC [` CSI prefix that
+terminals use for key sequences.
 
 Background shell tasks (`background=true`) are killed when the session exits,
 so they cannot outlive o; use watchy for processes that should persist.

@@ -894,12 +894,6 @@ func TestChatMouseWheelScrollsTranscriptWhileRunning(t *testing.T) {
 }
 
 func TestChatWindowsMouseWheelScrollsTranscript(t *testing.T) {
-	oldGOOS := chatRuntimeGOOS
-	chatRuntimeGOOS = "windows"
-	defer func() {
-		chatRuntimeGOOS = oldGOOS
-	}()
-
 	m := chatModel{
 		width:  80,
 		height: 8,
@@ -921,59 +915,7 @@ func TestChatWindowsMouseWheelScrollsTranscript(t *testing.T) {
 	}
 }
 
-func TestChatMouseDragSelectsTranscriptWithoutAutoCopy(t *testing.T) {
-	oldGOOS := chatRuntimeGOOS
-	chatRuntimeGOOS = "darwin"
-	defer func() {
-		chatRuntimeGOOS = oldGOOS
-	}()
-
-	m := chatModel{
-		width:  80,
-		height: 10,
-		entries: []chatEntry{
-			{role: "user", content: "alpha beta"},
-		},
-	}
-	top, _ := m.transcriptLayout()
-
-	updated, _ := m.Update(tea.MouseMsg{Type: tea.MouseLeft, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: 2, Y: top})
-	m = updated.(chatModel)
-	updated, _ = m.Update(tea.MouseMsg{Type: tea.MouseLeft, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion, X: 7, Y: top})
-	m = updated.(chatModel)
-	if got := m.selectedTranscriptText(80); got != "alpha" {
-		t.Fatalf("selected text = %q, want alpha", got)
-	}
-	if !m.selection.active {
-		t.Fatal("selection should stay active during drag")
-	}
-	if !m.selection.dragging {
-		t.Fatal("selection should track drag before release")
-	}
-
-	updated, cmd := m.Update(tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 7, Y: top})
-	m = updated.(chatModel)
-	if cmd != nil {
-		t.Fatal("mouse release should not auto-copy selected text")
-	}
-	if !m.selection.active {
-		t.Fatal("selection should stay visible on release")
-	}
-	if m.selection.dragging {
-		t.Fatal("selection should stop tracking drag on release")
-	}
-	if got := m.selectedTranscriptText(80); got != "alpha" {
-		t.Fatalf("selected text after release = %q, want alpha", got)
-	}
-}
-
-func TestChatWindowsMouseDragCopiesAndClearsTranscriptSelection(t *testing.T) {
-	oldGOOS := chatRuntimeGOOS
-	chatRuntimeGOOS = "windows"
-	defer func() {
-		chatRuntimeGOOS = oldGOOS
-	}()
-
+func TestChatMouseDragCopiesAndClearsTranscriptSelection(t *testing.T) {
 	var copied string
 	oldClipboard := writeClipboard
 	writeClipboard = func(_ context.Context, text string) error {
@@ -1000,11 +942,19 @@ func TestChatWindowsMouseDragCopiesAndClearsTranscriptSelection(t *testing.T) {
 	if got := m.selectedTranscriptText(80); got != "alpha" {
 		t.Fatalf("selected text = %q, want alpha", got)
 	}
+	if !m.selection.active {
+		t.Fatal("selection should stay active during drag")
+	}
+	if !m.selection.dragging {
+		t.Fatal("selection should track drag before release")
+	}
 
+	// Mouse reporting is enabled for pane clicks, so the app owns selection
+	// and copies on release on every platform.
 	updated, cmd := m.Update(tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 7, Y: top})
 	m = updated.(chatModel)
 	if cmd == nil {
-		t.Fatal("mouse release should copy selected text on windows")
+		t.Fatal("mouse release should copy selected text")
 	}
 	if msg := cmd(); msg != nil {
 		t.Fatalf("clipboard command message = %#v, want nil", msg)
@@ -1013,7 +963,7 @@ func TestChatWindowsMouseDragCopiesAndClearsTranscriptSelection(t *testing.T) {
 		t.Fatalf("copied text = %q, want alpha", copied)
 	}
 	if m.selection.active {
-		t.Fatal("windows selection should clear after copy")
+		t.Fatal("selection should clear after copy")
 	}
 	if m.status != "copied" {
 		t.Fatalf("status = %q, want copied", m.status)
@@ -1064,10 +1014,10 @@ func TestChatBoundedViewDoesNotRenderScrollHeader(t *testing.T) {
 }
 
 func TestChatMouseDragSelectionUsesScrolledTranscriptCoordinates(t *testing.T) {
-	oldGOOS := chatRuntimeGOOS
-	chatRuntimeGOOS = "darwin"
+	oldClipboard := writeClipboard
+	writeClipboard = func(context.Context, string) error { return nil }
 	defer func() {
-		chatRuntimeGOOS = oldGOOS
+		writeClipboard = oldClipboard
 	}()
 
 	m := chatModel{
@@ -1089,11 +1039,11 @@ func TestChatMouseDragSelectionUsesScrolledTranscriptCoordinates(t *testing.T) {
 	}
 	updated, cmd := m.Update(tea.MouseMsg{Type: tea.MouseRelease, Action: tea.MouseActionRelease, X: 9, Y: top})
 	m = updated.(chatModel)
-	if cmd != nil {
-		t.Fatal("mouse release should not auto-copy selected text")
+	if cmd == nil {
+		t.Fatal("mouse release should copy selected text")
 	}
-	if !m.selection.active {
-		t.Fatal("selection should stay visible on release")
+	if m.selection.active {
+		t.Fatal("selection should clear after copy")
 	}
 	if m.selection.dragging {
 		t.Fatal("selection should stop tracking drag on release")

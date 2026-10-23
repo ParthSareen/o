@@ -341,7 +341,7 @@ func (m chatModel) resolveApprovalPrompt(choice chatApprovalChoice) (tea.Model, 
 		result.AllowScopes = allowScopes
 	}
 	prompt.reply <- result
-	return m.withFlowTranscriptRefreshAfter(printedTranscript, printedLines, waitForChatMsg(m.events))
+	return m.withFlowTranscriptRefreshAfter(printedTranscript, printedLines, m.waitEvents(m.events))
 }
 
 func (m chatModel) renderApprovalPromptLines(width int) []string {

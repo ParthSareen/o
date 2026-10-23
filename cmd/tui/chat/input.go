@@ -57,6 +57,7 @@ var chatSlashCommands = []chatSlashCommand{
 	{name: "/tools", description: "toggle tools on or off"},
 	{name: "/system", usage: "/system [on|off]", description: "show or set the built-in system prompt"},
 	{name: "/skills", usage: "/skills [import codex|claude|pi]", description: "list or import skills"},
+	{name: "/side", usage: "/side [close]", description: "open a side chat forked from this conversation"},
 	{name: "/compact", description: "summarize older context"},
 	{name: "/copy", description: "copy last response to the clipboard"},
 	{name: "/help", description: "show commands", aliases: []string{"/?"}},
@@ -146,6 +147,9 @@ func (m *chatModel) applySlashCompletion() bool {
 }
 
 func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
+	if m.pane {
+		return m.submitPaneInput(input)
+	}
 	command, args, _ := slashCommandInvocation(input)
 	if command != "" {
 		input = strings.TrimSpace(command + " " + args)
@@ -185,6 +189,13 @@ func (m *chatModel) submitInput(input string) (tea.Model, tea.Cmd) {
 		return m.handleResumeCommand(args)
 	case command == "/name":
 		return m.handleNameCommand(args)
+	case command == "/side" && args == "":
+		return m.openSidePane()
+	case command == "/side" && args == "close":
+		return m.closeSidePane()
+	case command == "/side":
+		m.entries = append(m.entries, newSlashEntry("usage: /side [close]"))
+		return *m, nil
 	case command == "/compact" && args == "":
 		return m.startManualCompaction()
 	case command == "/copy" && args == "":
@@ -1318,6 +1329,9 @@ func (m chatModel) slashCompletions() []chatCompletion {
 	if !strings.HasPrefix(input, "/") {
 		return nil
 	}
+	if m.pane {
+		return m.paneSlashCompletions(input)
+	}
 	if argument, ok := systemCommandArgument(rawInput); ok {
 		return systemCommandCompletions(argument)
 	}
@@ -1689,6 +1703,7 @@ func (m chatModel) helpSummary() string {
 		"- `shift+tab`: toggle permission mode",
 		"- `↑/↓`: previous or next prompt",
 		"- `ctrl+a/e`: move to line start or end",
+		"- `opt+]` (or `ctrl+]`): open the side chat or switch focus",
 	)
 	return strings.Join(lines, "\n")
 }

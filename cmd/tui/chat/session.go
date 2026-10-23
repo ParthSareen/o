@@ -143,6 +143,7 @@ func (m *chatModel) resumeSession(id string) bool {
 	if err != nil {
 		return false
 	}
+	m.dropSidePane()
 	m.chatID = sess.ID
 	m.chatName = sess.Name
 	m.opts.Model = sess.Model
