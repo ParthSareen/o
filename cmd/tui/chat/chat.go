@@ -164,6 +164,11 @@ type chatModel struct {
 	permissionNotice     string
 	selection            chatSelection
 
+	// memo caches the assembled transcript across View passes. Value copies of
+	// the model share the pointer, so a cache written during one View survives
+	// into the next Update/View cycle.
+	memo *transcriptMemo
+
 	systemPromptDisabled bool
 
 	width              int
@@ -267,6 +272,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		status:            "ready",
 		openModelOnInit:   opts.OpenModelPicker || (strings.TrimSpace(opts.Model) == "" && opts.ModelOptions != nil),
 	}
+	m.memo = &transcriptMemo{}
 	m.nextImageID, m.nextAudioID = nextInputAttachmentIDsFromMessages(m.messages)
 	m.nextPastedTextID = nextInputPastedTextIDFromMessages(m.messages)
 	m.entries = entriesFromMessages(m.messages)
