@@ -154,6 +154,12 @@ only the fork's model, and clicking a pane focuses it. Pane focus keys are
 `opt+]` or `ctrl+]` because `opt+[` collides with the `ESC [` CSI prefix that
 terminals use for key sequences.
 
+The split needs mouse reporting, so `o` turns it on only while the split, the
+model picker, or the prompt debug screen is showing. Outside those, the
+terminal keeps its own cmd+click link opening, hover underlines, drag
+selection, and wheel scrolling. The app's transcript viewport (`PgUp`/`PgDn`)
+works either way.
+
 Background shell tasks (`background=true`) are killed when the session exits,
 so they cannot outlive o; use watchy for processes that should persist.
 Recurring checks should use the `poll` tool instead of background sleep loops:

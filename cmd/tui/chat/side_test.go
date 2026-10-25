@@ -552,3 +552,183 @@ func TestSideModelSwitchClosesTheOldRegistry(t *testing.T) {
 		t.Fatal("switching the side model must not close the root registry")
 	}
 }
+
+// Mouse reporting is terminal-wide: while it is on, the terminal sends clicks
+// to the program instead of opening cmd+click links or selecting natively. The
+// pane is the only thing that needs the mouse, so capture stays scoped to it.
+func TestMouseCaptureIsScopedToThePane(t *testing.T) {
+	m := chatModel{ctx: context.Background(), width: 120, height: 20, opts: Options{Model: "model-a"}}
+	if m.wantsMouseCapture() || m.mouseCaptured {
+		t.Fatal("a plain chat must start without mouse capture")
+	}
+
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	m = updated.(chatModel)
+	if cmd != nil || m.mouseCaptured {
+		t.Fatal("resizing without a pane must not touch mouse capture")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	m = updated.(chatModel)
+	if m.side == nil {
+		t.Fatal("ctrl+] should open the side chat")
+	}
+	if !m.mouseCaptured {
+		t.Fatal("opening the pane should capture the mouse so the pane is clickable")
+	}
+	if cmd == nil {
+		t.Fatal("opening the pane should emit the mouse-mode command")
+	}
+	if msg := cmd(); msg != tea.EnableMouseCellMotion() {
+		t.Fatalf("open command = %#v, want the mouse-enable message", msg)
+	}
+
+	updated, cmd = m.Update(chatSideCloseMsg{})
+	m = updated.(chatModel)
+	if m.side != nil {
+		t.Fatal("closing the pane should drop the fork")
+	}
+	if m.mouseCaptured {
+		t.Fatal("closing the pane should hand the mouse back to the terminal")
+	}
+	if cmd == nil {
+		t.Fatal("closing the pane should emit a command")
+	}
+
+	// Closing again is a no-op: no pane means no mouse-mode churn.
+	updated, cmd = m.Update(chatSideCloseMsg{})
+	if next := updated.(chatModel); next.mouseCaptured || cmd != nil {
+		t.Fatal("closing when no pane is open must not touch mouse capture")
+	}
+}
+
+// The prompt debug screen scrolls with the wheel, so it captures the mouse and
+// has to release it on close. It used to release unconditionally, which left the
+// pane's click handling dead after any /prompt.
+func TestPromptDebugReleasesMouseCapture(t *testing.T) {
+	m := chatModel{ctx: context.Background(), width: 120, height: 20, opts: Options{Model: "model-a"}}
+
+	m.input = []rune("/prompt")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(chatModel)
+	if m.promptDebug == nil {
+		t.Fatal("/prompt should open the prompt debug screen")
+	}
+	if !m.mouseCaptured || cmd == nil {
+		t.Fatal("/prompt should capture the mouse")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(chatModel)
+	if m.promptDebug != nil {
+		t.Fatal("esc should close the prompt debug screen")
+	}
+	if m.mouseCaptured {
+		t.Fatal("closing /prompt should release the mouse")
+	}
+}
+
+// A pane never owns the terminal, so its own update loop must not emit
+// mouse-mode commands on behalf of the root.
+func TestPaneUpdateLeavesMouseCaptureAlone(t *testing.T) {
+	m := chatModel{ctx: context.Background(), width: 120, height: 20, opts: Options{Model: "model-a"}}
+	updated, _ := m.openSidePane()
+	m = updated.(chatModel)
+
+	pane := *m.side
+	pane.mouseCaptured = false
+	updated, cmd := pane.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	if next := updated.(chatModel); next.mouseCaptured {
+		t.Fatal("the pane must not turn on mouse capture")
+	}
+	if cmd != nil {
+		t.Fatalf("the pane must not emit mouse commands, got %#v", cmd())
+	}
+}
+
+func TestMouseCaptureCommands(t *testing.T) {
+	if msg := mouseCaptureCommand(true)(); msg != tea.EnableMouseCellMotion() {
+		t.Fatalf("enable command = %#v", msg)
+	}
+	if msg := mouseCaptureCommand(false)(); msg != tea.DisableMouse() {
+		t.Fatalf("disable command = %#v", msg)
+	}
+}
+
+// A split that does not fit is not drawn, so it must not hold the mouse either:
+// capture follows what is on screen, not what exists in the model.
+func TestMouseCaptureFollowsSplitVisibility(t *testing.T) {
+	m := chatModel{ctx: context.Background(), width: 140, height: 30, opts: Options{Model: "model-a"}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	m = updated.(chatModel)
+	if !m.mouseCaptured {
+		t.Fatal("a visible split should capture the mouse")
+	}
+
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+	m = updated.(chatModel)
+	if m.side == nil {
+		t.Fatal("shrinking must keep the fork, only hide it")
+	}
+	if m.mouseCaptured {
+		t.Fatal("a hidden split should release the mouse")
+	}
+	if cmd == nil || cmd() != tea.DisableMouse() {
+		t.Fatal("hiding the split should disable mouse capture")
+	}
+
+	updated, cmd = m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
+	m = updated.(chatModel)
+	if !m.mouseCaptured {
+		t.Fatal("bringing the split back should capture the mouse again")
+	}
+	if cmd == nil || cmd() != tea.EnableMouseCellMotion() {
+		t.Fatal("showing the split should enable mouse capture")
+	}
+}
+
+// Returning from the editor or the diff viewer restores the terminal without
+// mouse reporting, so a pane that was clickable before has to be captured
+// again instead of silently staying dead.
+func TestExecProcessReturnRecapturesMouseForThePane(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{name: "editor", msg: chatEditorClosedMsg{}},
+		{name: "diffview", msg: chatDiffViewerClosedMsg{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := chatModel{ctx: context.Background(), width: 140, height: 30, opts: Options{Model: "model-a"}}
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+			m = updated.(chatModel)
+			if !m.mouseCaptured {
+				t.Fatal("a visible split should capture the mouse")
+			}
+
+			updated, cmd := m.Update(tc.msg)
+			m = updated.(chatModel)
+			if m.side == nil {
+				t.Fatal("returning from an external process must keep the pane")
+			}
+			if !m.mouseCaptured {
+				t.Fatal("the pane should still hold the mouse after the process returns")
+			}
+			if cmd == nil || cmd() != tea.EnableMouseCellMotion() {
+				t.Fatal("returning with a pane open should re-enable mouse capture")
+			}
+		})
+	}
+}
+
+// The model picker scrolls with the wheel, so it takes the mouse while it is up.
+func TestModelPickerWantsMouseCapture(t *testing.T) {
+	m := chatModel{width: 120, height: 20}
+	if m.wantsMouseCapture() {
+		t.Fatal("a plain chat should not capture the mouse")
+	}
+	m.modelPicker = &chatModelPicker{}
+	if !m.wantsMouseCapture() {
+		t.Fatal("the model picker should capture the mouse")
+	}
+}
