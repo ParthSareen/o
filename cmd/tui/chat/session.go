@@ -82,6 +82,9 @@ func (m *chatModel) resetSession() {
 	}
 	m.chatID = sess.ID
 	m.chatName = sess.Name
+	// Naming progress tracks the chat: a fresh chat is unnamed again, so its
+	// naming run fires once it accumulates the first user turns.
+	m.titleNamed = false
 }
 
 // dedupPrompts merges two prompt slices (both chronological), removing

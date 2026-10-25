@@ -748,7 +748,7 @@ func touchSessionTx(tx *sql.Tx, sessionID string, delta []api.Message, now int64
 	if err := tx.QueryRow(`SELECT title FROM sessions WHERE id = ?`, sessionID).Scan(&title); err == nil && title == "" {
 		for _, msg := range delta {
 			if msg.Role == "user" && msg.Content != "" {
-				if _, err := tx.Exec(`UPDATE sessions SET title = ? WHERE id = ?`, deriveTitle(msg.Content), sessionID); err != nil {
+				if _, err := tx.Exec(`UPDATE sessions SET title = ? WHERE id = ?`, DerivedTitle(msg.Content), sessionID); err != nil {
 					return fmt.Errorf("set title: %w", err)
 				}
 				break

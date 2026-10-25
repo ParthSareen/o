@@ -93,6 +93,13 @@ List current worktrees: `git worktree list`.
 o saves sessions to `~/.o/sessions.db` (SQLite). Each session gets a UUID; o
 appends messages after each run. A session can have a name (`--name` at
 launch or `/name set <text>` in the TUI). o upgrades an old database on open.
+Titles start derived from the first user message (truncated); once a session
+accumulates five user messages, one small LLM call names it grounded in the
+first five turns (`agent/session_title.go`, wired in
+`cmd/tui/chat/session_title.go`). Each session is named at most once: a set
+title is never re-named by later runs, compaction, or resumes. Naming is
+best-effort: a failed call leaves the derived title until a later process
+run.
 
 Runs are also journaled to the same database (additive tables: `runs`,
 `tool_calls`, `session_events`, raw history, `compactions`, `approvals`,
