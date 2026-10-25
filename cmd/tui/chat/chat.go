@@ -111,6 +111,10 @@ type chatModel struct {
 	entries      []chatEntry
 	workingDir   string
 
+	// LLM session naming (see session_title.go): titleNamed once the one-shot
+	// naming call has been fired (or found unnecessary) for this chat.
+	titleNamed bool
+
 	input            []rune
 	inputCursor      int
 	inputCursorSet   bool
@@ -467,6 +471,9 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !msg.result.Committed && !msg.result.Replayed {
 				m.persistRunResult(msg.result.Messages)
 			}
+			// Naming runs off the completed history whether or not this process
+			// was the one that persisted it.
+			m.maybeNameSession(msg.result.Messages)
 			if msg.result.WorkingDir != "" {
 				m.workingDir = msg.result.WorkingDir
 			}
@@ -1517,6 +1524,7 @@ func (m *chatModel) finishLiveMessagesForStoppedRun(promote bool, persistedMessa
 		}
 	}
 	m.persistRunResult(m.messages)
+	m.maybeNameSession(m.messages)
 	m.liveMessages = nil
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
 	m.contextEstimate = true

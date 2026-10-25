@@ -292,6 +292,18 @@ func (s *Store) DeleteSession(id string) error {
 	return err
 }
 
+// Title returns the stored title for a session (may be empty).
+func (s *Store) Title(sessionID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var title string
+	err := s.db.QueryRow(`SELECT title FROM sessions WHERE id = ?`, sessionID).Scan(&title)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("session %s not found", sessionID)
+	}
+	return title, err
+}
+
 // SetTitle updates the session title.
 func (s *Store) SetTitle(sessionID, title string) error {
 	s.mu.Lock()
@@ -357,7 +369,7 @@ func (s *Store) AppendMessages(sessionID string, msgs []api.Message) error {
 	if title == "" {
 		for _, msg := range msgs {
 			if msg.Role == "user" && msg.Content != "" {
-				title = deriveTitle(msg.Content)
+				title = DerivedTitle(msg.Content)
 				break
 			}
 		}
@@ -602,8 +614,11 @@ func scanMessage(rows messageScanner) (api.Message, error) {
 	return msg, nil
 }
 
-func deriveTitle(content string) string {
-	// First non-empty line, truncated to 80 runes, newlines replaced.
+// DerivedTitle is the cheap fallback session title: the first non-empty line
+// of a message, truncated to 80 runes. Sessions start with this; LLM naming
+// may later replace it. Exported so callers can tell a still-untitled session
+// (title == DerivedTitle(first user message)) from a named one.
+func DerivedTitle(content string) string {
 	title := content
 	for _, line := range splitLines(content) {
 		line = trimSpace(line)

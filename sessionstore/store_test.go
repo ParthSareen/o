@@ -367,3 +367,43 @@ func TestSyncMessagesSelfHealsDrift(t *testing.T) {
 		t.Fatalf("duplicate rows survived: %+v", loaded.Messages)
 	}
 }
+
+// TestTitleAccessorAndOverride pins the Title accessor and that a title set
+// after the derived default (e.g. by LLM session naming) survives further
+// message appends: the auto-title rule only fills an empty title.
+func TestTitleAccessorAndOverride(t *testing.T) {
+	s := openTestStore(t)
+	sess, err := s.CreateSession("m", "", "", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	first := "fix the build please"
+	s.AppendMessages(sess.ID, []api.Message{{Role: "user", Content: first}})
+
+	title, err := s.Title(sess.ID)
+	if err != nil {
+		t.Fatalf("Title: %v", err)
+	}
+	if title != DerivedTitle(first) {
+		t.Errorf("Title = %q, want derived %q", title, DerivedTitle(first))
+	}
+
+	if err := s.SetTitle(sess.ID, "Fix the build"); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
+	s.AppendMessages(sess.ID, []api.Message{
+		{Role: "assistant", Content: "done"},
+		{Role: "user", Content: "now add caching"},
+	})
+	title, err = s.Title(sess.ID)
+	if err != nil {
+		t.Fatalf("Title: %v", err)
+	}
+	if title != "Fix the build" {
+		t.Errorf("title overwritten by later appends: %q", title)
+	}
+
+	if _, err := s.Title("no-such-session"); err == nil {
+		t.Error("Title on unknown session: want error")
+	}
+}
