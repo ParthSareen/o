@@ -282,8 +282,8 @@ func (m chatModel) transcriptHeight() int {
 // transcriptWidth is the width of the root transcript: the full terminal
 // normally, the left column while the side split is showing.
 func (m chatModel) transcriptWidth() int {
-	width, height := m.viewSize()
-	if m.side != nil && width >= minSideSplitWidth && height >= 8 {
+	width, _ := m.viewSize()
+	if m.sideSplitVisible() {
 		width, _ = splitPaneWidths(width)
 	}
 	return width

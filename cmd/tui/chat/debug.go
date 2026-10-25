@@ -60,7 +60,7 @@ func (m *chatModel) handlePromptCommand(args string) (tea.Model, tea.Cmd) {
 	m.flowPrintedLines = 0
 	m.selection = chatSelection{}
 	m.status = "prompt"
-	return *m, tea.Batch(tea.ClearScreen, tea.EnableMouseCellMotion)
+	return *m, tea.ClearScreen
 }
 
 func (m chatModel) updatePromptDebug(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -94,7 +94,7 @@ func (m chatModel) closePromptDebug() (tea.Model, tea.Cmd) {
 	m.status = "ready"
 	m.flowPrintedLines = 0
 	next, printCmd := m.flowTranscriptFlushCmd()
-	return next, tea.Sequence(tea.DisableMouse, tea.ClearScreen, printCmd)
+	return next, tea.Sequence(tea.ClearScreen, printCmd)
 }
 
 func (m chatModel) renderPromptDebug(width, height int) string {

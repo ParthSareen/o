@@ -157,25 +157,57 @@ func TestBackgroundWakeDefersUnderModalUIWithoutBusyLoop(t *testing.T) {
 
 	// The deferred watcher must block despite already-pending work: firing
 	// immediately would re-enter this branch forever and burn the Update
-	// pump for as long as the modal stays open.
-	msgCh := make(chan tea.Msg, 1)
-	go func() { msgCh <- cmd() }()
-	select {
-	case <-msgCh:
-		t.Fatal("deferred watcher fired on already-pending work; would busy-loop")
-	case <-time.After(100 * time.Millisecond):
+	// pump for as long as the modal stays open. Other messages that ride
+	// along with this update (the mouse-mode change the picker asks for) may
+	// arrive right away, so only the wake message counts as a failure.
+	msgCh := runChatCmd(cmd)
+	quiet := time.After(100 * time.Millisecond)
+	for waiting := true; waiting; {
+		select {
+		case msg := <-msgCh:
+			if _, ok := msg.(chatBackgroundWakeMsg); ok {
+				t.Fatal("deferred watcher fired on already-pending work; would busy-loop")
+			}
+		case <-quiet:
+			waiting = false
+		}
 	}
 
 	// A genuinely new event does wake it.
 	if _, err := manager.Start("", "true"); err != nil {
 		t.Fatalf("start background task: %v", err)
 	}
-	select {
-	case msg := <-msgCh:
-		if _, ok := msg.(chatBackgroundWakeMsg); !ok {
-			t.Fatalf("watcher delivered %T, want chatBackgroundWakeMsg", msg)
+	wake := time.After(5 * time.Second)
+	for {
+		select {
+		case msg := <-msgCh:
+			if _, ok := msg.(chatBackgroundWakeMsg); ok {
+				return
+			}
+		case <-wake:
+			t.Fatal("watcher missed the next completion")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("watcher missed the next completion")
 	}
+}
+
+// runChatCmd executes a command the way the event loop does: a batch is
+// flattened and its commands run concurrently, each reporting its message.
+func runChatCmd(cmd tea.Cmd) <-chan tea.Msg {
+	out := make(chan tea.Msg, 8)
+	go func() {
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			out <- msg
+			return
+		}
+		for _, inner := range batch {
+			go func(c tea.Cmd) {
+				if produced := c(); produced != nil {
+					out <- produced
+				}
+			}(inner)
+		}
+	}()
+	return out
 }

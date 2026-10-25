@@ -77,12 +77,25 @@ into the other's history.
 - `opt+[` is deliberately **not bound**: it sends `ESC [`, the CSI
   introducer. bubbletea buffers it waiting for a sequence and swallows the
   next keypress. `ctrl+]` (`KeyCtrlCloseBracket`) is the unambiguous alias.
-- The program now passes `tea.WithMouseCellMotion()` so panes are clickable.
-  Consequence: the terminal's native drag-selection is captured, so the app
-  copies drag selections on **every** platform (previously Windows-only).
-  Option-drag still selects natively in iTerm2/Terminal. A drag keeps the
-  pane it started in across the divider, and a release always finishes that
-  selection.
+- Mouse capture is **scoped**: the program starts without it and the update
+  loop turns `tea.EnableMouseCellMotion` on only while the split, the model
+  picker, or the prompt debug screen needs the mouse, then turns it back off.
+  That matters because capture is terminal-wide: a terminal that is forwarding
+  clicks to the program stops opening links on its own (Ghostty strips Cmd
+  from a forwarded click, so `cmd+click` does nothing while capture is on and
+  only its Shift bypass works), which is what made click-to-open links look
+  broken while capture was held for the whole session.
+- Inside the split, drag selections are copied by the app (native selection
+  needs Option-drag, native link opening needs Shift). Returning from nvim
+  (`tea.ExecProcess`) restores the terminal without mouse reporting, so the
+  editor and diff-viewer closed handlers mark capture off and the update loop
+  re-enables it when a pane is still up.
+- `/prompt` recomputes mouse mode from what is on screen instead of disabling
+  it unconditionally; the old unconditional disable left the pane's click
+  handling dead for the rest of the session.
+- Outside those modes the wheel belongs to the terminal's scrollback again, as
+  it did before the pane: the app's transcript viewport moves with `PgUp` and
+  `PgDn`, which are handled as keys and need no capture.
 
 ## Files
 
@@ -107,6 +120,9 @@ into the other's history.
   close and on `/model`, focus routing (`opt+]`, `ctrl+]`), pane commands and
   rejections, per-pane runs with fork history, budget trimming, orphaned tool
   results, cross-pane drag ownership, clicking the pane input, and `ctrl+d`.
+- Mouse scoping is covered too: capture turns on with the split, the model
+  picker, and `/prompt`; turns off when the pane closes or stops fitting; is
+  re-enabled after `tea.ExecProcess` returns; and is ignored by pane updates.
 - Live pty run (expect + `llama3.2`): split rendered with mouse capture on;
   typing landed in the focused pane; `ctrl+]` toggled focus; `ctrl+c` twice
   closed the pane and repainted; the side chat answered a question using the

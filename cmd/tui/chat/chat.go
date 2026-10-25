@@ -197,6 +197,9 @@ type chatModel struct {
 	pane    bool
 	focused bool
 	route   func(tea.Msg) tea.Msg
+	// mouseCaptured mirrors the terminal's mouse reporting state so the update
+	// loop only emits mouse-mode commands when the UI's needs change.
+	mouseCaptured bool
 }
 
 type chatSelectionPoint struct {
@@ -293,7 +296,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		m.preloadingModel = strings.TrimSpace(opts.Model)
 	}
 
-	p := tea.NewProgram(m, tea.WithReportFocus(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithReportFocus())
 	finalModel, err := p.Run()
 	if err != nil {
 		return nil, err
@@ -321,7 +324,74 @@ func (m chatModel) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// Update routes one message into the model and keeps mouse reporting in step
+// with the UI. Capture is only needed for the split pane and the prompt debug
+// screen, and holding it takes clicks away from the terminal, so it is off
+// whenever neither is showing.
 func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	switch model := next.(type) {
+	case chatModel:
+		return model.withMouseCapture(cmd)
+	case *chatModel:
+		return model.withMouseCapture(cmd)
+	}
+	return next, cmd
+}
+
+// withMouseCapture emits the mouse-mode command when the UI's needs changed.
+// A pane never owns the terminal, so it leaves mouse mode alone.
+func (m chatModel) withMouseCapture(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.pane {
+		return m, cmd
+	}
+	want := m.wantsMouseCapture()
+	if want == m.mouseCaptured {
+		return m, cmd
+	}
+	m.mouseCaptured = want
+	if !want {
+		// A drag that never got its release leaves a stale highlight behind.
+		m.selection = chatSelection{}
+		if m.side != nil {
+			m.side.selection = chatSelection{}
+		}
+	}
+	mouse := mouseCaptureCommand(want)
+	if cmd == nil {
+		return m, mouse
+	}
+	return m, tea.Batch(cmd, mouse)
+}
+
+// mouseCaptureCommand is the command that puts the terminal's mouse reporting
+// into the given state.
+func mouseCaptureCommand(capture bool) tea.Cmd {
+	if capture {
+		return tea.EnableMouseCellMotion
+	}
+	return tea.DisableMouse
+}
+
+// sideSplitVisible reports whether the terminal is wide and tall enough to
+// draw the split, which is also when the pane can be clicked.
+func (m chatModel) sideSplitVisible() bool {
+	if m.side == nil {
+		return false
+	}
+	width, height := m.viewSize()
+	return width >= minSideSplitWidth && height >= 8
+}
+
+// wantsMouseCapture reports whether the visible UI needs mouse events. Mouse
+// reporting is terminal-wide: while it is on, the terminal sends clicks to the
+// program instead of acting on them itself, which costs cmd+click link
+// opening, hover underlines, and native drag selection.
+func (m chatModel) wantsMouseCapture() bool {
+	return m.promptDebug != nil || m.modelPicker != nil || m.sideSplitVisible()
+}
+
+func (m chatModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.canEditInput() && isShiftEnterCSI(msg) {
 		m.insertInputNewline()
 		return m, nil
@@ -415,6 +485,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatDiffViewerClosedMsg:
+		// tea.ExecProcess restored the terminal without mouse reporting, so
+		// declare it off and let the update loop put it back if a pane still
+		// needs it.
+		m.mouseCaptured = false
 		if msg.err != nil {
 			m.status = "diffview failed: " + msg.err.Error()
 			return m, nil
@@ -423,6 +497,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatEditorClosedMsg:
+		m.mouseCaptured = false
 		if msg.err != nil {
 			m.status = "editor failed: " + msg.err.Error()
 			return m, nil
@@ -619,22 +694,20 @@ func (m chatModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if m.side != nil {
-		width, height := m.viewSize()
-		if width >= minSideSplitWidth && height >= 8 {
-			mainWidth, _ := splitPaneWidths(width)
-			sideDragging := m.side.selection.active && m.side.selection.dragging
-			rootDragging := m.selection.active && m.selection.dragging
-			switch {
-			case sideDragging:
-				return m.updateSideMouse(msg, max(0, msg.X-(mainWidth+1)))
-			case rootDragging:
-				// Keep delivering the drag to the pane it started in.
-			case msg.X >= mainWidth:
-				return m.updateSideMouse(msg, max(0, msg.X-(mainWidth+1)))
-			case msg.Type == tea.MouseLeft:
-				m.sideFocus = false
-			}
+	if m.sideSplitVisible() {
+		width, _ := m.viewSize()
+		mainWidth, _ := splitPaneWidths(width)
+		sideDragging := m.side.selection.active && m.side.selection.dragging
+		rootDragging := m.selection.active && m.selection.dragging
+		switch {
+		case sideDragging:
+			return m.updateSideMouse(msg, max(0, msg.X-(mainWidth+1)))
+		case rootDragging:
+			// Keep delivering the drag to the pane it started in.
+		case msg.X >= mainWidth:
+			return m.updateSideMouse(msg, max(0, msg.X-(mainWidth+1)))
+		case msg.Type == tea.MouseLeft:
+			m.sideFocus = false
 		}
 	}
 	if !m.mouseInTranscript(msg) && !m.selection.active {

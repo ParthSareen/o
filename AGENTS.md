@@ -125,8 +125,10 @@ prompt, working directory, and model; it is ephemeral (no store row) and never
 writes into the root history. The same key switches pane focus, and Esc twice
 (or ctrl+c twice) closes an idle side chat. Don't bind `opt+[`: terminals encode it as the `ESC [` CSI
 prefix, which the input parser swallows along with the next keypress. Mouse
-reporting is enabled so panes are clickable; drag selections are copied by the
-app (the terminal's native selection needs Option-drag).
+reporting is turned on only while the split, the model picker, or the prompt
+debug screen is showing, so the terminal keeps its own cmd+click link opening,
+hover underlines, drag selection, and wheel scrolling the rest of the time;
+inside the split, drag selections are copied by the app.
 
 The chat renders markdown: headings, code fences, tables, emphasis, links,
 images (alt text only), lists, blockquotes, horizontal rules.
