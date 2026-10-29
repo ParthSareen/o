@@ -66,10 +66,13 @@ def body(request, state, run_id, attempt, result=None, note=""):
             lines += [f"#### {index}. <code>{safe_text(location)}</code>", "", safe_text(finding["body"]), ""]
         for name in ("omitted", "context_limited"):
             if result.get(name):
-                lines += [f"{name.replace('_', ' ').capitalize()}: " + ", ".join(
+                label = "Initial surrounding context omitted" if name == "context_limited" else "Omitted from diff"
+                lines += [f"{label}: " + ", ".join(
                     f"<code>{safe_text(path)}</code>" for path in result[name]), ""]
         usage = result["usage"]
-        lines += [f"{usage['prompt_tokens']:,} input tokens · {usage['completion_tokens']:,} output tokens · "
+        lines += [f"{result.get('requests', 1)} model requests · {result.get('tool_calls', 0)} repository tool calls · "
+                  f"{result.get('files_read', 0)} distinct files read with `read_file`",
+                  f"{usage['prompt_tokens']:,} input tokens · {usage['completion_tokens']:,} output tokens · "
                   f"estimated list-price cost ${result['estimated_cost_usd']:.4f}",
                   "Automated findings need verification. This review does not approve the PR."]
     if note and state != "incomplete":
@@ -113,7 +116,8 @@ def validate_result(github, request, result):
     verified["eligible"] = {file["filename"]: sorted(right_lines(file.get("patch", ""))) for file in files
                             if file["filename"] in request["eligible"]}
     validated = normalize({"findings": result.get("findings"), "usage": result.get("usage"),
-                           "requests": result.get("requests"), "finish_reason": "stop"}, verified)
+                           "requests": result.get("requests"), "finish_reason": "stop",
+                           **{field: result.get(field, 0) for field in ("tool_calls", "files_read", "repository_omitted")}}, verified)
     context = result.get("context_limited", [])
     if isinstance(context, list) and all(isinstance(value, str) for value in context):
         validated["context_limited"] = context[:100]

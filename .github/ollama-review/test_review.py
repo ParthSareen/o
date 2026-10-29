@@ -11,6 +11,7 @@ import review
 
 BASE = "a" * 40
 HEAD = "b" * 40
+SNAPSHOT = {"git_dir": "/unused-test-snapshot", "head": HEAD, "files": [], "omitted": 0}
 PR = {"number": 7, "state": "open", "draft": False, "changed_files": 1,
       "base": {"sha": BASE}, "head": {"sha": HEAD, "repo": {"full_name": "owner/repo"}}}
 PATCH = "@@ -2,3 +2,3 @@\n old\n-removed\n+added\n tail\n"
@@ -110,11 +111,13 @@ class ReviewTest(unittest.TestCase):
         self.assertIsNone(result["findings"][1]["start_line"])
 
     def test_invalid_truncated_or_unmetered_results_never_report_clean(self):
-        cases = [response(), response(), response(), response()]
+        cases = [response() for _ in range(6)]
         cases[0]["findings"] = "none"
         cases[1]["usage"] = {}
         cases[2]["usage"]["completion_tokens"] = -1
         cases[3]["finish_reason"] = "length"
+        cases[4]["requests"] = 0
+        cases[5]["usage"]["completion_tokens"] = 2_000_000
         for raw in cases:
             with self.subTest(raw=raw), self.assertRaises(review.ReviewError):
                 review.normalize(raw, REQUEST)
@@ -128,6 +131,39 @@ class ReviewTest(unittest.TestCase):
         for issue in issues:
             self.assertIn(issue["body"], rendered)
 
+    def test_multiple_model_turns_preserve_cumulative_usage(self):
+        raw = response()
+        raw["requests"] = 4
+        result = review.normalize(raw, REQUEST)
+        self.assertEqual(result["requests"], 4)
+        self.assertEqual(result["usage"], raw["usage"])
+
+    def test_snapshot_pins_head_and_filters_non_source_without_persisting_credentials(self):
+        github = FakeGitHub()
+        tree = (f"100644 blob {'c' * 40} 10\tsrc/caller.py\0"
+                f"100644 blob {'d' * 40} 20\tsrc/unchanged.py\0"
+                f"120000 blob {'e' * 40} 11\tlink.py\0"
+                f"100644 blob {'f' * 40} 9\t.env\0"
+                f"160000 commit {'a' * 40} -\tsubmodule\0").encode()
+        def execute(command, **kwargs):
+            if "fetch" in command:
+                self.assertIn("refs/pull/7/head", command)
+                self.assertIn("GIT_CONFIG_VALUE_0", kwargs["env"])
+                self.assertNotIn(github.token, " ".join(command))
+            else:
+                self.assertNotIn("GIT_CONFIG_VALUE_0", kwargs["env"])
+            output = HEAD.encode() if "rev-parse" in command else tree if "ls-tree" in command else b""
+            return subprocess.CompletedProcess(command, 0, stdout=output)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(review.subprocess, "run", side_effect=execute):
+            result = review.snapshot(REQUEST, Path(tmp), github)
+        self.assertEqual([item["path"] for item in result["files"]], ["src/caller.py", "src/unchanged.py"])
+        self.assertEqual(result["omitted"], 3)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(review.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=b"wrong-head")):
+            with self.assertRaisesRegex(review.ReviewError, "changed while fetching"):
+                review.snapshot(REQUEST, Path(tmp), github)
+
     def test_changed_head_discards_output_and_engine_gets_no_write_token(self):
         github = FakeGitHub()
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,7 +175,7 @@ class ReviewTest(unittest.TestCase):
                     github.pr["head"]["sha"] = "d" * 40
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch.object(review.subprocess, "run", side_effect=execute) as run:
+            with patch.object(review, "snapshot", return_value=SNAPSHOT), patch.object(review.subprocess, "run", side_effect=execute) as run:
                 with self.assertRaisesRegex(review.ReviewError, "changed during"):
                     review.analyze(REQUEST, directory, github, "not-a-real-key")
                 self.assertEqual(run.call_count, 1)
@@ -157,7 +193,7 @@ class ReviewTest(unittest.TestCase):
                 self.assertEqual(packet["review"]["files"][0]["context"], "")
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch.object(review.subprocess, "run", side_effect=execute):
+            with patch.object(review, "snapshot", return_value=SNAPSHOT), patch.object(review.subprocess, "run", side_effect=execute):
                 result = review.analyze(REQUEST, directory, github, "not-a-real-key")
             self.assertEqual(result["context_limited"], ["app.py"])
             self.assertEqual(result["requests"], 1)

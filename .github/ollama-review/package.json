@@ -2,7 +2,7 @@
   "name": "ollama-pr-review",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test engine.test.mjs" },
+  "scripts": { "test": "node --test *.test.mjs" },
   "engines": { "node": ">=22.19.0" },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",

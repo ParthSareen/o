@@ -2,6 +2,7 @@ import { Agent } from '@earendil-works/pi-agent-core';
 import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { repositoryTools } from './repository.mjs';
 
 const model = {
   id: 'deepseek-v4.1-flash:1017',
@@ -35,17 +36,32 @@ function providerFailure(message = '') {
   return 'Ollama request failed before a complete response; no review is claimed.';
 }
 
-export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeoutMs = 480000 } = {}) {
+export async function runReview(input, { apiKey, repository, fetch = globalThis.fetch, timeoutMs = 480000 } = {}) {
   if (!apiKey) throw new ReviewError('OLLAMA_API_KEY is required.');
   if (!input || typeof input.policy !== 'string' || !Array.isArray(input.review?.files)) {
     throw new ReviewError('Invalid review input.');
   }
   let requests = 0;
   let payloads = 0;
+  let failure;
+  const usage = { prompt_tokens: 0, completion_tokens: 0 };
+  const cost = () => (usage.prompt_tokens * model.cost.input + usage.completion_tokens * model.cost.output) / 1e6;
+  const reservation = model.contextWindow * (model.cost.input + model.cost.output) / 1e6;
+  const filesRead = new Set();
+  let toolCalls = 0;
+  const tools = repositoryTools(repository, input.review.head, path => filesRead.add(path)).map(tool => ({
+    ...tool, execute: (...args) => { toolCalls++; return tool.execute(...args); },
+  }));
+  const names = new Set(tools.map(tool => tool.name));
   const agent = new Agent({
-    initialState: { model, tools: [], thinkingLevel: 'low', systemPrompt: input.policy },
+    initialState: { model, tools, thinkingLevel: 'low', systemPrompt: input.policy },
+    toolExecution: 'sequential',
     streamFn: (selectedModel, context, options) => {
-      if (++requests !== 1) throw new Error('The one-request review budget has been consumed.');
+      if (cost() + reservation > 2) {
+        failure = 'The remaining $2 review allowance cannot cover another model request; review is incomplete.';
+        throw new ReviewError(failure);
+      }
+      requests++;
       return streamSimple(selectedModel, context, {
         ...options,
         apiKey,
@@ -54,8 +70,10 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
         cacheRetention: 'none',
         fetch: (url, init) => fetch(url, { ...init, redirect: 'error' }),
         onPayload: (payload) => {
-          if (++payloads !== 1 || payload.model !== model.id
-              || payload.reasoning_effort !== 'low' || payload.tools?.length) {
+          if (++payloads !== requests || payload.model !== model.id
+              || payload.reasoning_effort !== 'low'
+              || payload.tools?.length !== tools.length
+              || payload.tools.some(tool => !names.has(tool.function?.name))) {
             throw new Error('Unexpected model request configuration.');
           }
           // Calibration run: omit client limits and observe the provider's own ceiling.
@@ -65,17 +83,43 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
         },
       });
     },
-    finishTurn: () => ({ action: 'end' }),
+    finishTurn: ({ message }) => {
+      if (message.stopReason === 'error' || message.stopReason === 'aborted') return { action: 'end' };
+      const metering = message.usage;
+      const counts = [metering?.input, metering?.cacheRead, metering?.cacheWrite, metering?.output];
+      if (!counts.every(value => Number.isInteger(value) && value >= 0)
+          || counts[0] + counts[1] + counts[2] <= 0 || counts[3] <= 0) {
+        failure ??= 'Token usage was absent; review is incomplete.';
+        return { action: 'end' };
+      }
+      usage.prompt_tokens += counts[0] + counts[1] + counts[2];
+      usage.completion_tokens += counts[3];
+      if (cost() > 2) {
+        failure = 'The review exceeded its $2 allowance; review is incomplete.';
+        return { action: 'end' };
+      }
+      const calls = message.content.filter(block => block.type === 'toolCall');
+      if (calls.some(call => !names.has(call.name))) {
+        failure = 'The model requested an unavailable tool; review is incomplete.';
+        return { action: 'end' };
+      }
+      if (message.stopReason === 'toolUse' && message.rawStopReason === 'tool_calls' && calls.length) return;
+      return { action: 'end' };
+    },
   });
   const cancel = () => agent.abort();
   const timer = setTimeout(cancel, timeoutMs);
   process.once('SIGTERM', cancel);
   try {
     await agent.prompt(JSON.stringify(input.review));
+  } catch (error) {
+    if (failure) throw new ReviewError(failure);
+    throw error;
   } finally {
     clearTimeout(timer);
     process.removeListener('SIGTERM', cancel);
   }
+  if (failure) throw new ReviewError(failure);
   const answer = agent.state.messages.findLast(message => message.role === 'assistant');
   if (!answer || answer.stopReason === 'error' || answer.stopReason === 'aborted') {
     throw new ReviewError(providerFailure(answer?.errorMessage));
@@ -93,23 +137,21 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
   if (!parsed || !Array.isArray(parsed.findings)) {
     throw new ReviewError('Pi received invalid findings; no review is claimed.');
   }
-  const usage = answer.usage;
-  if (!usage || usage.input + usage.cacheRead + usage.cacheWrite <= 0
-      || usage.output <= 0) {
-    throw new ReviewError('Token usage was absent; review is incomplete.');
-  }
   return {
     findings: parsed.findings,
     requests,
+    tool_calls: toolCalls,
+    files_read: filesRead.size,
     finish_reason: answer.rawStopReason,
-    usage: { prompt_tokens: usage.input + usage.cacheRead + usage.cacheWrite, completion_tokens: usage.output },
+    usage,
   };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const input = JSON.parse(await readFile(process.argv[2], 'utf8'));
-    const result = await runReview(input, { apiKey: process.env.OLLAMA_API_KEY });
+    const repository = JSON.parse(await readFile(process.argv[4], 'utf8'));
+    const result = await runReview(input, { apiKey: process.env.OLLAMA_API_KEY, repository });
     await writeFile(process.argv[3], JSON.stringify(result));
   } catch (error) {
     const reason = error instanceof ReviewError ? error.message : 'Pi could not complete the review; check runtime and input.';

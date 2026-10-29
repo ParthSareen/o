@@ -12,7 +12,8 @@ def status(run=100, attempt=1, owner="github-actions[bot]"):
 
 
 def result():
-    return {"status": "complete", "base": BASE, "head": HEAD, "requests": 1,
+    return {"status": "complete", "base": BASE, "head": HEAD, "requests": 2,
+            "tool_calls": 3, "files_read": 1,
             "findings": [{"path": "app.py", "start_line": 3, "end_line": 3, "body": "This branch loses data."}],
             "usage": {"prompt_tokens": 1000, "completion_tokens": 100}, "context_limited": []}
 
@@ -93,6 +94,7 @@ class FeedbackTest(unittest.TestCase):
         self.assertEqual(review["comments"][0]["side"], "RIGHT")
         self.assertIn("Complete", api.writes[-1][2]["body"])
         self.assertIn("loses data", api.writes[-1][2]["body"])
+        self.assertIn("2 model requests · 3 repository tool calls · 1 distinct files", api.writes[-1][2]["body"])
 
     def test_stale_invalid_and_failed_reviews_never_publish_findings(self):
         for kind in ("stale", "invalid", "failure", "cancelled"):

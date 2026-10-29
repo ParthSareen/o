@@ -3,8 +3,10 @@
 This repository uses Pi's agent core and OpenAI-compatible transport with
 Ollama Cloud's `deepseek-v4.1-flash:1017` checkpoint and `low` thinking.
 Reviews appear in a persistent **PR comment**, with inline findings where their
-locations are valid, and in the **Actions job summary**. No tools, extensions, sessions,
-repository instructions or executable PR code are loaded by the agent.
+locations are valid, and in the **Actions job summary**. Pi can list, search and
+read repository source at the reviewed head. It has no shell or write tools;
+extensions, saved sessions and executable PR code are not loaded. Repository
+instructions encountered in source are treated as data.
 The workflow never approves PRs or requests changes.
 
 ## Request a review
@@ -41,18 +43,22 @@ disable this trigger. `/review` needs no extra account, PAT or GitHub App.
 2. **Acknowledge:** a separate job creates or updates one bot-owned PR comment
    to say the request is queued, then that the pipeline has started.
 3. **Collect context:** the analysis job fetches patches and nearby source via
-   the GitHub API at the captured revisions. It sends the prompt plus this
-   packet, not a checkout of the PR or the whole repository.
+   the GitHub API at the captured revisions. It also fetches a shallow bare Git
+   snapshot, verifies its head matches the review, and indexes regular source
+   files. No PR working tree is checked out.
 4. **Analyze:** Python starts the Node Pi adapter. Pi sends one streaming
    request to Ollama Cloud using the checked-in [prompt](../.github/ollama-review/prompt.md)
    as the system message and the JSON code packet as the user message.
-   Pi has no tools and cannot explore files or run commands. This is a single
-   review inference, not an interactive coding session. The Node process gets
-   the model key but no GitHub token.
+   Pi can call `list_files`, `search_code` (literal text) and `read_file`
+   (numbered lines), including unchanged callers, definitions, tests and
+   configuration. Results feed the next model turn until it returns findings.
+   The Node process gets the model key but no GitHub token. The readers use
+   fixed Git object operations and cannot execute model-supplied commands.
 5. **Validate:** the runner requires a complete JSON answer and token usage,
    removes exact duplicate findings, checks inline locations against the diff,
    and verifies the PR still has the captured base/head. It writes the Actions
-   summary and passes the structured result to the publisher.
+   summary and passes the structured result to the publisher. Both the summary
+   and PR comment report model requests, tool calls and distinct files read.
 6. **Publish:** the publisher rechecks the revisions and locations, posts new
    inline findings in a COMMENT review, and changes the persistent PR comment
    to Complete or an explicit failure/cancellation/superseded status. It has PR
@@ -96,9 +102,15 @@ instructions and cases where a visible guard prevents an apparent bug.
   Unauthorized comments cannot cancel a maintainer's running review.
 - Only trusted default-branch runner code is checked out. There is no PR
   checkout, build, dependency hook, test execution, MCP server or shell tool.
+  The separate bare snapshot contains inert Git objects. A temporary fetch
+  credential is supplied only to the Git fetch process, never written to Git
+  configuration or passed to Pi. Readers can address only indexed blob IDs;
+  model paths cannot escape into the host filesystem. Symlinks and submodules
+  are excluded. No fetch is available to the model.
   Pi dependencies and their integrity hashes are locked; `npm ci` disables
   lifecycle scripts. Node and GitHub actions are pinned.
-- One model request, no retries, fallback models or continuation turns.
+- Multiple model/tool turns share one time and cost allowance. There are no
+  transport retries or fallback models.
   The analysis job has a ten-minute deadline; inference has an eight-minute
   timeout and a nine-minute process limit. A new authorized request for the
   same PR cancels the old one.
@@ -107,12 +119,20 @@ instructions and cases where a visible guard prevents an apparent bug.
   source around changed hunks, fetched at the captured head (base for deletions).
   Generated/vendor files, common binary/lock files and secret-file patterns are
   excluded. Exclusions and unavailable context are listed in the summary.
+  These are initial diff/context limits; tools can inspect unchanged source.
+  The repository index is limited to 8 MiB and each source blob to 256 KiB.
+  Reads page up to 200 lines, searches page 40 matches, and listings page 100
+  paths. Tool responses share a 2 MiB allowance. Unavailable source is reported
+  by the tools; it is not treated as evidence of a missing implementation.
 - Calibration mode currently omits the client-side output-token cap, at the
   repository owner's request. The provider's own limits still apply. The
-  allowance is $2 per run. Admission conservatively reserves 1,048,576 input
-  and output tokens each at the recorded $0.30/$1.20 per-million list prices
-  (about $1.5729); input/output share the model context in practice.
-  Usage is priced without cache discounts. This is an estimate, not a
+  allowance is $2 per run. Before each model request the runner adds all usage
+  from completed turns to a conservative reservation of 1,048,576 input and
+  output tokens each at the recorded $0.30/$1.20 per-million list prices
+  (about $1.5729); input/output share the model context in practice. If that
+  reservation would exceed $2, it stops as incomplete before another request.
+  Every turn must report usage. Usage is priced without cache discounts.
+  This is an estimate, not a
   provider-enforced billing limit; review current prices and dashboard billing.
 - HTTP failures, truncated streams, missing metering and invalid JSON are
   incomplete reviews. Safe diagnostics name the failure without exposing raw
@@ -139,7 +159,10 @@ npm test --prefix .github/ollama-review
 
 The Node tests use Pi's real agent loop and HTTP serialization with a local
 mock transport. They check the exact model/endpoint/thinking and absence of a client output cap,
-stream parsing, usage accounting, no retries, and refusal of tool requests.
+stream parsing, cumulative usage accounting, no retries, repository-tool
+continuation and refusal of unavailable tools. A real local Git object fixture
+checks that unchanged source reaches the next model turn and host filesystem
+paths are rejected. Snapshot checks cover head changes and credential isolation.
 Regression checks also pass more than three distinct findings through Pi,
 normalization, the Actions summary and PR publication.
 Low thinking is explicit. A later measured output cap should be reintroduced

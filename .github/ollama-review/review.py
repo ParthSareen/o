@@ -244,10 +244,16 @@ def normalize(raw, request):
         raise ReviewError("Pi returned invalid findings; no clean result is claimed")
     if not isinstance(usage, dict):
         raise ReviewError("Pi omitted usage metadata")
-    if raw.get("requests") != 1 or raw.get("finish_reason") != "stop":
-        raise ReviewError("Pi did not finish normally within the one-request limit")
+    if type(raw.get("requests")) is not int or raw["requests"] < 1 or raw.get("finish_reason") != "stop":
+        raise ReviewError("Pi did not finish normally")
     if not all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("prompt_tokens", "completion_tokens")):
         raise ReviewError("Pi did not report token usage; review remains incomplete")
+    cost = (usage["prompt_tokens"] * INPUT_USD_PER_M + usage["completion_tokens"] * OUTPUT_USD_PER_M) / 1e6
+    if cost > BUDGET_USD:
+        raise ReviewError("Pi exceeded the review cost allowance")
+    for field in ("tool_calls", "files_read", "repository_omitted"):
+        if type(raw.get(field, 0)) is not int or raw.get(field, 0) < 0:
+            raise ReviewError("Pi returned invalid repository usage")
     findings, fingerprints = [], set()
     for issue in findings_data:
         if not isinstance(issue, dict):
@@ -268,10 +274,60 @@ def normalize(raw, request):
                          "fingerprint": fingerprint})
     return {"status": "complete", "model": MODEL,
             "thinking": "low", "base": request["base"], "head": request["head"],
-            "findings": findings, "omitted": request["omitted"],
+            "findings": findings, "omitted": request["omitted"], "requests": raw["requests"],
+            **{field: raw.get(field, 0) for field in ("tool_calls", "files_read", "repository_omitted")},
             "usage": {k: usage[k] for k in ("prompt_tokens", "completion_tokens")},
-            "estimated_cost_usd": round((usage["prompt_tokens"] * INPUT_USD_PER_M
-                                         + usage["completion_tokens"] * OUTPUT_USD_PER_M) / 1e6, 6)}
+            "estimated_cost_usd": round(cost, 6)}
+
+
+def snapshot(request, directory, github):
+    """Fetch inert Git objects; never check out or execute PR files."""
+    root = directory / "repository.git"
+    env = {"PATH": os.environ["PATH"], "HOME": str(directory), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+    credential = base64.b64encode(f"x-access-token:{github.token}".encode()).decode()
+    authenticated = {**env, "GIT_CONFIG_COUNT": "1",
+                     "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                     "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {credential}"}
+
+    def git(args, authenticate=False):
+        try:
+            process = subprocess.run(["git", "--no-replace-objects", *args],
+                                     env=authenticated if authenticate else env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+        except subprocess.TimeoutExpired:
+            raise ReviewError("Repository snapshot timed out") from None
+        if process.returncode:
+            raise ReviewError("Could not prepare the read-only repository snapshot")
+        return process.stdout
+
+    git(["init", "--bare", "--quiet", str(root)])
+    prefix = ["--git-dir", str(root), "-c", "core.hooksPath=" + os.devnull]
+    git([*prefix, "fetch", "--quiet", "--depth=1", "--no-tags", "--no-recurse-submodules",
+         f"https://github.com/{github.repository}.git", f"refs/pull/{request['number']}/head"], True)
+    if git([*prefix, "rev-parse", "FETCH_HEAD"]).decode().strip() != request["head"]:
+        raise ReviewError("PR changed while fetching the repository snapshot")
+    tree = git([*prefix, "ls-tree", "-r", "-l", "-z", request["head"]])
+    if len(tree) > 8 * 1024 * 1024:
+        raise ReviewError("Repository file index exceeds the pilot size limit")
+    files = []
+    omitted = 0
+    for record in tree.split(b"\0"):
+        if not record:
+            continue
+        metadata, path = record.split(b"\t", 1)
+        mode, kind, oid, size = metadata.decode("ascii").split()
+        try:
+            path = path.decode("utf-8")
+        except UnicodeError:
+            omitted += 1
+            continue
+        if (kind != "blob" or mode not in {"100644", "100755"}
+                or excluded(path) or int(size) > 256 * 1024):
+            omitted += 1
+            continue
+        files.append({"path": path, "oid": oid, "size": int(size)})
+    return {"git_dir": str(root), "head": request["head"], "files": files, "omitted": omitted}
 
 
 def analyze(request, directory, github, key):
@@ -281,11 +337,14 @@ def analyze(request, directory, github, key):
     if current.get("state") != "open" or revision(current) != {k: request[k] for k in ("base", "head")}:
         raise ReviewError("PR changed before analysis; request a fresh review")
     packet, limited = collect_input(request, github)
+    repository = snapshot(request, directory, github)
+    index = directory / "repository.json"
+    index.write_text(json.dumps(repository))
     source, output = directory / "input.json", directory / "engine.json"
     source.write_text(json.dumps(packet))
     source.chmod(0o600)
     output.unlink(missing_ok=True)
-    command = ["node", str(Path(__file__).with_name("engine.mjs")), str(source), str(output)]
+    command = ["node", str(Path(__file__).with_name("engine.mjs")), str(source), str(output), str(index)]
     env = {"PATH": os.environ["PATH"], "HOME": str(directory), "OLLAMA_API_KEY": key}
     started = time.monotonic()
     try:
@@ -305,6 +364,7 @@ def analyze(request, directory, github, key):
     reviewed = normalize(raw, request)
     reviewed["context_limited"] = limited
     reviewed["requests"] = raw["requests"]
+    reviewed["repository_omitted"] = repository["omitted"]
     reviewed["seconds"] = round(time.monotonic() - started, 1)
     return reviewed
 
@@ -331,6 +391,9 @@ def summary(result):
         if result.get(field):
             lines += [f"<p>{field}:</p><pre>{escaped(chr(10).join(result[field]))}</pre>"]
     if "usage" in result:
+        lines.append(f"Model requests: {result.get('requests', 1)}. Repository tool calls: {result.get('tool_calls', 0)}; "
+                     f"distinct files read with read_file: {result.get('files_read', 0)}. "
+                     f"Repository files unavailable to tools: {result.get('repository_omitted', 0)}.")
         lines.append(f"<pre>{escaped(json.dumps(result['usage']))}</pre>")
         lines.append(f"Estimated list-price cost: ${result['estimated_cost_usd']:.4f}; actual billing may differ.")
     return "\n".join(lines) + "\n"
