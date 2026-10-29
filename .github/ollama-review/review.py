@@ -22,7 +22,7 @@ import urllib.request
 MODEL = "deepseek-v4.1-flash:1017"
 MAX_FILES = 100
 MAX_PATCH_BYTES = 96 * 1024
-MAX_OUTPUT_TOKENS = 16384
+MODEL_CONTEXT_TOKENS = 1048576
 MAX_CONTEXT_BYTES = 48 * 1024
 BUDGET_USD = 2.0
 # Admission estimate only. Provider billing is reconciled during the pilot.
@@ -197,7 +197,7 @@ def prepare(event, event_name, github, reviewer_login="", automatic=False):
     if not eligible:
         return {"status": "skipped", "reason": "No eligible source files changed.", "omitted": omitted}
     # Reserve the entire advertised context, not an optimistic tokenizer estimate.
-    maximum_list_cost = (1048576 * INPUT_USD_PER_M + MAX_OUTPUT_TOKENS * OUTPUT_USD_PER_M) / 1e6
+    maximum_list_cost = (MODEL_CONTEXT_TOKENS * (INPUT_USD_PER_M + OUTPUT_USD_PER_M)) / 1e6
     if maximum_list_cost > BUDGET_USD:
         raise ReviewError("Configured model request exceeds the pilot cost allowance")
     return {"status": "ready", "repository": github.repository, "number": number,
@@ -256,8 +256,6 @@ def normalize(raw, request):
         raise ReviewError("Pi did not finish normally within the one-request limit")
     if not all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("prompt_tokens", "completion_tokens")):
         raise ReviewError("Pi did not report token usage; review remains incomplete")
-    if usage["completion_tokens"] >= MAX_OUTPUT_TOKENS:
-        raise ReviewError("Generation reached the output cap; review remains incomplete")
     findings, fingerprints = [], set()
     for issue in findings_data:
         if not isinstance(issue, dict):
@@ -301,7 +299,7 @@ def analyze(request, directory, github, key):
     started = time.monotonic()
     try:
         process = subprocess.run(command, cwd=directory, env=env,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=540)
     except subprocess.TimeoutExpired:
         raise ReviewError("Pi review exceeded its runtime limit") from None
     if not output.is_file() or output.stat().st_size > 1024 * 1024:
@@ -375,6 +373,12 @@ def main():
             request = json.loads(os.environ["REVIEW_REQUEST"])
             result = analyze(request, args.directory, github, os.environ.get("OLLAMA_API_KEY", ""))
         path.write_text(json.dumps(result, indent=2))
+        if args.command == "analyze":
+            usage = result["usage"]
+            print(f"Pi review complete: {result['requests']} request; "
+                  f"{usage['prompt_tokens']} input tokens; {usage['completion_tokens']} output tokens; "
+                  f"estimated list-price cost ${result['estimated_cost_usd']:.4f}; "
+                  f"{result['seconds']} seconds")
     except (ReviewError, ValueError, KeyError, OSError) as error:
         reason = str(error) if isinstance(error, ReviewError) else "Review failed while validating local or remote data."
         path.write_text(json.dumps({"status": "incomplete", "reason": reason}))

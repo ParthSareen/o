@@ -113,7 +113,7 @@ class ReviewTest(unittest.TestCase):
         cases = [response(), response(), response(), response()]
         cases[0]["findings"] = "none"
         cases[1]["usage"] = {}
-        cases[2]["usage"]["completion_tokens"] = review.MAX_OUTPUT_TOKENS
+        cases[2]["usage"]["completion_tokens"] = -1
         cases[3]["finish_reason"] = "length"
         for raw in cases:
             with self.subTest(raw=raw), self.assertRaises(review.ReviewError):

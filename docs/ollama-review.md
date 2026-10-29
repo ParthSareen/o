@@ -40,17 +40,19 @@ disable this trigger. `/review` needs no extra account, PAT or GitHub App.
   Pi dependencies and their integrity hashes are locked; `npm ci` disables
   lifecycle scripts. Node and GitHub actions are pinned.
 - One model request, no retries, fallback models or continuation turns.
-  The analysis job has a ten-minute deadline; inference has a four-minute
-  timeout and a five-minute process limit. A new authorized request for the
+  The analysis job has a ten-minute deadline; inference has an eight-minute
+  timeout and a nine-minute process limit. A new authorized request for the
   same PR cancels the old one.
 - At most 100 changed files, 96 KiB of eligible patches, 48 KiB of selective
   surrounding code, and 256 KiB of total serialized input. Context is numbered
   source around changed hunks, fetched at the captured head (base for deletions).
   Generated/vendor files, common binary/lock files and secret-file patterns are
   excluded. Exclusions and unavailable context are listed in the summary.
-- The output limit is 16,384 tokens, including reasoning. The allowance is $2
-  per run. Admission reserves a full 1,048,576 input tokens plus the output
-  limit at the recorded $0.30/$1.20 per-million list prices (about $0.3342).
+- Calibration mode currently omits the client-side output-token cap, at the
+  repository owner's request. The provider's own limits still apply. The
+  allowance is $2 per run. Admission conservatively reserves 1,048,576 input
+  and output tokens each at the recorded $0.30/$1.20 per-million list prices
+  (about $1.5729); input/output share the model context in practice.
   Usage is priced without cache discounts. This is an estimate, not a
   provider-enforced billing limit; review current prices and dashboard billing.
 - HTTP failures, truncated streams, missing metering and invalid JSON are
@@ -73,8 +75,10 @@ npm test --prefix .github/ollama-review
 ```
 
 The Node tests use Pi's real agent loop and HTTP serialization with a local
-mock transport. They check the exact model/endpoint/thinking/output limit,
+mock transport. They check the exact model/endpoint/thinking and absence of a client output cap,
 stream parsing, usage accounting, no retries, and refusal of tool requests.
+Low thinking is explicit. A later measured output cap should be reintroduced
+after calibration; tests currently assert that no client output cap is sent.
 They make no network or paid inference calls.
 
 Before broader use, compare a known-bug PR with its corrected version, a clean

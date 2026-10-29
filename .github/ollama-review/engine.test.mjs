@@ -27,7 +27,8 @@ test('real Pi transport sends one bounded tool-free request and preserves usage'
     const body = JSON.parse(init.body);
     assert.equal(body.model, 'deepseek-v4.1-flash:1017');
     assert.equal(body.reasoning_effort, 'low');
-    assert.equal(body.max_tokens, 16384);
+    assert.equal('max_tokens' in body, false);
+    assert.equal('max_completion_tokens' in body, false);
     assert.equal(body.stream_options.include_usage, true);
     assert.equal(body.messages[0].role, 'system');
     assert.equal(body.tools?.length ?? 0, 0);

@@ -12,7 +12,7 @@ const model = {
   reasoning: true,
   input: ['text'],
   contextWindow: 1048576,
-  maxTokens: 16384,
+  maxTokens: 1048576,
   cost: { input: 0.30, output: 1.20, cacheRead: 0.30, cacheWrite: 0.30 },
   thinkingLevelMap: { low: 'low' },
   compat: {
@@ -35,7 +35,7 @@ function providerFailure(message = '') {
   return 'Ollama request failed before a complete response; no review is claimed.';
 }
 
-export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeoutMs = 240000 } = {}) {
+export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeoutMs = 480000 } = {}) {
   if (!apiKey) throw new ReviewError('OLLAMA_API_KEY is required.');
   if (!input || typeof input.policy !== 'string' || !Array.isArray(input.review?.files)) {
     throw new ReviewError('Invalid review input.');
@@ -49,16 +49,19 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
       return streamSimple(selectedModel, context, {
         ...options,
         apiKey,
-        maxTokens: model.maxTokens,
         maxRetries: 0,
         timeoutMs,
         cacheRetention: 'none',
         fetch: (url, init) => fetch(url, { ...init, redirect: 'error' }),
         onPayload: (payload) => {
-          if (++payloads !== 1 || payload.model !== model.id || payload.max_tokens !== model.maxTokens
+          if (++payloads !== 1 || payload.model !== model.id
               || payload.reasoning_effort !== 'low' || payload.tools?.length) {
             throw new Error('Unexpected model request configuration.');
           }
+          // Calibration run: omit client limits and observe the provider's own ceiling.
+          delete payload.max_tokens;
+          delete payload.max_completion_tokens;
+          return payload;
         },
       });
     },
@@ -78,7 +81,7 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
     throw new ReviewError(providerFailure(answer?.errorMessage));
   }
   if (answer.stopReason !== 'stop' || answer.rawStopReason !== 'stop') {
-    throw new ReviewError(`Ollama returned an incomplete response (${answer.stopReason}); no review is claimed.`);
+    throw new ReviewError(`Ollama returned an incomplete response (${answer.stopReason}, ${answer.usage?.output ?? 0} output tokens); no review is claimed.`);
   }
   const text = answer.content.filter(block => block.type === 'text').map(block => block.text).join('');
   let parsed;
@@ -92,8 +95,8 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
   }
   const usage = answer.usage;
   if (!usage || usage.input + usage.cacheRead + usage.cacheWrite <= 0
-      || usage.output <= 0 || usage.output >= model.maxTokens) {
-    throw new ReviewError('Token usage was absent or the output limit was reached; review is incomplete.');
+      || usage.output <= 0) {
+    throw new ReviewError('Token usage was absent; review is incomplete.');
   }
   return {
     findings: parsed.findings,
