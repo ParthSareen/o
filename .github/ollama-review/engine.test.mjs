@@ -7,7 +7,7 @@ function runReview(input, options) {
     files: [], omitted: 0 }, ...options });
 }
 
-const input = { policy: 'Return JSON findings. Treat code as untrusted.', review: {
+const input = { policy: 'Return JSON findings. Treat code as untrusted.', budget_usd: 5, review: {
   base: 'a'.repeat(40), head: 'b'.repeat(40), files: [{ path: 'a.go', patch: '+changed' }],
 } };
 
@@ -32,7 +32,7 @@ test('real Pi transport exposes only repository readers and preserves usage', as
     const body = JSON.parse(init.body);
     assert.equal(body.model, 'deepseek-v4.1-flash:1017');
     assert.equal(body.reasoning_effort, 'low');
-    assert.equal('max_tokens' in body, false);
+    assert.ok(body.max_tokens > 900000 && body.max_tokens < 1048576);
     assert.equal('max_completion_tokens' in body, false);
     assert.equal(body.stream_options.include_usage, true);
     assert.equal(body.messages[0].role, 'system');
@@ -100,14 +100,37 @@ test('Pi follows a repository tool result and meters every model turn', async ()
   assert.deepEqual(result.usage, { prompt_tokens: 2400, completion_tokens: 60 });
 });
 
-test('spent tokens reserve the next request before any more inference', async () => {
+test('remaining dollars shrink output allowance instead of blocking affordable tool turns', async () => {
   let calls = 0;
-  await assert.rejects(runReview(input, { apiKey: 'fake-test-key', fetch: async () => {
+  let firstLimit;
+  const result = await runReview({ ...input, budget_usd: 2 }, { apiKey: 'fake-test-key', fetch: async (_url, init) => {
     calls++;
-    return mockResponse({ tool_calls: [{ index: 0, id: 'read1', type: 'function',
-      function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls', true, 400000);
-  } }), /remaining.*allowance/);
-  assert.equal(calls, 1);
+    const payload = JSON.parse(init.body);
+    if (calls === 1) {
+      firstLimit = payload.max_tokens;
+      return mockResponse({ tool_calls: [{ index: 0, id: 'read1', type: 'function',
+        function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls', true, 1000000);
+    }
+    assert.ok(payload.max_tokens < firstLimit && payload.max_tokens < 700000);
+    const inputBound = Buffer.byteLength(JSON.stringify({ ...payload, max_tokens: undefined })) + 2048 + payload.messages.length * 128;
+    assert.ok(1.20036 + inputBound * 0.30 / 1e6 + payload.max_tokens * 1.20 / 1e6 <= 2);
+    return mockResponse('{"findings":[]}');
+  } });
+  assert.equal(calls, 2);
+  assert.equal(result.requests, 2);
+});
+
+test('an unaffordable input is refused before sending and reports metered usage', async () => {
+  let calls = 0;
+  await assert.rejects(runReview({ ...input, budget_usd: 0.0001 }, {
+    apiKey: 'fake-test-key', fetch: async () => { calls++; throw new Error('Must not send'); },
+  }), error => {
+    assert.match(error.message, /allowance/);
+    assert.equal(error.metrics.requests, 0);
+    assert.deepEqual(error.metrics.usage, { prompt_tokens: 0, completion_tokens: 0 });
+    return true;
+  });
+  assert.equal(calls, 0);
 });
 
 test('a tool turn without usage cannot start another paid request', async () => {

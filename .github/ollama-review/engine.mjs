@@ -27,7 +27,12 @@ const model = {
   },
 };
 
-class ReviewError extends Error {}
+class ReviewError extends Error {
+  constructor(message, metrics = {}) {
+    super(message);
+    this.metrics = metrics;
+  }
+}
 
 function providerFailure(message = '') {
   const status = message.match(/\b(400|401|403|408|413|422|429|5\d\d)\b/)?.[1];
@@ -41,44 +46,59 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
   if (!input || typeof input.policy !== 'string' || !Array.isArray(input.review?.files)) {
     throw new ReviewError('Invalid review input.');
   }
+  const budget = input.budget_usd;
+  if (!Number.isFinite(budget) || budget <= 0 || budget > 5) throw new ReviewError('Invalid review cost allowance.');
   let requests = 0;
   let payloads = 0;
   let failure;
   const usage = { prompt_tokens: 0, completion_tokens: 0 };
   const cost = () => (usage.prompt_tokens * model.cost.input + usage.completion_tokens * model.cost.output) / 1e6;
-  const reservation = model.contextWindow * (model.cost.input + model.cost.output) / 1e6;
   const filesRead = new Set();
   let toolCalls = 0;
   const tools = repositoryTools(repository, input.review.head, path => filesRead.add(path)).map(tool => ({
     ...tool, execute: (...args) => { toolCalls++; return tool.execute(...args); },
   }));
   const names = new Set(tools.map(tool => tool.name));
+  const incomplete = message => new ReviewError(
+    `${message} (${requests} requests attempted; metered cost $${cost().toFixed(4)}.)`,
+    { requests, tool_calls: toolCalls, files_read: filesRead.size, usage: { ...usage } },
+  );
   const agent = new Agent({
     initialState: { model, tools, thinkingLevel: 'low', systemPrompt: input.policy },
     toolExecution: 'sequential',
     streamFn: (selectedModel, context, options) => {
-      if (cost() + reservation > 2) {
-        failure = 'The remaining $2 review allowance cannot cover another model request; review is incomplete.';
-        throw new ReviewError(failure);
-      }
-      requests++;
+      let dispatched = false;
       return streamSimple(selectedModel, context, {
         ...options,
         apiKey,
         maxRetries: 0,
         timeoutMs,
         cacheRetention: 'none',
-        fetch: (url, init) => fetch(url, { ...init, redirect: 'error' }),
+        fetch: (url, init) => {
+          if (dispatched) throw new ReviewError('Unexpected transport retry.');
+          dispatched = true;
+          requests++;
+          return fetch(url, { ...init, redirect: 'error' });
+        },
         onPayload: (payload) => {
-          if (++payloads !== requests || payload.model !== model.id
+          if (++payloads !== requests + 1 || payload.model !== model.id
               || payload.reasoning_effort !== 'low'
               || payload.tools?.length !== tools.length
               || payload.tools.some(tool => !names.has(tool.function?.name))) {
             throw new Error('Unexpected model request configuration.');
           }
-          // Calibration run: omit client limits and observe the provider's own ceiling.
           delete payload.max_tokens;
           delete payload.max_completion_tokens;
+          // UTF-8 bytes bound text tokenization; leave margin for chat/tool framing.
+          const inputReserve = Buffer.byteLength(JSON.stringify(payload)) + 2048 + payload.messages.length * 128;
+          const remaining = budget - cost() - inputReserve * model.cost.input / 1e6;
+          const outputAllowance = Math.floor(remaining * 1e6 / model.cost.output);
+          const maxTokens = Math.min(model.maxTokens, model.contextWindow - inputReserve, outputAllowance);
+          if (maxTokens < 1) {
+            failure = 'The remaining cost or context allowance cannot cover another model request; review is incomplete.';
+            throw new ReviewError(failure);
+          }
+          payload.max_tokens = maxTokens;
           return payload;
         },
       });
@@ -94,8 +114,8 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
       }
       usage.prompt_tokens += counts[0] + counts[1] + counts[2];
       usage.completion_tokens += counts[3];
-      if (cost() > 2) {
-        failure = 'The review exceeded its $2 allowance; review is incomplete.';
+      if (cost() > budget) {
+        failure = 'The review exceeded its cost allowance; review is incomplete.';
         return { action: 'end' };
       }
       const calls = message.content.filter(block => block.type === 'toolCall');
@@ -113,29 +133,28 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
   try {
     await agent.prompt(JSON.stringify(input.review));
   } catch (error) {
-    if (failure) throw new ReviewError(failure);
-    throw error;
+    throw incomplete(failure ?? 'Pi could not complete the review; check runtime and input.');
   } finally {
     clearTimeout(timer);
     process.removeListener('SIGTERM', cancel);
   }
-  if (failure) throw new ReviewError(failure);
+  if (failure) throw incomplete(failure);
   const answer = agent.state.messages.findLast(message => message.role === 'assistant');
   if (!answer || answer.stopReason === 'error' || answer.stopReason === 'aborted') {
-    throw new ReviewError(providerFailure(answer?.errorMessage));
+    throw incomplete(providerFailure(answer?.errorMessage));
   }
   if (answer.stopReason !== 'stop' || answer.rawStopReason !== 'stop') {
-    throw new ReviewError(`Ollama returned an incomplete response (${answer.stopReason}, ${answer.usage?.output ?? 0} output tokens); no review is claimed.`);
+    throw incomplete(`Ollama returned an incomplete response (${answer.stopReason}, ${answer.usage?.output ?? 0} output tokens); no review is claimed.`);
   }
   const text = answer.content.filter(block => block.type === 'text').map(block => block.text).join('');
   let parsed;
   try {
     parsed = JSON.parse(text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/, '$1'));
   } catch {
-    throw new ReviewError(`Pi received invalid review JSON (${text.length} answer characters); no review is claimed.`);
+    throw incomplete(`Pi received invalid review JSON (${text.length} answer characters); no review is claimed.`);
   }
   if (!parsed || !Array.isArray(parsed.findings)) {
-    throw new ReviewError('Pi received invalid findings; no review is claimed.');
+    throw incomplete('Pi received invalid findings; no review is claimed.');
   }
   return {
     findings: parsed.findings,
@@ -155,7 +174,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     await writeFile(process.argv[3], JSON.stringify(result));
   } catch (error) {
     const reason = error instanceof ReviewError ? error.message : 'Pi could not complete the review; check runtime and input.';
-    await writeFile(process.argv[3], JSON.stringify({ error: reason }));
+    await writeFile(process.argv[3], JSON.stringify({ ...(error instanceof ReviewError ? error.metrics : {}), error: reason }));
     process.exitCode = 1;
   }
 }

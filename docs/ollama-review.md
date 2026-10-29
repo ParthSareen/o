@@ -124,14 +124,19 @@ instructions and cases where a visible guard prevents an apparent bug.
   Reads page up to 200 lines, searches page 40 matches, and listings page 100
   paths. Tool responses share a 2 MiB allowance. Unavailable source is reported
   by the tools; it is not treated as evidence of a missing implementation.
-- Calibration mode currently omits the client-side output-token cap, at the
-  repository owner's request. The provider's own limits still apply. The
-  allowance is $2 per run. Before each model request the runner adds all usage
-  from completed turns to a conservative reservation of 1,048,576 input and
-  output tokens each at the recorded $0.30/$1.20 per-million list prices
-  (about $1.5729); input/output share the model context in practice. If that
-  reservation would exceed $2, it stops as incomplete before another request.
-  Every turn must report usage. Usage is priced without cache discounts.
+- The allowance is $5 per run, at the repository owner's request. Input and
+  output share the 1,048,576-token context window, so a single full window costs
+  at most about $1.2583 at the higher recorded rate, not the sum of two full
+  windows. For each actual request, the runner reserves input using serialized
+  UTF-8 bytes plus chat/tool framing headroom. It subtracts the input reserve
+  and all previously metered usage from the remaining dollar allowance, then
+  calculates `max_tokens` using the recorded $1.20-per-million output rate.
+  The limit must also fit the remaining model context. This replaces the
+  temporary uncapped-output calibration setting; there is no fixed 16K output
+  limit. Unaffordable inputs or truncated answers remain incomplete reviews.
+  Every turn must report usage. Input is priced at $0.30 per million tokens,
+  without cache discounts. Failed reviews retain metered usage and request
+  counts; unmetered failed requests may still incur provider charges.
   This is an estimate, not a
   provider-enforced billing limit; review current prices and dashboard billing.
 - HTTP failures, truncated streams, missing metering and invalid JSON are
@@ -158,15 +163,16 @@ npm test --prefix .github/ollama-review
 ```
 
 The Node tests use Pi's real agent loop and HTTP serialization with a local
-mock transport. They check the exact model/endpoint/thinking and absence of a client output cap,
+mock transport. They check the exact model/endpoint/thinking and budget-derived output limits,
 stream parsing, cumulative usage accounting, no retries, repository-tool
 continuation and refusal of unavailable tools. A real local Git object fixture
 checks that unchanged source reaches the next model turn and host filesystem
 paths are rejected. Snapshot checks cover head changes and credential isolation.
 Regression checks also pass more than three distinct findings through Pi,
 normalization, the Actions summary and PR publication.
-Low thinking is explicit. A later measured output cap should be reintroduced
-after calibration; tests currently assert that no client output cap is sent.
+Low thinking is explicit. Tests cover continuing past the former premature
+budget cutoff, shrinking the next output allowance, and refusing an
+unaffordable request before sending it.
 They make no network or paid inference calls.
 
 Before broader use, compare a known-bug PR with its corrected version, a clean

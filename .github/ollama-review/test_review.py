@@ -117,7 +117,7 @@ class ReviewTest(unittest.TestCase):
         cases[2]["usage"]["completion_tokens"] = -1
         cases[3]["finish_reason"] = "length"
         cases[4]["requests"] = 0
-        cases[5]["usage"]["completion_tokens"] = 2_000_000
+        cases[5]["usage"]["completion_tokens"] = 5_000_000
         for raw in cases:
             with self.subTest(raw=raw), self.assertRaises(review.ReviewError):
                 review.normalize(raw, REQUEST)
@@ -191,12 +191,34 @@ class ReviewTest(unittest.TestCase):
                 packet = json.loads((directory / "input.json").read_text())
                 self.assertEqual(packet["review"]["files"][0]["patch"], PATCH)
                 self.assertEqual(packet["review"]["files"][0]["context"], "")
+                self.assertEqual(packet["budget_usd"], 5)
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(review, "snapshot", return_value=SNAPSHOT), patch.object(review.subprocess, "run", side_effect=execute):
                 result = review.analyze(REQUEST, directory, github, "not-a-real-key")
             self.assertEqual(result["context_limited"], ["app.py"])
             self.assertEqual(result["requests"], 1)
+
+    def test_failed_analysis_preserves_metering_without_provider_details(self):
+        github = FakeGitHub()
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            def execute(command, **kwargs):
+                (directory / "engine.json").write_text(json.dumps({
+                    "error": "Budget exhausted.", "requests": 3, "tool_calls": 2, "files_read": 1,
+                    "usage": {"prompt_tokens": 100000, "completion_tokens": 400000},
+                    "raw_provider_detail": "not safe to publish",
+                }))
+                return subprocess.CompletedProcess(command, 1)
+            with patch.object(review, "snapshot", return_value=SNAPSHOT), patch.object(review.subprocess, "run", side_effect=execute):
+                with self.assertRaises(review.ReviewError) as raised:
+                    review.analyze(REQUEST, directory, github, "not-a-real-key")
+            metrics = raised.exception.metrics
+            self.assertEqual(metrics["requests"], 3)
+            self.assertEqual(metrics["estimated_cost_usd"], 0.51)
+            text = review.summary({"status": "incomplete", "reason": str(raised.exception), **metrics})
+            self.assertIn("400000", text)
+            self.assertNotIn("not safe to publish", text)
 
     def test_summary_escapes_model_output(self):
         issue = {"path": "app.py", "body": "</pre><script>alert(1)</script>", "start_line": 3, "end_line": 3}

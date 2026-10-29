@@ -24,7 +24,7 @@ MAX_FILES = 100
 MAX_PATCH_BYTES = 96 * 1024
 MODEL_CONTEXT_TOKENS = 1048576
 MAX_CONTEXT_BYTES = 48 * 1024
-BUDGET_USD = 2.0
+BUDGET_USD = 5.0
 # Admission estimate only. Provider billing is reconciled during the pilot.
 INPUT_USD_PER_M = 0.30
 OUTPUT_USD_PER_M = 1.20
@@ -38,7 +38,9 @@ POLICY = Path(__file__).with_name("prompt.md").read_text(encoding="utf-8")
 
 
 class ReviewError(Exception):
-    pass
+    def __init__(self, message, metrics=None):
+        super().__init__(message)
+        self.metrics = metrics or {}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -188,8 +190,8 @@ def prepare(event, event_name, github, reviewer_login="", automatic=False):
         raise ReviewError("Review skipped: source diff exceeds the 96 KiB pilot limit")
     if not eligible:
         return {"status": "skipped", "reason": "No eligible source files changed.", "omitted": omitted}
-    # Reserve the entire advertised context, not an optimistic tokenizer estimate.
-    maximum_list_cost = (MODEL_CONTEXT_TOKENS * (INPUT_USD_PER_M + OUTPUT_USD_PER_M)) / 1e6
+    # Input and output share the context window; bound a call at the higher rate.
+    maximum_list_cost = MODEL_CONTEXT_TOKENS * max(INPUT_USD_PER_M, OUTPUT_USD_PER_M) / 1e6
     if maximum_list_cost > BUDGET_USD:
         raise ReviewError("Configured model request exceeds the pilot cost allowance")
     return {"status": "ready", "repository": github.repository, "number": number,
@@ -232,7 +234,8 @@ def collect_input(request, github):
         raise ReviewError("Changed-file coverage changed while collecting the review")
     if revision(github.pull(request["number"])) != {k: request[k] for k in ("base", "head")}:
         raise ReviewError("PR changed while collecting context; request a fresh review")
-    packet = {"policy": POLICY, "review": {"base": request["base"], "head": request["head"], "files": selected}}
+    packet = {"policy": POLICY, "budget_usd": BUDGET_USD,
+              "review": {"base": request["base"], "head": request["head"], "files": selected}}
     if len(json.dumps(packet).encode("utf-8")) > 256 * 1024:
         raise ReviewError("Review input exceeds the 256 KiB pilot limit")
     return packet, limited
@@ -357,7 +360,17 @@ def analyze(request, directory, github, key):
     raw = json.loads(output.read_text())
     if process.returncode or raw.get("error"):
         error = raw.get("error")
-        raise ReviewError(error if isinstance(error, str) and len(error) <= 500 else "Pi review failed")
+        metrics = {}
+        usage = raw.get("usage")
+        if (isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0
+                for k in ("prompt_tokens", "completion_tokens"))):
+            metrics["usage"] = {k: usage[k] for k in ("prompt_tokens", "completion_tokens")}
+            metrics["estimated_cost_usd"] = round((usage["prompt_tokens"] * INPUT_USD_PER_M
+                + usage["completion_tokens"] * OUTPUT_USD_PER_M) / 1e6, 6)
+        for field in ("requests", "tool_calls", "files_read"):
+            if type(raw.get(field)) is int and raw[field] >= 0:
+                metrics[field] = raw[field]
+        raise ReviewError(error if isinstance(error, str) and len(error) <= 500 else "Pi review failed", metrics)
     pr = github.pull(request["number"])
     if pr.get("state") != "open" or revision(pr) != {k: request[k] for k in ("base", "head")}:
         raise ReviewError("PR changed during analysis; result discarded")
@@ -440,7 +453,8 @@ def main():
                   f"{result['seconds']} seconds")
     except (ReviewError, ValueError, KeyError, OSError) as error:
         reason = str(error) if isinstance(error, ReviewError) else "Review failed while validating local or remote data."
-        path.write_text(json.dumps({"status": "incomplete", "reason": reason}))
+        metrics = error.metrics if isinstance(error, ReviewError) else {}
+        path.write_text(json.dumps({"status": "incomplete", "reason": reason, **metrics}))
         print(reason, file=sys.stderr)
         sys.exit(1)
 
