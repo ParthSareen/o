@@ -47,11 +47,46 @@ jobs:
         if: always() && steps.request.outputs.ready != 'true'
         run: python3 .github/ollama-review/review.py summary --directory "$RUNNER_TEMP/ollama-review"
 
-  review:
+  feedback:
     needs: authorize
     if: needs.authorize.outputs.ready == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: ollama-review-feedback-${{ github.repository }}-${{ needs.authorize.outputs.number }}
+      cancel-in-progress: false
+    outputs:
+      active: ${{ steps.ack.outputs.active }}
+    steps:
+      - name: Read trusted feedback runner
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/ollama-review
+      - name: Acknowledge review request
+        id: ack
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEW_REQUEST: ${{ needs.authorize.outputs.request }}
+        run: python3 .github/ollama-review/feedback.py queued
+      - name: Mark pipeline running
+        if: steps.ack.outputs.active == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEW_REQUEST: ${{ needs.authorize.outputs.request }}
+        run: python3 .github/ollama-review/feedback.py running
+
+  review:
+    needs: [authorize, feedback]
+    if: needs.feedback.outputs.active == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      result: ${{ steps.result.outputs.review_result }}
     concurrency:
       group: ollama-review-${{ github.repository }}-${{ needs.authorize.outputs.number }}
       cancel-in-progress: true
@@ -79,3 +114,33 @@ jobs:
       - name: Write review summary
         if: always()
         run: python3 .github/ollama-review/review.py summary --directory "$RUNNER_TEMP/ollama-review"
+      - name: Export review result
+        id: result
+        if: always()
+        run: python3 .github/ollama-review/review.py export --directory "$RUNNER_TEMP/ollama-review"
+
+  publish:
+    needs: [authorize, feedback, review]
+    if: always() && needs.authorize.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: ollama-review-feedback-${{ github.repository }}-${{ needs.authorize.outputs.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Read trusted feedback runner
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/ollama-review
+      - name: Publish findings and final status
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEW_REQUEST: ${{ needs.authorize.outputs.request }}
+          REVIEW_RESULT: ${{ needs.review.outputs.result }}
+          REVIEW_JOB_RESULT: ${{ needs.review.result }}
+        run: python3 .github/ollama-review/feedback.py finished
