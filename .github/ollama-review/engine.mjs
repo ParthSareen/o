@@ -13,7 +13,7 @@ const model = {
   reasoning: true,
   input: ['text'],
   contextWindow: 1048576,
-  maxTokens: 1048576,
+  maxTokens: 393216,
   cost: { input: 0.30, output: 1.20, cacheRead: 0.30, cacheWrite: 0.30 },
   thinkingLevelMap: { low: 'low' },
   compat: {
@@ -35,6 +35,8 @@ class ReviewError extends Error {
 }
 
 function providerFailure(message = '') {
+  const outputLimit = message.match(/maximum output tokens \((\d+)\)/)?.[1];
+  if (outputLimit) return `Ollama rejected the output allowance; this model supports at most ${outputLimit} output tokens.`;
   const status = message.match(/\b(400|401|403|408|413|422|429|5\d\d)\b/)?.[1];
   if (status) return `Ollama request failed (HTTP ${status}); check credentials, limits, or provider availability.`;
   if (/abort|timeout|timed out/i.test(message)) return 'Ollama request timed out or was cancelled.';

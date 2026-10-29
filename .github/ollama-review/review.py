@@ -23,6 +23,7 @@ MODEL = "deepseek-v4.1-flash:1017"
 MAX_FILES = 100
 MAX_PATCH_BYTES = 96 * 1024
 MODEL_CONTEXT_TOKENS = 1048576
+MODEL_OUTPUT_TOKENS = 393216
 MAX_CONTEXT_BYTES = 48 * 1024
 BUDGET_USD = 5.0
 # Admission estimate only. Provider billing is reconciled during the pilot.
@@ -190,8 +191,9 @@ def prepare(event, event_name, github, reviewer_login="", automatic=False):
         raise ReviewError("Review skipped: source diff exceeds the 96 KiB pilot limit")
     if not eligible:
         return {"status": "skipped", "reason": "No eligible source files changed.", "omitted": omitted}
-    # Input and output share the context window; bound a call at the higher rate.
-    maximum_list_cost = MODEL_CONTEXT_TOKENS * max(INPUT_USD_PER_M, OUTPUT_USD_PER_M) / 1e6
+    # Output has its own ceiling within the shared input/output context window.
+    maximum_list_cost = ((MODEL_CONTEXT_TOKENS - MODEL_OUTPUT_TOKENS) * INPUT_USD_PER_M
+                         + MODEL_OUTPUT_TOKENS * OUTPUT_USD_PER_M) / 1e6
     if maximum_list_cost > BUDGET_USD:
         raise ReviewError("Configured model request exceeds the pilot cost allowance")
     return {"status": "ready", "repository": github.repository, "number": number,

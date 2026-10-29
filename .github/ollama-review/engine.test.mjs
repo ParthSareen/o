@@ -32,7 +32,7 @@ test('real Pi transport exposes only repository readers and preserves usage', as
     const body = JSON.parse(init.body);
     assert.equal(body.model, 'deepseek-v4.1-flash:1017');
     assert.equal(body.reasoning_effort, 'low');
-    assert.ok(body.max_tokens > 900000 && body.max_tokens < 1048576);
+    assert.equal(body.max_tokens, 393216);
     assert.equal('max_completion_tokens' in body, false);
     assert.equal(body.stream_options.include_usage, true);
     assert.equal(body.messages[0].role, 'system');
@@ -103,21 +103,33 @@ test('Pi follows a repository tool result and meters every model turn', async ()
 test('remaining dollars shrink output allowance instead of blocking affordable tool turns', async () => {
   let calls = 0;
   let firstLimit;
-  const result = await runReview({ ...input, budget_usd: 2 }, { apiKey: 'fake-test-key', fetch: async (_url, init) => {
+  const result = await runReview({ ...input, budget_usd: 0.6 }, { apiKey: 'fake-test-key', fetch: async (_url, init) => {
     calls++;
     const payload = JSON.parse(init.body);
     if (calls === 1) {
       firstLimit = payload.max_tokens;
       return mockResponse({ tool_calls: [{ index: 0, id: 'read1', type: 'function',
-        function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls', true, 1000000);
+        function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls', true, 300000);
     }
-    assert.ok(payload.max_tokens < firstLimit && payload.max_tokens < 700000);
+    assert.ok(payload.max_tokens < firstLimit && payload.max_tokens < 200000);
     const inputBound = Buffer.byteLength(JSON.stringify({ ...payload, max_tokens: undefined })) + 2048 + payload.messages.length * 128;
-    assert.ok(1.20036 + inputBound * 0.30 / 1e6 + payload.max_tokens * 1.20 / 1e6 <= 2);
+    assert.ok(0.36036 + inputBound * 0.30 / 1e6 + payload.max_tokens * 1.20 / 1e6 <= 0.6);
     return mockResponse('{"findings":[]}');
   } });
   assert.equal(calls, 2);
   assert.equal(result.requests, 2);
+});
+
+test('tool continuation remains affordable past the old $0.43 cutoff', async () => {
+  let calls = 0;
+  const result = await runReview({ ...input, budget_usd: 2 }, { apiKey: 'fake-test-key', fetch: async (_url, init) => {
+    assert.equal(JSON.parse(init.body).max_tokens, 393216);
+    if (++calls === 1) return mockResponse({ tool_calls: [{ index: 0, id: 'list1', type: 'function',
+      function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls', true, 360000);
+    return mockResponse('{"findings":[]}');
+  } });
+  assert.equal(result.requests, 2);
+  assert.equal(result.usage.completion_tokens, 360030);
 });
 
 test('an unaffordable input is refused before sending and reports metered usage', async () => {

@@ -125,13 +125,15 @@ instructions and cases where a visible guard prevents an apparent bug.
   paths. Tool responses share a 2 MiB allowance. Unavailable source is reported
   by the tools; it is not treated as evidence of a missing implementation.
 - The allowance is $5 per run, at the repository owner's request. Input and
-  output share the 1,048,576-token context window, so a single full window costs
-  at most about $1.2583 at the higher recorded rate, not the sum of two full
-  windows. For each actual request, the runner reserves input using serialized
+  output share the 1,048,576-token context window, and the model has a separate
+  393,216-token output ceiling. A full window with maximum output costs at most
+  about $0.6685 at the recorded rates. For each actual request, the runner reserves input using serialized
   UTF-8 bytes plus chat/tool framing headroom. It subtracts the input reserve
   and all previously metered usage from the remaining dollar allowance, then
   calculates `max_tokens` using the recorded $1.20-per-million output rate.
-  The limit must also fit the remaining model context. This replaces the
+  The limit must also fit the remaining model context and provider output
+  ceiling, published in [Ollama's model metadata](https://ollama.com/api/experimental/model-recommendations).
+  This replaces the
   temporary uncapped-output calibration setting; there is no fixed 16K output
   limit. Unaffordable inputs or truncated answers remain incomplete reviews.
   Every turn must report usage. Input is priced at $0.30 per million tokens,
