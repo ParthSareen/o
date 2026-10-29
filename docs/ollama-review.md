@@ -33,6 +33,60 @@ The account still receives GitHub's normal review request; this workflow does
 not impersonate it or complete its human review. Leave the variable absent to
 disable this trigger. `/review` needs no extra account, PAT or GitHub App.
 
+## How the runner works
+
+1. **Authorize:** a GitHub-hosted Ubuntu job loads the runner from the default
+   branch, checks the requester's current repository permission, and captures
+   the open PR's base/head revisions and eligible changed-file list.
+2. **Acknowledge:** a separate job creates or updates one bot-owned PR comment
+   to say the request is queued, then that the pipeline has started.
+3. **Collect context:** the analysis job fetches patches and nearby source via
+   the GitHub API at the captured revisions. It sends the prompt plus this
+   packet, not a checkout of the PR or the whole repository.
+4. **Analyze:** Python starts the Node Pi adapter. Pi sends one streaming
+   request to Ollama Cloud using the checked-in [prompt](../.github/ollama-review/prompt.md)
+   as the system message and the JSON code packet as the user message.
+   Pi has no tools and cannot explore files or run commands. This is a single
+   review inference, not an interactive coding session. The Node process gets
+   the model key but no GitHub token.
+5. **Validate:** the runner requires a complete JSON answer and token usage,
+   removes exact duplicate findings, checks inline locations against the diff,
+   and verifies the PR still has the captured base/head. It writes the Actions
+   summary and passes the structured result to the publisher.
+6. **Publish:** the publisher rechecks the revisions and locations, posts new
+   inline findings in a COMMENT review, and changes the persistent PR comment
+   to Complete or an explicit failure/cancellation/superseded status. It has PR
+   write permission and no model key. Existing bot comments are read only to
+   avoid duplicate publication; previous reviews are not model context.
+
+## Review prompt
+
+The full system instruction is versioned in
+[`.github/ollama-review/prompt.md`](../.github/ollama-review/prompt.md).
+It asks for every distinct supported bug, ordered by impact, without a finding
+quota. Each candidate must have a concrete trigger, observable consequence and
+code evidence. The reviewer checks counterevidence and existing guards before
+reporting it, and omits claims that require missing context. Multiple symptoms
+of one root cause become one finding; unrelated causes stay separate.
+
+An explicit security pass traces attacker-controlled inputs through trust
+boundaries to sensitive operations. It covers relevant authorization and tenant
+isolation, injection, file/network access, secret exposure, TLS/crypto changes,
+resource exhaustion, workflow abuse and CI/agent permissions. Security findings
+start with `Security:` and must describe attacker prerequisites, a reachable
+path, the ineffective control and its impact. A suspicious pattern alone does
+not qualify as a finding.
+
+The design follows [Anthropic's context-engineering guidance](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents)
+on clear, structured instructions and relevant context, and
+[OWASP's secure-code-review guidance](https://cheatsheetseries.owasp.org/cheatsheets/Secure_Code_Review_Cheat_Sheet.html)
+on data flow, changed trust boundaries and business logic. These are design
+inputs, not evidence that this prompt improves this DeepSeek checkpoint.
+Before claiming an improvement, compare prompts on the same known-bug,
+corrected and clean PR snapshots; score distinct confirmed bugs, false positives,
+security findings, latency and token use. Include code containing misleading
+instructions and cases where a visible guard prevents an apparent bug.
+
 ## Boundaries and limits
 
 - Authorization is a separate job, before the model key is supplied. The
@@ -64,10 +118,13 @@ disable this trigger. `/review` needs no extra account, PAT or GitHub App.
   incomplete reviews. Safe diagnostics name the failure without exposing raw
   provider bodies, prompts or reasoning. Changed base/head revisions cause the
   result to be discarded.
-- The model may return up to three concrete bug findings. Repeated findings
-  are collapsed. Inline locations are validated against visible right-side diff
+- There is no finding-count cap in the prompt, Pi adapter, validator or
+  publisher. Runtime, context and transport-size limits still apply. Exact
+  duplicate findings are collapsed. Inline locations are validated against visible right-side diff
   lines; unanchored findings remain in the main PR comment. Existing bot
   findings are deduplicated. A superseded run cannot overwrite a newer status.
+  If a PR comment exceeds GitHub's size allowance, it links to the full Actions
+  summary rather than silently treating the clipped text as the entire review.
 - Checks are advisory. Empty findings do not prove correctness. Code is sent
   to Ollama Cloud; findings are published on the PR and retained in Actions. No raw prompt,
   reasoning trace or extra artifact is uploaded.
@@ -83,6 +140,8 @@ npm test --prefix .github/ollama-review
 The Node tests use Pi's real agent loop and HTTP serialization with a local
 mock transport. They check the exact model/endpoint/thinking and absence of a client output cap,
 stream parsing, usage accounting, no retries, and refusal of tool requests.
+Regression checks also pass more than three distinct findings through Pi,
+normalization, the Actions summary and PR publication.
 Low thinking is explicit. A later measured output cap should be reintroduced
 after calibration; tests currently assert that no client output cap is sent.
 They make no network or paid inference calls.

@@ -119,6 +119,15 @@ class ReviewTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(review.ReviewError):
                 review.normalize(raw, REQUEST)
 
+    def test_all_distinct_findings_survive_normalization_and_summary(self):
+        issues = [{"path": "app.py", "start_line": 3, "end_line": 3,
+                   "body": f"Distinct bug {i}."} for i in range(12)]
+        result = review.normalize(response(issues + [copy.deepcopy(issues[0])]), REQUEST)
+        self.assertEqual(len(result["findings"]), len(issues))
+        rendered = review.summary(result)
+        for issue in issues:
+            self.assertIn(issue["body"], rendered)
+
     def test_changed_head_discards_output_and_engine_gets_no_write_token(self):
         github = FakeGitHub()
         with tempfile.TemporaryDirectory() as tmp:

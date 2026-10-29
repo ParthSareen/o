@@ -110,6 +110,15 @@ class FeedbackTest(unittest.TestCase):
                 self.assertTrue(all(path == "issues/comments/9" for _, path, _ in api.writes))
                 self.assertNotIn("loses data", api.writes[-1][2]["body"])
 
+    def test_publishes_every_distinct_finding_including_shared_locations(self):
+        api, output = FakeAPI(), result()
+        output["findings"] = [{"path": "app.py", "start_line": 3, "end_line": 3,
+                               "body": f"Distinct bug {i}."} for i in range(12)]
+        self.assertTrue(finish(api, REQUEST, output, "success", 100, 1))
+        self.assertEqual(len(api.writes[0][2]["comments"]), 12)
+        for finding in output["findings"]:
+            self.assertIn(finding["body"], api.writes[-1][2]["body"])
+
     def test_existing_inline_or_rejected_location_falls_back_to_summary(self):
         api = FakeAPI()
         api.inline = [{"user": {"login": "github-actions[bot]", "type": "Bot"},

@@ -51,6 +51,16 @@ test('HTTP rejection is not retried and does not expose provider error bodies', 
   assert.equal(calls, 1);
 });
 
+test('all findings survive the Pi response without a count limit', async () => {
+  const findings = Array.from({ length: 12 }, (_, i) => ({
+    path: 'a.go', start_line: i + 1, end_line: i + 1, body: `Distinct bug ${i + 1}`,
+  }));
+  const result = await runReview(input, { apiKey: 'fake-test-key',
+    fetch: async () => mockResponse(JSON.stringify({ findings })),
+  });
+  assert.deepEqual(result.findings, findings);
+});
+
 test('truncated, malformed and unmetered responses are never clean reviews', async () => {
   for (const [text, finish, usage] of [['{"findings":[]}', 'length', true], ['not json', 'stop', true], ['{"findings":[]}', 'stop', false]]) {
     await assert.rejects(runReview(input, { apiKey: 'fake-test-key', fetch: async () => mockResponse(text, finish, usage) }));

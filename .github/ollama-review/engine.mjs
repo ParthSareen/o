@@ -90,7 +90,7 @@ export async function runReview(input, { apiKey, fetch = globalThis.fetch, timeo
   } catch {
     throw new ReviewError(`Pi received invalid review JSON (${text.length} answer characters); no review is claimed.`);
   }
-  if (!parsed || !Array.isArray(parsed.findings) || parsed.findings.length > 3) {
+  if (!parsed || !Array.isArray(parsed.findings)) {
     throw new ReviewError('Pi received invalid findings; no review is claimed.');
   }
   const usage = answer.usage;
