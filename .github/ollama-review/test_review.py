@@ -40,13 +40,15 @@ class FakeGitHub:
         self.reads += 1
         return copy.deepcopy(self.pr)
 
+    def source(self, path, sha):
+        return "line one\nline two\nline three\nline four\n"
+
     def files(self, number, expected):
         return self.changed
 
 
 def response(issues=None):
-    return {"review": {"key_issues_to_review": issues or []},
-            "coverage": {"files_not_reviewed": [], "files_partially_reviewed": []},
+    return {"findings": issues or [], "requests": 1, "finish_reason": "stop",
             "usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
 
 
@@ -100,22 +102,19 @@ class ReviewTest(unittest.TestCase):
         self.assertEqual(review.prepare(event, "pull_request_target", github, automatic=True)["status"], "skipped")
 
     def test_findings_deduplicate_and_invalid_lines_fall_back_to_summary(self):
-        issue = {"relevant_file": "app.py", "issue_content": "A real bug", "start_line": 3, "end_line": 3}
-        unanchored = {"relevant_file": "elsewhere.py", "issue_content": "Needs context", "start_line": 900, "end_line": 900}
+        issue = {"path": "app.py", "body": "A real bug", "start_line": 3, "end_line": 3}
+        unanchored = {"path": "elsewhere.py", "body": "Needs context", "start_line": 900, "end_line": 900}
         result = review.normalize(response([issue, copy.deepcopy(issue), unanchored]), REQUEST)
         self.assertEqual(len(result["findings"]), 2)
         self.assertEqual(result["findings"][0]["start_line"], 3)
         self.assertIsNone(result["findings"][1]["start_line"])
-        raw = response()
-        raw["coverage"]["files_partially_reviewed"] = ["app.py"]
-        self.assertEqual(review.normalize(raw, REQUEST)["status"], "partial")
 
     def test_invalid_truncated_or_unmetered_results_never_report_clean(self):
         cases = [response(), response(), response(), response()]
-        cases[0]["review"]["key_issues_to_review"] = "none"
+        cases[0]["findings"] = "none"
         cases[1]["usage"] = {}
         cases[2]["usage"]["completion_tokens"] = review.MAX_OUTPUT_TOKENS
-        cases[3].pop("coverage")
+        cases[3]["finish_reason"] = "length"
         for raw in cases:
             with self.subTest(raw=raw), self.assertRaises(review.ReviewError):
                 review.normalize(raw, REQUEST)
@@ -126,7 +125,7 @@ class ReviewTest(unittest.TestCase):
             directory = Path(tmp)
 
             def execute(command, **kwargs):
-                if command[1] == "run":
+                if command[0] == "node":
                     (directory / "engine.json").write_text(json.dumps(response()))
                     github.pr["head"]["sha"] = "d" * 40
                 return subprocess.CompletedProcess(command, 0)
@@ -134,32 +133,28 @@ class ReviewTest(unittest.TestCase):
             with patch.object(review.subprocess, "run", side_effect=execute) as run:
                 with self.assertRaisesRegex(review.ReviewError, "changed during"):
                     review.analyze(REQUEST, directory, github, "not-a-real-key")
-                self.assertEqual(run.call_count, 2)  # one engine invocation and cleanup
-            env = review.engine_environment("read-token", "key")
-            self.assertEqual(env["CONFIG__PUBLISH_OUTPUT"], "false")
-            self.assertEqual(env["CONFIG__NUM_RETRIES"], "0")
-            self.assertEqual(env["CONFIG__FALLBACK_MODELS"], "[]")
-
-    def test_successful_analysis_reports_engine_filtered_files(self):
+                self.assertEqual(run.call_count, 1)
+                self.assertNotIn("GITHUB_TOKEN", run.call_args.kwargs["env"])
+    def test_successful_analysis_reports_missing_context(self):
         github = FakeGitHub()
+        github.source = lambda path, sha: None
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
 
             def execute(command, **kwargs):
-                if command[1] == "run":
-                    (directory / "engine.json").write_text(json.dumps(response()))
-                    (directory / "audit.json").write_text(json.dumps(
-                        {"requests": 1, "finish_reason": "stop", "files": []}))
+                (directory / "engine.json").write_text(json.dumps(response()))
+                packet = json.loads((directory / "input.json").read_text())
+                self.assertEqual(packet["review"]["files"][0]["patch"], PATCH)
+                self.assertEqual(packet["review"]["files"][0]["context"], "")
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(review.subprocess, "run", side_effect=execute):
                 result = review.analyze(REQUEST, directory, github, "not-a-real-key")
-            self.assertEqual(result["omitted"], ["app.py"])
-            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["context_limited"], ["app.py"])
             self.assertEqual(result["requests"], 1)
 
     def test_summary_escapes_model_output(self):
-        issue = {"relevant_file": "app.py", "issue_content": "</pre><script>alert(1)</script>", "start_line": 3, "end_line": 3}
+        issue = {"path": "app.py", "body": "</pre><script>alert(1)</script>", "start_line": 3, "end_line": 3}
         text = review.summary(review.normalize(response([issue]), REQUEST))
         self.assertNotIn("<script>", text)
         self.assertIn("&lt;script&gt;", text)

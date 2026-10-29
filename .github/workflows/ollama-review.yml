@@ -62,8 +62,14 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
           sparse-checkout: .github/ollama-review
-      - name: Pull pinned review engine
-        run: docker pull --platform linux/amd64 pragent/pr-agent@sha256:10a8893d5e081be1a5ae825843d9fc14f8e8d59d8a4f61d67c1775415156079f
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.2'
+      - name: Install pinned Pi packages
+        run: npm ci --prefix .github/ollama-review --ignore-scripts --no-audit --no-fund
+      - name: Check Pi transport offline
+        run: npm test --prefix .github/ollama-review
       - name: Analyze pull request
         env:
           GITHUB_TOKEN: ${{ github.token }}
