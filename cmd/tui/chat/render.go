@@ -217,13 +217,69 @@ func (m chatModel) renderEntryLinesCached(index int, entry chatEntry, body strin
 	return lines
 }
 
+// transcriptMemo memoizes the assembled transcript so a View pass does not
+// rebuild it from the per-entry caches.
+//
+// The memo is validated against the same invariant the per-entry cache already
+// relies on: the render key of every entry (plus the width it was rendered
+// at). markEntryDirty clears an entry's render key, so any content, status or
+// layout change, any entry append/remove, and any width change all invalidate
+// the memo exactly. This introduces no new staleness class over
+// renderEntryLinesCached.
+//
+// The cached line slice is shared with callers and must be treated as
+// read-only; every call site clones before appending.
+type transcriptMemo struct {
+	width int
+	keys  []chatEntryRenderKey
+	lines []string
+}
+
+func (m chatModel) transcriptMemoValid(width int) bool {
+	memo := m.memo
+	if memo == nil || memo.width != width || len(memo.keys) != len(m.entries) {
+		return false
+	}
+	for i := range m.entries {
+		if memo.keys[i] != m.entries[i].renderKey {
+			return false
+		}
+	}
+	return true
+}
+
+// storeTranscriptMemo records lines as the transcript for the current entries.
+// It runs after renderTranscript so the per-entry render keys have already been
+// populated by renderEntryLinesCached.
+func (m chatModel) storeTranscriptMemo(width int, lines []string) {
+	memo := m.memo
+	if memo == nil {
+		return
+	}
+	if cap(memo.keys) < len(m.entries) {
+		memo.keys = make([]chatEntryRenderKey, len(m.entries))
+	}
+	memo.keys = memo.keys[:len(m.entries)]
+	for i := range m.entries {
+		memo.keys[i] = m.entries[i].renderKey
+	}
+	memo.width = width
+	memo.lines = lines
+}
+
 func (m chatModel) transcriptLines(width int) []string {
+	if m.transcriptMemoValid(width) {
+		return m.memo.lines
+	}
 	transcript := m.renderTranscript(width)
 	transcript = strings.TrimRight(transcript, "\n")
 	if transcript == "" {
+		m.storeTranscriptMemo(width, nil)
 		return nil
 	}
-	return strings.Split(transcript, "\n")
+	lines := strings.Split(transcript, "\n")
+	m.storeTranscriptMemo(width, lines)
+	return lines
 }
 
 func (m chatModel) visibleTranscriptStartLine(width, available int) int {
