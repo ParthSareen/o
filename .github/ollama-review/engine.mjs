@@ -49,6 +49,8 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
     throw new ReviewError('Invalid review input.');
   }
   const budget = input.budget_usd;
+  const mode = input.mode ?? 'repository';
+  if (!['repository', 'diff'].includes(mode)) throw new ReviewError('Invalid review mode.');
   if (!Number.isFinite(budget) || budget <= 0 || budget > 5) throw new ReviewError('Invalid review cost allowance.');
   let requests = 0;
   let payloads = 0;
@@ -57,7 +59,7 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
   const cost = () => (usage.prompt_tokens * model.cost.input + usage.completion_tokens * model.cost.output) / 1e6;
   const filesRead = new Set();
   let toolCalls = 0;
-  const tools = repositoryTools(repository, input.review.head, path => filesRead.add(path)).map(tool => ({
+  const tools = (mode === 'diff' ? [] : repositoryTools(repository, input.review.head, path => filesRead.add(path))).map(tool => ({
     ...tool, execute: (...args) => { toolCalls++; return tool.execute(...args); },
   }));
   const names = new Set(tools.map(tool => tool.name));
@@ -69,6 +71,10 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
     initialState: { model, tools, thinkingLevel: 'low', systemPrompt: input.policy },
     toolExecution: 'sequential',
     streamFn: (selectedModel, context, options) => {
+      if (mode === 'diff' && requests !== 0) {
+        failure = 'Diff review cannot make additional model requests.';
+        throw new ReviewError(failure);
+      }
       let dispatched = false;
       return streamSimple(selectedModel, context, {
         ...options,
@@ -85,8 +91,8 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
         onPayload: (payload) => {
           if (++payloads !== requests + 1 || payload.model !== model.id
               || payload.reasoning_effort !== 'low'
-              || payload.tools?.length !== tools.length
-              || payload.tools.some(tool => !names.has(tool.function?.name))) {
+              || (payload.tools ?? []).length !== tools.length
+              || (payload.tools ?? []).some(tool => !names.has(tool.function?.name))) {
             throw new Error('Unexpected model request configuration.');
           }
           delete payload.max_tokens;
@@ -171,7 +177,7 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const input = JSON.parse(await readFile(process.argv[2], 'utf8'));
-    const repository = JSON.parse(await readFile(process.argv[4], 'utf8'));
+    const repository = input.mode === 'diff' ? undefined : JSON.parse(await readFile(process.argv[4], 'utf8'));
     const result = await runReview(input, { apiKey: process.env.OLLAMA_API_KEY, repository });
     await writeFile(process.argv[3], JSON.stringify(result));
   } catch (error) {

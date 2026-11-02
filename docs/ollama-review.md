@@ -1,162 +1,143 @@
-# Ollama PR review pilot
+# Ollama PR review
 
-This repository uses Pi's agent core and OpenAI-compatible transport with
-Ollama Cloud's `deepseek-v4.1-flash:1017` checkpoint and `low` thinking.
-Reviews appear in a persistent **PR comment**, with inline findings where their
-locations are valid, and in the **Actions job summary**. Pi can list, search and
-read repository source at the reviewed head. It has no shell or write tools;
-extensions, saved sessions and executable PR code are not loaded. Repository
-instructions encountered in source are treated as data.
-The workflow never approves PRs or requests changes.
+An advisory GitHub Actions workflow using Pi and Ollama Cloud. A maintainer
+requests a review with `/review`; the bot acknowledges it, explores relevant
+repository source, and publishes findings on the PR. It never approves a PR or
+requests changes. It is a review of changes, not a nightly repository scan,
+penetration test, or test runner.
 
-## Request a review
+Two sibling reviewers are included:
 
-Add your Ollama API key as the repository Actions secret `OLLAMA_API_KEY`.
-Then comment exactly `/review` on a PR, or choose **Actions → Ollama review →
-Run workflow** and enter its number. The requester must currently have write,
-maintain or admin permission. The bot acknowledges the request, updates the
-comment when the pipeline starts, then posts findings or a clear terminal error.
-The same comment is reused on subsequent requests.
+| PR command | Input and behavior |
+| --- | --- |
+| `/review` | Diff and nearby source, then read-only repository exploration as needed. |
+| `/review-diff` | Diff and nearby source only; one model call, no tools or repository snapshot. |
 
-Manual requests can review forks: the default-branch runner retrieves source
-through GitHub's API as data. Do not enable sending secrets to fork workflows.
-Ordinary contributors cannot spend the model budget by commenting.
+The diff-only entry point and prompts live in `.github/ollama-review-diff/`.
+It shares authorization, source collection, budget checks, output validation
+and publishing with `.github/ollama-review/`. Each reviewer has its own status
+comment, deduplication markers and concurrency group. Requesting both starts
+two separately budgeted reviews; one does not cancel the other.
 
-Set repository variable `OLLAMA_REVIEW_AUTO=true` for automatic reviews of new
-or updated non-draft PRs from this repository. It is off when absent.
+## Install a reviewed bundle
 
-## Reviewer picker
+A repository maintainer needs permission to add workflows, an Ollama Cloud API
+key, and approval to send the selected repository's source to Ollama Cloud.
+Use one approved test repository first.
 
-GitHub's picker accepts people and teams; `github-actions[bot]` is not selectable.
-To use an existing collaborator or machine account as the trigger, set
-`OLLAMA_REVIEW_REQUEST_LOGIN` to its login. A maintainer selecting that account
-requests the same review. Other review requests are ignored.
-The account still receives GitHub's normal review request; this workflow does
-not impersonate it or complete its human review. Leave the variable absent to
-disable this trigger. `/review` needs no extra account, PAT or GitHub App.
+1. Obtain the reviewed ZIP and its SHA-256 from the person delivering it.
+   Verify the ZIP's hash, extract it, and inspect `bundle.json` and the files.
+2. Preview installation into a local working branch:
+   ```sh
+   python3 install.py --target /path/to/repository
+   ```
+3. After reviewing the preview, add `--apply`. The installer creates missing
+   files, accepts identical files, and refuses conflicting files or symlinks.
+   It does not commit, push, call a model, or change GitHub settings. Upgrades
+   that differ require a manual diff; there is no force-overwrite option.
+4. Review `.github/ollama-review/settings.json`:
+   ```json
+   {"profile": "general", "budget_usd": 5}
+   ```
+   `general` combines concrete correctness bugs with an explicit security pass.
+   `security` reports only findings with demonstrated security impact. Both
+   use the same pinned model. The diff-only reviewer has its own
+   `.github/ollama-review-diff/settings.json` with the same options. Choose a positive budget
+   up to $5; this is an estimated per-run allowance, not an account billing cap.
+5. Add `OLLAMA_API_KEY` as a repository Actions secret. Never place a key in
+   the settings file. Review and merge the installation through your normal
+   process, then comment exactly `/review` on a small test PR.
 
-## How the runner works
+Python 3, Git and a recent Node runtime are needed for local validation. GitHub's
+Ubuntu runner installs pinned Node `24.22.2` and locked Pi packages itself.
+Your organization must allow the pinned checkout/setup-node actions and
+`pull-requests: write` for the feedback jobs. Use a dedicated CI key and the
+available account controls; this workflow does not provision users or enforce
+organization-wide budgets.
 
-1. **Authorize:** a GitHub-hosted Ubuntu job loads the runner from the default
-   branch, checks the requester's current repository permission, and captures
-   the open PR's base/head revisions and eligible changed-file list.
-2. **Acknowledge:** a separate job creates or updates one bot-owned PR comment
-   to say the request is queued, then that the pipeline has started.
-3. **Collect context:** the analysis job fetches patches and nearby source via
-   the GitHub API at the captured revisions. It also fetches a shallow bare Git
-   snapshot, verifies its head matches the review, and indexes regular source
-   files. No PR working tree is checked out.
-4. **Analyze:** Python starts the Node Pi adapter. Pi sends one streaming
-   request to Ollama Cloud using the checked-in [prompt](../.github/ollama-review/prompt.md)
-   as the system message and the JSON code packet as the user message.
-   Pi can call `list_files`, `search_code` (literal text) and `read_file`
-   (numbered lines), including unchanged callers, definitions, tests and
-   configuration. Results feed the next model turn until it returns findings.
-   The Node process gets the model key but no GitHub token. The readers use
-   fixed Git object operations and cannot execute model-supplied commands.
-5. **Validate:** the runner requires a complete JSON answer and token usage,
-   removes exact duplicate findings, checks inline locations against the diff,
-   and verifies the PR still has the captured base/head. It writes the Actions
-   summary and passes the structured result to the publisher. Both the summary
-   and PR comment report model requests, tool calls and distinct files read.
-6. **Publish:** the publisher rechecks the revisions and locations, posts new
-   inline findings in a COMMENT review, and changes the persistent PR comment
-   to Complete or an explicit failure/cancellation/superseded status. It has PR
-   write permission and no model key. Existing bot comments are read only to
-   avoid duplicate publication; previous reviews are not model context.
+Expected result: one bot-owned comment progresses from Queued to Running to
+Complete, or gives an explicit failure. Findings with valid locations also
+appear inline. The comment and Actions summary show requests, repository-tool
+calls, files read and estimated cost. Empty findings do not establish safety.
 
-## Review prompt
+## Triggers
 
-The full system instruction is versioned in
-[`.github/ollama-review/prompt.md`](../.github/ollama-review/prompt.md).
-It asks for every distinct supported bug, ordered by impact, without a finding
-quota. Each candidate must have a concrete trigger, observable consequence and
-code evidence. The reviewer checks counterevidence and existing guards before
-reporting it, and omits claims that require missing context. Multiple symptoms
-of one root cause become one finding; unrelated causes stay separate.
+`/review` and Actions → Ollama review → Run workflow are enabled.
+For the diff-only sibling, use `/review-diff` or Actions → Ollama diff review →
+Run workflow. It is manual-only and does not respond to reviewer-picker or
+automatic PR events. The actor
+must currently have repository write, maintain or admin permission. Untrusted
+commenters cannot trigger spending or cancel a maintainer's running review.
 
-An explicit security pass traces attacker-controlled inputs through trust
-boundaries to sensitive operations. It covers relevant authorization and tenant
-isolation, injection, file/network access, secret exposure, TLS/crypto changes,
-resource exhaustion, workflow abuse and CI/agent permissions. Security findings
-start with `Security:` and must describe attacker prerequisites, a reachable
-path, the ineffective control and its impact. A suspicious pattern alone does
-not qualify as a finding.
+Automatic reviews are off. Set `OLLAMA_REVIEW_AUTO=true` only after the trial
+is accepted; this enables eligible non-draft, same-repository PR events.
+Forks remain manual. A maintainer must approve sending fork content to Cloud;
+fork code is fetched as data and never executed.
 
-The design follows [Anthropic's context-engineering guidance](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents)
-on clear, structured instructions and relevant context, and
-[OWASP's secure-code-review guidance](https://cheatsheetseries.owasp.org/cheatsheets/Secure_Code_Review_Cheat_Sheet.html)
-on data flow, changed trust boundaries and business logic. These are design
-inputs, not evidence that this prompt improves this DeepSeek checkpoint.
-Before claiming an improvement, compare prompts on the same known-bug,
-corrected and clean PR snapshots; score distinct confirmed bugs, false positives,
-security findings, latency and token use. Include code containing misleading
-instructions and cases where a visible guard prevents an apparent bug.
+GitHub's reviewer picker cannot select `github-actions[bot]`. Optionally set
+`OLLAMA_REVIEW_REQUEST_LOGIN` to a real collaborator/machine-account login.
+A maintainer requesting that account triggers the workflow, but the workflow
+does not impersonate it or complete its human review.
 
-## Boundaries and limits
+## How it runs and what is protected
 
-- Authorization is a separate job, before the model key is supplied. The
-  analysis job has only contents/PR read permissions, and its GitHub token is
-  never passed to Pi. Separate feedback/publisher jobs receive PR write access
-  but no model key. All comment writes are serialized per PR.
-  Unauthorized comments cannot cancel a maintainer's running review.
-- Only trusted default-branch runner code is checked out. There is no PR
-  checkout, build, dependency hook, test execution, MCP server or shell tool.
-  The separate bare snapshot contains inert Git objects. A temporary fetch
-  credential is supplied only to the Git fetch process, never written to Git
-  configuration or passed to Pi. Readers can address only indexed blob IDs;
-  model paths cannot escape into the host filesystem. Symlinks and submodules
-  are excluded. No fetch is available to the model.
-  Pi dependencies and their integrity hashes are locked; `npm ci` disables
-  lifecycle scripts. Node and GitHub actions are pinned.
-- Multiple model/tool turns share one time and cost allowance. There are no
-  transport retries or fallback models.
-  The analysis job has a ten-minute deadline; inference has an eight-minute
-  timeout and a nine-minute process limit. A new authorized request for the
-  same PR cancels the old one.
-- At most 100 changed files, 96 KiB of eligible patches, 48 KiB of selective
-  surrounding code, and 256 KiB of total serialized input. Context is numbered
-  source around changed hunks, fetched at the captured head (base for deletions).
-  Generated/vendor files, common binary/lock files and secret-file patterns are
-  excluded. Exclusions and unavailable context are listed in the summary.
-  These are initial diff/context limits; tools can inspect unchanged source.
-  The repository index is limited to 8 MiB and each source blob to 256 KiB.
-  Reads page up to 200 lines, searches page 40 matches, and listings page 100
-  paths. Tool responses share a 2 MiB allowance. Unavailable source is reported
-  by the tools; it is not treated as evidence of a missing implementation.
-- The allowance is $5 per run, at the repository owner's request. Input and
-  output share the 1,048,576-token context window, and the model has a separate
-  393,216-token output ceiling. A full window with maximum output costs at most
-  about $0.6685 at the recorded rates. For each actual request, the runner reserves input using serialized
-  UTF-8 bytes plus chat/tool framing headroom. It subtracts the input reserve
-  and all previously metered usage from the remaining dollar allowance, then
-  calculates `max_tokens` using the recorded $1.20-per-million output rate.
-  The limit must also fit the remaining model context and provider output
-  ceiling, published in [Ollama's model metadata](https://ollama.com/api/experimental/model-recommendations).
-  This replaces the
-  temporary uncapped-output calibration setting; there is no fixed 16K output
-  limit. Unaffordable inputs or truncated answers remain incomplete reviews.
-  Every turn must report usage. Input is priced at $0.30 per million tokens,
-  without cache discounts. Failed reviews retain metered usage and request
-  counts; unmetered failed requests may still incur provider charges.
-  This is an estimate, not a
-  provider-enforced billing limit; review current prices and dashboard billing.
-- HTTP failures, truncated streams, missing metering and invalid JSON are
-  incomplete reviews. Safe diagnostics name the failure without exposing raw
-  provider bodies, prompts or reasoning. Changed base/head revisions cause the
-  result to be discarded.
-- There is no finding-count cap in the prompt, Pi adapter, validator or
-  publisher. Runtime, context and transport-size limits still apply. Exact
-  duplicate findings are collapsed. Inline locations are validated against visible right-side diff
-  lines; unanchored findings remain in the main PR comment. Existing bot
-  findings are deduplicated. A superseded run cannot overwrite a newer status.
-  If a PR comment exceeds GitHub's size allowance, it links to the full Actions
-  summary rather than silently treating the clipped text as the entire review.
-- Checks are advisory. Empty findings do not prove correctness. Code is sent
-  to Ollama Cloud; findings are published on the PR and retained in Actions. No raw prompt,
-  reasoning trace or extra artifact is uploaded.
+1. A read-only authorization job captures the open PR's base/head and changed
+   files. All runner code comes from the trusted default branch.
+2. A separate job posts the acknowledgment and running status.
+3. Both analyzers collect the diff and nearby source. The repository reviewer then fetches an inert bare
+   Git snapshot pinned to the head. There is no PR working-tree checkout,
+   build, lifecycle script, shell tool, MCP server or execution of PR code.
+4. In repository mode, Pi can `list_files`, `search_code` and `read_file`, including unchanged
+   callers, implementations and tests. Tool results feed later model turns.
+   Files and repository instructions are untrusted evidence, not instructions
+   to execute. The Node process gets the model key and no GitHub token.
+   In diff-only mode, no repository is fetched and no tools are registered.
+   Pi returns JSON from one request using only the injected diff and bounded
+   surrounding source. Missing callers or definitions remain a limitation.
+5. The runner validates JSON, usage, changed-file paths and visible right-side
+   inline ranges. It discards results if the base/head changed.
+6. A publisher with PR write permission and no model key checks revisions
+   again and publishes COMMENT feedback. Identical findings at an active
+   location are deduplicated; different bugs on the same line remain distinct.
+   Superseded runs cannot overwrite newer status. Prior reviews are used for
+   publication deduplication, not as model context.
 
-## Validate changes
+The workflow's least-privilege split follows
+[GitHub's guidance](https://docs.github.com/en/actions/reference/security/secure-use).
+Initial source and repository tools read only regular Git blobs, so symlinks
+cannot bypass file exclusions. Generated/vendor, binary/lock and common
+secret-file patterns are excluded. **These filters do not redact credentials
+embedded in ordinary source.** Approve data access before installing.
+Source is sent to Ollama Cloud; findings and file paths are retained in the PR
+and Actions. The workflow does not upload raw prompts or reasoning traces as
+artifacts. Review the provider's data terms with the customer separately.
+
+## Limits and failure behavior
+
+- At most 100 changed files, 96 KiB of eligible patches, 48 KiB of initial nearby
+  source and 256 KiB of initial serialized input. Tools can inspect unchanged
+  source: index up to 8 MiB, regular text blobs up to 256 KiB each, 200-line
+  reads, 40-match searches and 100-path listings, with 2 MiB total tool output.
+  Exclusions and missing initial context are reported. Missing context is not
+  evidence that a guard does not exist.
+- The analysis job has a ten-minute limit; inference has an eight-minute
+  timeout. New authorized requests for the same PR cancel older analysis.
+  There are no transport retries or fallback models.
+- `deepseek-v4.1-flash:1017`, low thinking, 1,048,576 context tokens and a separate
+  393,216-token output maximum are pinned. Every model turn must report usage.
+  The next output limit is the minimum of the provider maximum, remaining
+  context and remaining dollar allowance after a conservative input reserve.
+- Cost uses uncached list rates of $0.30/M input and $1.20/M output. Current
+  limits/rates are in [Ollama's metadata](https://ollama.com/api/experimental/model-recommendations)
+  and [model page](https://ollama.com/library/deepseek-v4.1-flash:1017-cloud).
+  This is not a provider-enforced billing cap. Failed or unmetered requests may
+  incur charges; reconcile actual billing and set account controls separately.
+- Truncation, missing metering, invalid JSON or invalid findings are incomplete
+  reviews. Safe errors retain known usage without publishing raw provider
+  bodies or reasoning. There is no finding-count quota. Very large PR comments
+  are clipped with a link to the full Actions summary.
+
+## Validate without spending
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/ollama-review -v
@@ -164,28 +145,52 @@ npm ci --prefix .github/ollama-review --ignore-scripts --no-audit --no-fund
 npm test --prefix .github/ollama-review
 ```
 
-The Node tests use Pi's real agent loop and HTTP serialization with a local
-mock transport. They check the exact model/endpoint/thinking and budget-derived output limits,
-stream parsing, cumulative usage accounting, no retries, repository-tool
-continuation and refusal of unavailable tools. A real local Git object fixture
-checks that unchanged source reaches the next model turn and host filesystem
-paths are rejected. Snapshot checks cover head changes and credential isolation.
-Regression checks also pass more than three distinct findings through Pi,
-normalization, the Actions summary and PR publication.
-Low thinking is explicit. Tests cover continuing past the former premature
-budget cutoff, shrinking the next output allowance, and refusing an
-unaffordable request before sending it.
-They make no network or paid inference calls.
+Tests use synthetic data and a mocked model transport. They exercise real Pi
+serialization/tool continuation and local Git reads, authorization, stale heads,
+reruns, invalid responses, spend limits and publishing behavior. No model call
+or GitHub publication is made. `npm ci` downloads locked dependencies; it does
+not run their lifecycle scripts.
 
-Before broader use, compare a known-bug PR with its corrected version, a clean
-change, and a large/generated change. Confirm actual request count, findings,
-latency and dashboard cost. Exercise a rerun, cancellation and a head change:
-old results must not replace the current status, and duplicate inline findings
-must not be posted. The analyzer remains read-only.
+`evals/` contains a known authorization defect, its fix through an unchanged
+helper, and a clean control. The tests prove the fixtures behave as labeled.
+They **do not prove the model detects the defect**. For a separately approved
+model trial, make three synthetic PRs using each case's base/head `api.py` and
+shared `storage.py`. Have a reviewer adjudicate the returned findings and fill
+in a copy of `evals/labels.csv`, then run:
 
-References: [Pi](https://github.com/earendil-works/pi),
-[Ollama Cloud](https://docs.ollama.com/cloud),
-[thinking controls](https://docs.ollama.com/capabilities/thinking),
-[GitHub trigger security](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
-GitHub's public-repository `pull_request_target` policy may require an explicit
-allowance; `/review` and manual dispatch do not require that trigger.
+```sh
+python3 .github/ollama-review/evaluate.py --labels /path/to/completed-labels.csv
+```
+
+Blank, incomplete or unsupported results cannot pass. Evaluate each selected
+profile separately. No synthetic result is a substitute for reviewing a real
+customer PR or for an independent security review of this workflow.
+
+## Trial finish line
+
+Before use, name a customer operator and reviewer, approve one repository and
+Cloud data access, select the combined/security profile, and agree budget,
+acceptable noise and an actual-billing check. Keep automatic review off.
+
+With explicit approval for paid runs: evaluate the known defect/fix/clean
+controls, then one small real PR. Verify fresh-head behavior, a rerun without
+duplicate findings, and failure/cancellation status. Record confirmed bugs,
+unsupported findings, time, estimated and actual cost, and reviewer effort.
+
+The customer must then disposition the findings and decide whether to keep
+using it. A passing workflow, provisioned credits or this package alone does
+not establish adoption, security effectiveness or cost savings.
+
+## Build a bundle locally
+
+From this source repository:
+
+```sh
+python3 .github/ollama-review/package.py /tmp/ollama-review.zip --profile general
+```
+
+Choose `--profile security` for focused security review. This packages saved
+files, including local uncommitted changes. `bundle.json` records a base Git
+commit and payload hashes; the base commit alone does not identify a candidate
+containing local changes. The command prints the ZIP SHA-256 and refuses to
+replace an existing ZIP. Deliver only a reviewed, versioned candidate.

@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import unittest
 
 from feedback import body, finish, post_inline, update
@@ -52,13 +53,35 @@ class FakeAPI:
         if path == "pulls/7/reviews" and self.fail_inline:
             raise ReviewError("HTTP 422")
         self.writes.append((method, path, payload))
-        if path == "issues/comments/9":
-            self.comments[0]["body"] = payload["body"]
+        if path.startswith("issues/comments/"):
+            comment_id = int(path.split("/")[-1])
+            next(comment for comment in self.comments if comment["id"] == comment_id)["body"] = payload["body"]
         elif path == "issues/7/comments":
             self.comments.append({"id": 10, **payload, "user": {"login": "github-actions[bot]", "type": "Bot"}})
 
 
 class FeedbackTest(unittest.TestCase):
+    def test_diff_status_is_independent_of_repository_review(self):
+        api = FakeAPI()
+        diff = {**REQUEST, "mode": "diff"}
+        api.comments.append({**status(), "id": 10, "body": "<!-- ollama-review-diff-status run=100 attempt=1 -->\nold"})
+        original = api.comments[0]["body"]
+        self.assertTrue(update(api, diff, "queued", 101, 1))
+        self.assertTrue(update(api, diff, "running", 101, 1))
+        self.assertEqual(api.comments[0]["body"], original)
+        self.assertEqual(api.writes[-1][1], "issues/comments/10")
+        self.assertIn("Ollama diff review", api.writes[-1][2]["body"])
+        self.assertIn("/review-diff", body(diff, "stale", 101, 1))
+
+    def test_diff_results_publish_under_the_diff_review_markers(self):
+        api = FakeAPI()
+        api.comments.append({**status(), "id": 10, "body": "<!-- ollama-review-diff-status run=100 attempt=1 -->"})
+        output = {**result(), "requests": 1, "tool_calls": 0, "files_read": 0}
+        self.assertTrue(finish(api, {**REQUEST, "mode": "diff"}, output, "success", 100, 1))
+        self.assertIn("ollama-review-diff-run", api.writes[0][2]["body"])
+        self.assertIn("ollama-review-diff-finding", api.writes[0][2]["comments"][0]["body"])
+        self.assertEqual(api.writes[-1][1], "issues/comments/10")
+
     def test_acknowledges_and_updates_the_same_owned_comment(self):
         api = FakeAPI()
         self.assertTrue(update(api, REQUEST, "queued", 101, 1))
@@ -123,9 +146,10 @@ class FeedbackTest(unittest.TestCase):
 
     def test_existing_inline_or_rejected_location_falls_back_to_summary(self):
         api = FakeAPI()
+        fingerprint = hashlib.sha256(b"app.py\nThis branch loses data.").hexdigest()
         api.inline = [{"user": {"login": "github-actions[bot]", "type": "Bot"},
                        "commit_id": HEAD, "path": "app.py", "line": 3,
-                       "body": "<!-- ollama-review-finding earlier -->\nAlready reported"}]
+                       "body": f"<!-- ollama-review-finding {fingerprint} -->\nThis branch loses data."}]
         self.assertTrue(finish(api, REQUEST, result(), "success", 100, 1))
         self.assertEqual(len(api.writes), 1)
         api = FakeAPI()
@@ -133,6 +157,14 @@ class FeedbackTest(unittest.TestCase):
         self.assertTrue(finish(api, REQUEST, result(), "success", 100, 1))
         self.assertIn("Inline feedback could not be confirmed", api.writes[-1][2]["body"])
         self.assertIn("loses data", api.writes[-1][2]["body"])
+
+    def test_distinct_bug_on_same_line_is_not_suppressed(self):
+        api = FakeAPI()
+        api.inline = [{"user": {"login": "github-actions[bot]", "type": "Bot"},
+                       "commit_id": HEAD, "path": "app.py", "line": 3,
+                       "body": "<!-- ollama-review-finding earlier -->\nA different bug"}]
+        self.assertTrue(finish(api, REQUEST, result(), "success", 100, 1))
+        self.assertEqual(len(api.writes[0][2]["comments"]), 1)
 
     def test_model_text_cannot_embed_images_html_or_notify_people(self):
         output = result()

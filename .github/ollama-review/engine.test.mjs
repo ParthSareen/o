@@ -46,6 +46,38 @@ test('real Pi transport exposes only repository readers and preserves usage', as
   assert.equal(JSON.stringify(result).includes('private thinking'), false);
 });
 
+test('diff reviewer sends only the supplied packet in one tool-free request', async () => {
+  let calls = 0;
+  const packet = { ...input, mode: 'diff', review: { ...input.review,
+    files: [{ path: 'a.go', patch: '+changed', context: '1: surrounding source' }],
+  } };
+  const result = await runReview(packet, { apiKey: 'fake-test-key',
+    repository: { get head() { throw new Error('Diff reviewer must not open a repository'); } },
+    fetch: async (_url, init) => {
+      calls++;
+      const body = JSON.parse(init.body);
+      assert.equal(body.tools?.length ?? 0, 0);
+      const content = body.messages.find(message => message.role === 'user').content;
+      assert.deepEqual(JSON.parse(content.map(block => block.text).join('')), packet.review);
+      return mockResponse('{"findings":[]}');
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.requests, 1);
+  assert.equal(result.tool_calls, 0);
+  assert.equal(result.files_read, 0);
+});
+
+test('diff reviewer refuses a tool request without making a second model call', async () => {
+  let calls = 0;
+  await assert.rejects(runReview({ ...input, mode: 'diff' }, { apiKey: 'fake-test-key', fetch: async () => {
+    calls++;
+    return mockResponse({ tool_calls: [{ index: 0, id: 'read1', type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"a.go"}' } }] }, 'tool_calls');
+  } }), /unavailable tool/);
+  assert.equal(calls, 1);
+});
+
 test('HTTP rejection is not retried and does not expose provider error bodies', async () => {
   let calls = 0;
   await assert.rejects(runReview(input, { apiKey: 'fake-test-key', fetch: async () => {

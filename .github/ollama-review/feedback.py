@@ -9,8 +9,16 @@ import re
 from review import GitHub, MODEL, ReviewError, normalize, revision, right_lines
 
 
-STATUS = re.compile(r"^<!-- ollama-review-status run=(\d+) attempt=(\d+) -->")
 BOT = "github-actions[bot]"
+
+
+def prefix(request):
+    return "ollama-review-diff" if request.get("mode") == "diff" else "ollama-review"
+
+
+def status_pattern(mode="repository"):
+    name = "ollama-review-diff" if mode == "diff" else "ollama-review"
+    return re.compile(rf"^<!-- {name}-status run=(\d+) attempt=(\d+) -->")
 
 
 def owned(comment):
@@ -29,9 +37,9 @@ def pages(github, path):
     raise ReviewError("Comment history exceeds the pagination limit")
 
 
-def current_comment(github, number):
+def current_comment(github, number, mode="repository"):
     comments = [c for c in pages(github, f"issues/{number}/comments")
-                if owned(c) and STATUS.match(c.get("body", ""))]
+                if owned(c) and status_pattern(mode).match(c.get("body", ""))]
     return max(comments, key=lambda c: c["id"]) if comments else None
 
 
@@ -43,9 +51,11 @@ def body(request, state, run_id, attempt, result=None, note=""):
     run_url = f"https://github.com/{request['repository']}/actions/runs/{run_id}"
     titles = {"queued": "Queued", "running": "Running", "complete": "Complete",
               "cancelled": "Cancelled", "stale": "Superseded", "incomplete": "Could not complete"}
-    lines = [f"<!-- ollama-review-status run={run_id} attempt={attempt} -->",
-             f"### Ollama review — {titles[state]}", "",
-             f"[View run]({run_url}) · Head `{request['head'][:12]}` · `{MODEL}` via Pi", ""]
+    name = "Ollama diff review" if request.get("mode") == "diff" else "Ollama review"
+    command = "/review-diff" if request.get("mode") == "diff" else "/review"
+    lines = [f"<!-- {prefix(request)}-status run={run_id} attempt={attempt} -->",
+             f"### {name} — {titles[state]}", "",
+             f"[View run]({run_url}) · Head `{request['head'][:12]}` · `{MODEL}` via Pi · Profile `{request.get('profile', 'general')}`", ""]
     if state == "queued":
         lines.append("Acknowledged. Your review request was accepted and queued.")
     elif state == "running":
@@ -53,7 +63,7 @@ def body(request, state, run_id, attempt, result=None, note=""):
     elif state == "cancelled":
         lines.append("This run was cancelled. A newer request may be running.")
     elif state == "stale":
-        lines.append("The PR changed before publication. Request a fresh review with `/review`.")
+        lines.append(f"The PR changed before publication. Request a fresh review with `{command}`.")
     elif state == "incomplete":
         lines.append(safe_text(note or "The pipeline failed before a complete review was available. See the run for details."))
     elif result:
@@ -85,9 +95,9 @@ def body(request, state, run_id, attempt, result=None, note=""):
 
 
 def update(github, request, state, run_id, attempt, result=None, note=""):
-    existing = current_comment(github, request["number"])
+    existing = current_comment(github, request["number"], request.get("mode", "repository"))
     if existing:
-        marker = STATUS.match(existing["body"])
+        marker = status_pattern(request.get("mode", "repository")).match(existing["body"])
         previous = (int(marker[1]), int(marker[2]))
         current = (run_id, attempt)
         if previous > current or (state != "queued" and previous != current):
@@ -126,7 +136,7 @@ def validate_result(github, request, result):
 
 def post_inline(github, request, result, run_id, attempt):
     number = request["number"]
-    marker = f"<!-- ollama-review-run {run_id}/{attempt} -->"
+    marker = f"<!-- {prefix(request)}-run {run_id}/{attempt} -->"
     if any(owned(r) and marker in r.get("body", "") for r in pages(github, f"pulls/{number}/reviews")):
         return
     previous = list(pages(github, f"pulls/{number}/comments"))
@@ -134,11 +144,10 @@ def post_inline(github, request, result, run_id, attempt):
     for finding in result["findings"]:
         if finding["start_line"] is None:
             continue
-        fingerprint = f"<!-- ollama-review-finding {finding['fingerprint']} -->"
-        if any(owned(c) and (fingerprint in c.get("body", "") or (
-                c.get("commit_id") == request["head"] and c.get("path") == finding["path"]
-                and c.get("line") == finding["end_line"]
-                and "<!-- ollama-review-finding " in c.get("body", ""))) for c in previous):
+        fingerprint = f"<!-- {prefix(request)}-finding {finding['fingerprint']} -->"
+        if any(owned(c) and fingerprint in c.get("body", "")
+                and c.get("path") == finding["path"] and c.get("line") == finding["end_line"]
+                and c.get("side", "RIGHT") == "RIGHT" for c in previous):
             continue
         comment = {"path": finding["path"], "side": "RIGHT", "line": finding["end_line"],
                    "body": fingerprint + "\n" + safe_text(finding["body"])}
@@ -153,10 +162,11 @@ def post_inline(github, request, result, run_id, attempt):
 
 
 def finish(github, request, result, job_result, run_id, attempt):
-    existing = current_comment(github, request["number"])
-    if not existing or not STATUS.match(existing["body"]):
+    existing = current_comment(github, request["number"], request.get("mode", "repository"))
+    pattern = status_pattern(request.get("mode", "repository"))
+    if not existing or not pattern.match(existing["body"]):
         return False
-    marker = STATUS.match(existing["body"])
+    marker = pattern.match(existing["body"])
     if (int(marker[1]), int(marker[2])) != (run_id, attempt):
         return False
     if job_result == "cancelled":

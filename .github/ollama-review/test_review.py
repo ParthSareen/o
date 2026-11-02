@@ -1,7 +1,10 @@
+import base64
 import copy
 import json
 from pathlib import Path
 import subprocess
+import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -66,6 +69,47 @@ class ReviewTest(unittest.TestCase):
         self.assertIsNone(review.requested_pr(event, "pull_request_target", "owner/repo"))
         self.assertEqual(review.requested_pr(event, "pull_request_target", "owner/repo", "review-account"), (7, "owner"))
 
+    def test_review_diff_routes_to_its_own_manual_reviewer(self):
+        self.assertEqual(review.requested_pr(comment("/review-diff"), "issue_comment", "owner/repo", mode="diff"), (7, "owner"))
+        self.assertIsNone(review.requested_pr(comment("/review-diff"), "issue_comment", "owner/repo"))
+        self.assertIsNone(review.requested_pr(comment(), "issue_comment", "owner/repo", mode="diff"))
+        self.assertIsNone(review.requested_pr(comment("/review-diff extra"), "issue_comment", "owner/repo", mode="diff"))
+        self.assertEqual(review.prepare(comment("/review-diff", login="outsider"), "issue_comment", FakeGitHub(False), mode="diff")["status"], "skipped")
+        event = {"action": "synchronize", "pull_request": PR, "sender": {"login": "owner"}}
+        self.assertIsNone(review.requested_pr(event, "pull_request_target", "owner/repo", automatic=True, mode="diff"))
+
+    def test_diff_analysis_passes_context_without_preparing_a_repository(self):
+        github = FakeGitHub()
+        request = review.prepare(comment("/review-diff"), "issue_comment", github, mode="diff")
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            def execute(command, **kwargs):
+                packet = json.loads((directory / "input.json").read_text())
+                self.assertEqual(packet["mode"], "diff")
+                self.assertEqual(packet["review"]["files"][0]["patch"], PATCH)
+                self.assertIn("3: line three", packet["review"]["files"][0]["context"])
+                self.assertIn("No tools, repository search", packet["policy"])
+                self.assertFalse((directory / "repository.json").exists())
+                (directory / "engine.json").write_text(json.dumps(response()))
+                return subprocess.CompletedProcess(command, 0)
+            with patch.object(review, "snapshot") as snapshot, patch.object(review.subprocess, "run", side_effect=execute):
+                output = review.analyze(request, directory, github, "fake-key")
+                snapshot.assert_not_called()
+            self.assertEqual(output["mode"], "diff")
+        for raw in ({**response(), "requests": 2}, {**response(), "tool_calls": 1}):
+            with self.assertRaisesRegex(review.ReviewError, "one model request"):
+                review.normalize(raw, request)
+
+    def test_diff_entry_point_writes_its_own_summary_without_credentials(self):
+        entry = Path(__file__).resolve().parent.parent / "ollama-review-diff" / "review.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "result.json").write_text(json.dumps({"status": "complete", "mode": "diff", "findings": []}))
+            summary = directory / "summary.md"
+            subprocess.run([sys.executable, str(entry), "summary", "--directory", str(directory)], check=True,
+                           env={"PATH": os.environ["PATH"], "GITHUB_STEP_SUMMARY": str(summary)})
+            self.assertIn("Ollama diff review: complete", summary.read_text())
+
     def test_automatic_forks_and_unrelated_events_do_not_run(self):
         event = {"action": "synchronize", "pull_request": copy.deepcopy(PR), "sender": {"login": "owner"}}
         self.assertIsNone(review.requested_pr(event, "pull_request_target", "owner/repo"))
@@ -104,11 +148,51 @@ class ReviewTest(unittest.TestCase):
 
     def test_findings_deduplicate_and_invalid_lines_fall_back_to_summary(self):
         issue = {"path": "app.py", "body": "A real bug", "start_line": 3, "end_line": 3}
-        unanchored = {"path": "elsewhere.py", "body": "Needs context", "start_line": 900, "end_line": 900}
+        unanchored = {"path": "app.py", "body": "Needs context", "start_line": 900, "end_line": 900}
         result = review.normalize(response([issue, copy.deepcopy(issue), unanchored]), REQUEST)
         self.assertEqual(len(result["findings"]), 2)
         self.assertEqual(result["findings"][0]["start_line"], 3)
         self.assertIsNone(result["findings"][1]["start_line"])
+
+    def test_findings_must_belong_to_the_reviewed_change(self):
+        with self.assertRaisesRegex(review.ReviewError, "outside the reviewed"):
+            review.normalize(response([{"path": "unrelated.py", "body": "Invented location"}]), REQUEST)
+
+    def test_source_context_never_follows_symlinks_or_reads_excluded_files(self):
+        github = review.GitHub("owner/repo", "fake-token")
+        secret = {"encoding": "base64", "size": 6, "content": base64.b64encode(b"secret").decode()}
+        tree = {"tree": [{"path": "helper.py", "type": "blob", "mode": "120000", "sha": "c" * 40},
+                         {"path": ".env", "type": "blob", "mode": "100644", "sha": "d" * 40}]}
+        with patch.object(github, "get", side_effect=lambda path: tree if path.startswith("git/trees/") else secret) as get:
+            self.assertIsNone(github.source("helper.py", HEAD))
+            self.assertIsNone(github.source(".env", HEAD))
+            self.assertEqual(get.call_count, 1)
+
+    def test_source_context_reads_only_regular_blobs_and_rejects_truncated_trees(self):
+        github = review.GitHub("owner/repo", "fake-token")
+        tree = {"tree": [{"path": "app.py", "type": "blob", "mode": "100644", "sha": "c" * 40}]}
+        content = {"encoding": "base64", "size": 4, "content": base64.b64encode(b"code").decode()}
+        with patch.object(github, "get", side_effect=[tree, content, content]) as get:
+            self.assertEqual(github.source("app.py", HEAD), "code")
+            self.assertEqual(github.source("app.py", HEAD), "code")
+            self.assertEqual(get.call_args.args[0], f"git/blobs/{'c' * 40}")
+        github = review.GitHub("owner/repo", "fake-token")
+        with patch.object(github, "get", return_value={**tree, "truncated": True}) as get:
+            self.assertIsNone(github.source("app.py", HEAD))
+            self.assertEqual(get.call_count, 1)
+
+    def test_explicit_profile_and_budget_are_preserved_in_review_input(self):
+        github = FakeGitHub()
+        request = review.prepare(comment(), "issue_comment", github, profile="security", budget_usd=0.5)
+        packet, _ = review.collect_input(request, github)
+        self.assertEqual(packet["budget_usd"], 0.5)
+        self.assertIn("Selected profile: focused security", packet["policy"])
+        self.assertNotIn("Selected profile: focused security", review.policy("general"))
+        with patch.object(review.Path, "read_text", return_value='{"profile":"security","budget_usd":0.5}'):
+            self.assertEqual(review.settings(), ("security", 0.5))
+        with patch.object(review.Path, "read_text", return_value='{"profile":"security","budget_usd":6}'):
+            with self.assertRaises(review.ReviewError):
+                review.settings()
 
     def test_invalid_truncated_or_unmetered_results_never_report_clean(self):
         cases = [response() for _ in range(6)]

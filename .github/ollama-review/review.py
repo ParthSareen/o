@@ -38,6 +38,32 @@ EXCLUDES = [
 POLICY = Path(__file__).with_name("prompt.md").read_text(encoding="utf-8")
 
 
+def variant_directory(mode):
+    if mode not in {"repository", "diff"}:
+        raise ReviewError("Unknown review mode")
+    return Path(__file__).parent if mode == "repository" else Path(__file__).parent.parent / "ollama-review-diff"
+
+
+def settings(mode="repository"):
+    config = json.loads((variant_directory(mode) / "settings.json").read_text())
+    profile, budget = config.get("profile"), config.get("budget_usd")
+    if profile not in {"general", "security"}:
+        raise ReviewError("Review profile must be general or security")
+    if type(budget) not in {int, float} or not 0 < budget <= BUDGET_USD:
+        raise ReviewError(f"Review budget must be greater than zero and at most ${BUDGET_USD:g}")
+    return profile, budget
+
+
+def policy(profile, mode="repository"):
+    directory = variant_directory(mode)
+    base = POLICY if mode == "repository" else (directory / "prompt.md").read_text(encoding="utf-8")
+    if profile == "general":
+        return base
+    if profile == "security":
+        return base + "\n" + (directory / "security.md").read_text(encoding="utf-8")
+    raise ReviewError("Unknown review profile")
+
+
 class ReviewError(Exception):
     def __init__(self, message, metrics=None):
         super().__init__(message)
@@ -58,6 +84,7 @@ class GitHub:
         self.repository = repository
         self.token = token
         self.opener = urllib.request.build_opener(NoRedirect)
+        self.source_entries = {}
 
     def request(self, method, path, body=None):
         request = urllib.request.Request(
@@ -88,10 +115,25 @@ class GitHub:
         return self.get(f"pulls/{number}")
 
     def source(self, path, sha):
-        data = self.get(f"contents/{urllib.parse.quote(path, safe='/')}?ref={sha}")
+        # Contents API follows repository symlinks. Resolve only regular Git blobs.
+        if excluded(path):
+            return None
+        if sha not in self.source_entries:
+            tree = self.get(f"git/trees/{sha}?recursive=1")
+            entries = tree.get("tree")
+            if tree.get("truncated") or not isinstance(entries, list):
+                self.source_entries[sha] = {}
+            else:
+                self.source_entries[sha] = {entry.get("path"): entry for entry in entries
+                    if entry.get("type") == "blob" and entry.get("mode") in {"100644", "100755"}}
+        entry = self.source_entries[sha].get(path)
+        if not entry or not re.fullmatch(r"[0-9a-f]{40}", entry.get("sha", "")):
+            return None
+        data = self.get(f"git/blobs/{entry['sha']}")
         if data.get("encoding") != "base64" or data.get("size", 0) > 256 * 1024:
             return None
-        return base64.b64decode(data["content"]).decode("utf-8")
+        value = base64.b64decode(data["content"]).decode("utf-8")
+        return None if "\0" in value else value
 
     def files(self, number, expected):
         if not 0 <= expected <= MAX_FILES:
@@ -102,12 +144,12 @@ class GitHub:
         return files
 
 
-def requested_pr(event, event_name, repository, reviewer_login="", automatic=False):
+def requested_pr(event, event_name, repository, reviewer_login="", automatic=False, mode="repository"):
     """Return (PR number, requesting login), or None for unrelated events."""
     if event_name == "issue_comment":
         comment = event.get("comment", {})
         if (event.get("action") != "created" or "pull_request" not in event.get("issue", {})
-                or comment.get("body", "").strip() != "/review"
+                or comment.get("body", "").strip() != ("/review-diff" if mode == "diff" else "/review")
                 or comment.get("user", {}).get("type") == "Bot"):
             return None
         return event["issue"]["number"], comment.get("user", {}).get("login", "")
@@ -117,6 +159,8 @@ def requested_pr(event, event_name, repository, reviewer_login="", automatic=Fal
             raise ReviewError("The pr input must be a positive integer")
         return int(value), event.get("sender", {}).get("login", "")
     if event_name == "pull_request_target":
+        if mode == "diff":
+            return None
         pr = event.get("pull_request", {})
         if event.get("action") not in {"opened", "reopened", "ready_for_review", "synchronize", "review_requested"}:
             return None
@@ -157,8 +201,9 @@ def right_lines(patch):
     return result
 
 
-def prepare(event, event_name, github, reviewer_login="", automatic=False):
-    request = requested_pr(event, event_name, github.repository, reviewer_login, automatic)
+def prepare(event, event_name, github, reviewer_login="", automatic=False, profile="general", budget_usd=BUDGET_USD, mode="repository"):
+    variant_directory(mode)
+    request = requested_pr(event, event_name, github.repository, reviewer_login, automatic, mode)
     if request is None:
         return {"status": "skipped", "reason": "This event did not request an Ollama review."}
     number, login = request
@@ -198,6 +243,7 @@ def prepare(event, event_name, github, reviewer_login="", automatic=False):
         raise ReviewError("Configured model request exceeds the pilot cost allowance")
     return {"status": "ready", "repository": github.repository, "number": number,
             **rev, "eligible": eligible, "omitted": omitted,
+            "profile": profile, "budget_usd": budget_usd, "mode": mode,
             "maximum_list_cost_usd": round(maximum_list_cost, 4)}
 
 
@@ -236,7 +282,9 @@ def collect_input(request, github):
         raise ReviewError("Changed-file coverage changed while collecting the review")
     if revision(github.pull(request["number"])) != {k: request[k] for k in ("base", "head")}:
         raise ReviewError("PR changed while collecting context; request a fresh review")
-    packet = {"policy": POLICY, "budget_usd": BUDGET_USD,
+    mode = request.get("mode", "repository")
+    packet = {"policy": policy(request.get("profile", "general"), mode), "mode": mode,
+              "budget_usd": request.get("budget_usd", BUDGET_USD),
               "review": {"base": request["base"], "head": request["head"], "files": selected}}
     if len(json.dumps(packet).encode("utf-8")) > 256 * 1024:
         raise ReviewError("Review input exceeds the 256 KiB pilot limit")
@@ -251,10 +299,12 @@ def normalize(raw, request):
         raise ReviewError("Pi omitted usage metadata")
     if type(raw.get("requests")) is not int or raw["requests"] < 1 or raw.get("finish_reason") != "stop":
         raise ReviewError("Pi did not finish normally")
+    if request.get("mode", "repository") == "diff" and (raw["requests"] != 1 or raw.get("tool_calls", 0) != 0 or raw.get("files_read", 0) != 0):
+        raise ReviewError("Diff review must use one model request without tools")
     if not all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("prompt_tokens", "completion_tokens")):
         raise ReviewError("Pi did not report token usage; review remains incomplete")
     cost = (usage["prompt_tokens"] * INPUT_USD_PER_M + usage["completion_tokens"] * OUTPUT_USD_PER_M) / 1e6
-    if cost > BUDGET_USD:
+    if cost > request.get("budget_usd", BUDGET_USD):
         raise ReviewError("Pi exceeded the review cost allowance")
     for field in ("tool_calls", "files_read", "repository_omitted"):
         if type(raw.get(field, 0)) is not int or raw.get(field, 0) < 0:
@@ -266,6 +316,8 @@ def normalize(raw, request):
         path, body = issue.get("path"), issue.get("body")
         if not isinstance(path, str) or not isinstance(body, str) or not body.strip() or len(body) > 8000:
             raise ReviewError("Pi returned a malformed finding")
+        if path not in request["eligible"]:
+            raise ReviewError("Pi returned a finding outside the reviewed changes")
         fingerprint = hashlib.sha256((path + "\n" + " ".join(body.split())).encode()).hexdigest()
         if fingerprint in fingerprints:
             continue
@@ -278,6 +330,8 @@ def normalize(raw, request):
                          "end_line": end if anchored else None, "body": body.strip(),
                          "fingerprint": fingerprint})
     return {"status": "complete", "model": MODEL,
+            "profile": request.get("profile", "general"), "budget_usd": request.get("budget_usd", BUDGET_USD),
+            "mode": request.get("mode", "repository"),
             "thinking": "low", "base": request["base"], "head": request["head"],
             "findings": findings, "omitted": request["omitted"], "requests": raw["requests"],
             **{field: raw.get(field, 0) for field in ("tool_calls", "files_read", "repository_omitted")},
@@ -342,9 +396,11 @@ def analyze(request, directory, github, key):
     if current.get("state") != "open" or revision(current) != {k: request[k] for k in ("base", "head")}:
         raise ReviewError("PR changed before analysis; request a fresh review")
     packet, limited = collect_input(request, github)
-    repository = snapshot(request, directory, github)
+    mode = request.get("mode", "repository")
+    repository = snapshot(request, directory, github) if mode == "repository" else None
     index = directory / "repository.json"
-    index.write_text(json.dumps(repository))
+    if repository is not None:
+        index.write_text(json.dumps(repository))
     source, output = directory / "input.json", directory / "engine.json"
     source.write_text(json.dumps(packet))
     source.chmod(0o600)
@@ -379,7 +435,7 @@ def analyze(request, directory, github, key):
     reviewed = normalize(raw, request)
     reviewed["context_limited"] = limited
     reviewed["requests"] = raw["requests"]
-    reviewed["repository_omitted"] = repository["omitted"]
+    reviewed["repository_omitted"] = repository["omitted"] if repository is not None else 0
     reviewed["seconds"] = round(time.monotonic() - started, 1)
     return reviewed
 
@@ -387,7 +443,8 @@ def analyze(request, directory, github, key):
 def summary(result):
     escaped = lambda value: html.escape(str(value))
     status = result.get("status", "incomplete")
-    lines = [f"## Ollama review: {status}", ""]
+    label = "Ollama diff review" if result.get("mode") == "diff" else "Ollama review"
+    lines = [f"## {label}: {status}", ""]
     if result.get("reason"):
         lines.append(escaped(result["reason"]))
     if result.get("head"):
@@ -414,7 +471,7 @@ def summary(result):
     return "\n".join(lines) + "\n"
 
 
-def main():
+def main(mode="repository"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "analyze", "summary", "export"])
     parser.add_argument("--directory", type=Path, required=True)
@@ -435,8 +492,10 @@ def main():
         github = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ.get("GITHUB_TOKEN", ""))
         if args.command == "prepare":
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+            profile, budget = settings(mode)
             result = prepare(event, os.environ["GITHUB_EVENT_NAME"], github,
-                             os.environ.get("REVIEWER_LOGIN", ""), os.environ.get("AUTO_REVIEW") == "true")
+                             os.environ.get("REVIEWER_LOGIN", ""), os.environ.get("AUTO_REVIEW") == "true", profile, budget, mode)
+            result["mode"] = mode
             (args.directory / "request.json").write_text(json.dumps(result))
             with open(os.environ["GITHUB_OUTPUT"], "a") as target:
                 target.write(f"ready={'true' if result['status'] == 'ready' else 'false'}\n")
@@ -445,6 +504,8 @@ def main():
                     target.write(f"request={json.dumps(result)}\n")
         else:
             request = json.loads(os.environ["REVIEW_REQUEST"])
+            if request.get("mode", "repository") != mode:
+                raise ReviewError("Review request belongs to a different mode")
             result = analyze(request, args.directory, github, os.environ.get("OLLAMA_API_KEY", ""))
         path.write_text(json.dumps(result, indent=2))
         if args.command == "analyze":
@@ -456,7 +517,7 @@ def main():
     except (ReviewError, ValueError, KeyError, OSError) as error:
         reason = str(error) if isinstance(error, ReviewError) else "Review failed while validating local or remote data."
         metrics = error.metrics if isinstance(error, ReviewError) else {}
-        path.write_text(json.dumps({"status": "incomplete", "reason": reason, **metrics}))
+        path.write_text(json.dumps({"status": "incomplete", "reason": reason, "mode": mode, **metrics}))
         print(reason, file=sys.stderr)
         sys.exit(1)
 
