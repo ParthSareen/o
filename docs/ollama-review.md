@@ -11,7 +11,7 @@ Two sibling reviewers are included:
 | PR command | Input and behavior |
 | --- | --- |
 | `/review` | Diff and nearby source, then read-only repository exploration as needed. |
-| `/review-diff` | Diff and nearby source only; one model call, no tools or repository snapshot. |
+| `/review-diff` | Diff and nearby source only; one model call with just the submission tool, no repository exploration. |
 
 The diff-only entry point and prompts live in `.github/ollama-review-diff/`.
 It shares authorization, source collection, budget checks, output validation
@@ -58,7 +58,9 @@ organization-wide budgets.
 Expected result: one bot-owned comment progresses from Queued to Running to
 Complete, or gives an explicit failure. Findings with valid locations also
 appear inline. The comment and Actions summary show requests, repository-tool
-calls, files read and estimated cost. Empty findings do not establish safety.
+calls, files read and estimated cost. Input usage is cumulative across requests;
+the largest individual prompt is reported separately. Empty findings do not
+establish safety.
 
 ## Triggers
 
@@ -68,6 +70,12 @@ Run workflow. It is manual-only and does not respond to reviewer-picker or
 automatic PR events. The actor
 must currently have repository write, maintain or admin permission. Untrusted
 commenters cannot trigger spending or cancel a maintainer's running review.
+
+Post the command on its own; surrounding spaces and trailing newlines are
+accepted. The workflow first filters candidate comments, then Python checks
+the exact trimmed command and current permission before starting a review.
+Both workflows receive comment events, so the nonmatching workflow appears
+as Skipped. That does not mean the requested review was skipped.
 
 Automatic reviews are off. Set `OLLAMA_REVIEW_AUTO=true` only after the trial
 is accepted; this enables eligible non-draft, same-repository PR events.
@@ -91,10 +99,14 @@ does not impersonate it or complete its human review.
    callers, implementations and tests. Tool results feed later model turns.
    Files and repository instructions are untrusted evidence, not instructions
    to execute. The Node process gets the model key and no GitHub token.
-   In diff-only mode, no repository is fetched and no tools are registered.
-   Pi returns JSON from one request using only the injected diff and bounded
-   surrounding source. Missing callers or definitions remain a limitation.
-5. The runner validates JSON, usage, changed-file paths and visible right-side
+   In diff-only mode, no repository is fetched and only `submit_review` is
+   registered. It uses the injected diff and bounded surrounding source;
+   missing callers or definitions remain a limitation.
+5. Both modes finish by calling `submit_review` with structured findings.
+   The tool checks argument shape and changed-file paths, records the result
+   locally and ends the agent without another model call. It does not publish
+   directly. Plain-text or JSON final messages do not complete a review.
+   The runner validates the submitted findings, usage and visible right-side
    inline ranges. It discards results if the base/head changed.
 6. A publisher with PR write permission and no model key checks revisions
    again and publishes COMMENT feedback. Identical findings at an active
@@ -123,6 +135,15 @@ artifacts. Review the provider's data terms with the customer separately.
 - The analysis job has a ten-minute limit; inference has an eight-minute
   timeout. New authorized requests for the same PR cancel older analysis.
   There are no transport retries or fallback models.
+  The acknowledgment job has five minutes for startup, status updates and
+  GitHub runner cleanup. If that job fails or times out, analysis is skipped;
+  check the failed dependency when diagnosing a skipped review job.
+- Repository mode compacts older tool payloads when the serialized message
+  history exceeds 256 KiB. It retains the original diff, assistant messages,
+  tool-call IDs and eight most recent tool results. Older payloads are replaced
+  with explicit notices so the model can re-read their source if needed. This
+  is deterministic history reduction, not an extra summarization model call;
+  it does not reset metered usage. Diff-only mode does not compact.
 - `deepseek-v4.1-flash:1017`, low thinking, 1,048,576 context tokens and a separate
   393,216-token output maximum are pinned. Every model turn must report usage.
   The next output limit is the minimum of the provider maximum, remaining
@@ -132,8 +153,15 @@ artifacts. Review the provider's data terms with the customer separately.
   and [model page](https://ollama.com/library/deepseek-v4.1-flash:1017-cloud).
   This is not a provider-enforced billing cap. Failed or unmetered requests may
   incur charges; reconcile actual billing and set account controls separately.
-- Truncation, missing metering, invalid JSON or invalid findings are incomplete
-  reviews. Safe errors retain known usage without publishing raw provider
+  When the provider reports cached input, an additional estimate uses $0.006/M
+  for that subset. The conservative budget guard still charges all input at
+  the uncached rate. Prompt totals include replayed history on every request;
+  a cumulative total above the model window does not imply context overflow.
+- Truncation, missing metering, invalid or absent submissions are incomplete
+  reviews. In repository mode, a rejected submission can be corrected through
+  the ordinary tool loop within the same budget and deadline. Diff-only mode
+  remains one call. There is no free-text JSON parser or format-repair turn.
+  Safe errors retain known usage without publishing raw provider
   bodies or reasoning. There is no finding-count quota. Very large PR comments
   are clipped with a link to the full Actions summary.
 

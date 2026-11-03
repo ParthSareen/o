@@ -52,7 +52,7 @@ class FakeGitHub:
 
 
 def response(issues=None):
-    return {"findings": issues or [], "requests": 1, "finish_reason": "stop",
+    return {"findings": issues or [], "requests": 1, "finish_reason": "submitted", "submission_calls": 1,
             "usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
 
 
@@ -68,6 +68,17 @@ class ReviewTest(unittest.TestCase):
                  "requested_reviewer": {"login": "review-account"}, "sender": {"login": "owner"}}
         self.assertIsNone(review.requested_pr(event, "pull_request_target", "owner/repo"))
         self.assertEqual(review.requested_pr(event, "pull_request_target", "owner/repo", "review-account"), (7, "owner"))
+
+    def test_command_whitespace_is_trimmed_but_extra_text_cannot_trigger_inference(self):
+        for mode, command in (("repository", "/review"), ("diff", "/review-diff")):
+            for body in (command, command + "\r\n", command + "\n", "  " + command + " \n"):
+                with self.subTest(mode=mode, body=body):
+                    self.assertEqual(review.requested_pr(comment(body), "issue_comment", "owner/repo", mode=mode), (7, "owner"))
+            for body in ("please " + command, command + " extra", command + "\nrun this"):
+                with self.subTest(mode=mode, body=body):
+                    github = FakeGitHub()
+                    self.assertEqual(review.prepare(comment(body), "issue_comment", github, mode=mode)["status"], "skipped")
+                    self.assertEqual(github.reads, 0)
 
     def test_review_diff_routes_to_its_own_manual_reviewer(self):
         self.assertEqual(review.requested_pr(comment("/review-diff"), "issue_comment", "owner/repo", mode="diff"), (7, "owner"))
@@ -88,7 +99,7 @@ class ReviewTest(unittest.TestCase):
                 self.assertEqual(packet["mode"], "diff")
                 self.assertEqual(packet["review"]["files"][0]["patch"], PATCH)
                 self.assertIn("3: line three", packet["review"]["files"][0]["context"])
-                self.assertIn("No tools, repository search", packet["policy"])
+                self.assertIn("no repository search/read tools", packet["policy"])
                 self.assertFalse((directory / "repository.json").exists())
                 (directory / "engine.json").write_text(json.dumps(response()))
                 return subprocess.CompletedProcess(command, 0)
@@ -206,6 +217,11 @@ class ReviewTest(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(review.ReviewError):
                 review.normalize(raw, REQUEST)
 
+    def test_completion_requires_an_accepted_submission_marker(self):
+        for raw in ({**response(), "finish_reason": "stop"}, {**response(), "submission_calls": 0}):
+            with self.assertRaisesRegex(review.ReviewError, "submit_review"):
+                review.normalize(raw, REQUEST)
+
     def test_all_distinct_findings_survive_normalization_and_summary(self):
         issues = [{"path": "app.py", "start_line": 3, "end_line": 3,
                    "body": f"Distinct bug {i}."} for i in range(12)]
@@ -221,6 +237,19 @@ class ReviewTest(unittest.TestCase):
         result = review.normalize(raw, REQUEST)
         self.assertEqual(result["requests"], 4)
         self.assertEqual(result["usage"], raw["usage"])
+
+    def test_costs_keep_cumulative_peak_and_cached_usage_separate(self):
+        raw = response()
+        raw.update(requests=39, peak_input_tokens=90000, compacted_tool_results=10, submission_calls=1)
+        raw["usage"] = {"prompt_tokens": 2153652, "completion_tokens": 56870, "cached_prompt_tokens": 1000000}
+        result = review.normalize(raw, REQUEST)
+        self.assertEqual(result["estimated_cost_usd"], 0.71434)
+        self.assertEqual(result["cache_adjusted_cost_usd"], 0.42034)
+        self.assertEqual(result["peak_input_tokens"], 90000)
+        self.assertIn("cumulative across requests", review.summary(result))
+        raw["usage"]["cached_prompt_tokens"] = 3000000
+        with self.assertRaisesRegex(review.ReviewError, "cached"):
+            review.normalize(raw, REQUEST)
 
     def test_snapshot_pins_head_and_filters_non_source_without_persisting_credentials(self):
         github = FakeGitHub()

@@ -14,6 +14,7 @@ def status(run=100, attempt=1, owner="github-actions[bot]"):
 
 def result():
     return {"status": "complete", "base": BASE, "head": HEAD, "requests": 2,
+            "finish_reason": "submitted", "submission_calls": 1,
             "tool_calls": 3, "files_read": 1,
             "findings": [{"path": "app.py", "start_line": 3, "end_line": 3, "body": "This branch loses data."}],
             "usage": {"prompt_tokens": 1000, "completion_tokens": 100}, "context_limited": []}
@@ -174,6 +175,17 @@ class FeedbackTest(unittest.TestCase):
         self.assertNotIn("<img", text)
         self.assertNotIn(" @team", text)
         self.assertIn("\\![x]", text)
+
+    def test_publication_distinguishes_cumulative_peak_and_cached_input(self):
+        api, output = FakeAPI(), result()
+        output.update(peak_input_tokens=600, compacted_tool_results=4, submission_calls=1)
+        output["usage"]["cached_prompt_tokens"] = 500
+        self.assertTrue(finish(api, REQUEST, output, "success", 100, 1))
+        text = api.writes[-1][2]["body"]
+        self.assertIn("1,000 cumulative input tokens", text)
+        self.assertIn("Largest single prompt: 600 tokens", text)
+        self.assertIn("500 cached input tokens", text)
+        self.assertIn("cache-adjusted estimate", text)
 
 
 if __name__ == "__main__":

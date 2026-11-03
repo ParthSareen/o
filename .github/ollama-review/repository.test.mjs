@@ -41,8 +41,8 @@ test('Pi reads unchanged source through repository tools without host filesystem
       } else {
         const evidence = payload.messages.find(message => message.role === 'tool');
         assert.match(evidence.content, /admin/);
-        delta = { content: '{"findings":[]}' };
-        reason = 'stop';
+        delta = { tool_calls: [{ index: 0, id: 'submit1', type: 'function', function: { name: 'submit_review', arguments: '{"findings":[]}' } }] };
+        reason = 'tool_calls';
       }
       const chunks = [{ choices: [{ index: 0, delta, finish_reason: reason }] },
         { choices: [], usage: { prompt_tokens: 100, completion_tokens: 10 } }];
@@ -51,6 +51,7 @@ test('Pi reads unchanged source through repository tools without host filesystem
     } });
     assert.equal(result.requests, 2);
     assert.equal(result.tool_calls, 1);
+    assert.equal(result.submission_calls, 1);
     assert.equal(result.files_read, 1);
     assert.deepEqual(result.findings, []);
   } finally {

@@ -6,7 +6,7 @@ import json
 import os
 import re
 
-from review import GitHub, MODEL, ReviewError, normalize, revision, right_lines
+from review import GitHub, MODEL, METRIC_FIELDS, ReviewError, normalize, revision, right_lines
 
 
 BOT = "github-actions[bot]"
@@ -82,9 +82,16 @@ def body(request, state, run_id, attempt, result=None, note=""):
         usage = result["usage"]
         lines += [f"{result.get('requests', 1)} model requests · {result.get('tool_calls', 0)} repository tool calls · "
                   f"{result.get('files_read', 0)} distinct files read with `read_file`",
-                  f"{usage['prompt_tokens']:,} input tokens · {usage['completion_tokens']:,} output tokens · "
-                  f"estimated list-price cost ${result['estimated_cost_usd']:.4f}",
+                  f"{usage['prompt_tokens']:,} cumulative input tokens · {usage['completion_tokens']:,} output tokens · "
+                  f"uncached cost estimate ${result['estimated_cost_usd']:.4f}",
                   "Automated findings need verification. This review does not approve the PR."]
+        if result.get("peak_input_tokens"):
+            lines += [f"Largest single prompt: {result['peak_input_tokens']:,} tokens · "
+                      f"{result.get('compacted_tool_results', 0)} tool payloads compacted · "
+                      f"{result.get('submission_calls', 0)} submission tool calls"]
+        if "cache_adjusted_cost_usd" in result:
+            lines += [f"{usage['cached_prompt_tokens']:,} cached input tokens · "
+                      f"cache-adjusted estimate ${result['cache_adjusted_cost_usd']:.4f}; actual billing may differ."]
     if note and state != "incomplete":
         lines += ["", safe_text(note)]
     rendered = "\n".join(lines)
@@ -126,8 +133,8 @@ def validate_result(github, request, result):
     verified["eligible"] = {file["filename"]: sorted(right_lines(file.get("patch", ""))) for file in files
                             if file["filename"] in request["eligible"]}
     validated = normalize({"findings": result.get("findings"), "usage": result.get("usage"),
-                           "requests": result.get("requests"), "finish_reason": "stop",
-                           **{field: result.get(field, 0) for field in ("tool_calls", "files_read", "repository_omitted")}}, verified)
+                           "requests": result.get("requests"), "finish_reason": result.get("finish_reason"),
+                           **{field: result.get(field, 0) for field in METRIC_FIELDS}}, verified)
     context = result.get("context_limited", [])
     if isinstance(context, list) and all(isinstance(value, str) for value in context):
         validated["context_limited"] = context[:100]

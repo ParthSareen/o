@@ -24,7 +24,12 @@ function mockResponse(text, finishReason = 'stop', includeUsage = true, outputTo
     { headers: { 'content-type': 'text/event-stream' } });
 }
 
-test('real Pi transport exposes only repository readers and preserves usage', async () => {
+function mockSubmission(findings = [], includeUsage = true, outputTokens = 30) {
+  return mockResponse({ content: 'Human-readable summary; this is not JSON.', tool_calls: [{ index: 0, id: 'submit1', type: 'function',
+    function: { name: 'submit_review', arguments: JSON.stringify({ findings }) } }] }, 'tool_calls', includeUsage, outputTokens);
+}
+
+test('real Pi transport exposes readers and submission, then stops without a follow-up', async () => {
   let calls = 0;
   const result = await runReview(input, { apiKey: 'fake-test-key', fetch: async (url, init) => {
     calls++;
@@ -36,17 +41,18 @@ test('real Pi transport exposes only repository readers and preserves usage', as
     assert.equal('max_completion_tokens' in body, false);
     assert.equal(body.stream_options.include_usage, true);
     assert.equal(body.messages[0].role, 'system');
-    assert.deepEqual(body.tools.map(tool => tool.function.name), ['list_files', 'read_file', 'search_code']);
+    assert.deepEqual(body.tools.map(tool => tool.function.name), ['list_files', 'read_file', 'search_code', 'submit_review']);
     assert.equal(init.redirect, 'error');
-    return mockResponse('{"findings":[]}');
+    return mockSubmission();
   } });
   assert.equal(calls, 1);
   assert.deepEqual(result.findings, []);
-  assert.deepEqual(result.usage, { prompt_tokens: 1200, completion_tokens: 30 });
+  assert.deepEqual(result.usage, { prompt_tokens: 1200, completion_tokens: 30, cached_prompt_tokens: 200 });
+  assert.equal(result.peak_input_tokens, 1200);
   assert.equal(JSON.stringify(result).includes('private thinking'), false);
 });
 
-test('diff reviewer sends only the supplied packet in one tool-free request', async () => {
+test('diff reviewer sends only the supplied packet with the submission tool', async () => {
   let calls = 0;
   const packet = { ...input, mode: 'diff', review: { ...input.review,
     files: [{ path: 'a.go', patch: '+changed', context: '1: surrounding source' }],
@@ -56,10 +62,10 @@ test('diff reviewer sends only the supplied packet in one tool-free request', as
     fetch: async (_url, init) => {
       calls++;
       const body = JSON.parse(init.body);
-      assert.equal(body.tools?.length ?? 0, 0);
+      assert.deepEqual(body.tools.map(tool => tool.function.name), ['submit_review']);
       const content = body.messages.find(message => message.role === 'user').content;
       assert.deepEqual(JSON.parse(content.map(block => block.text).join('')), packet.review);
-      return mockResponse('{"findings":[]}');
+      return mockSubmission();
     },
   });
   assert.equal(calls, 1);
@@ -68,7 +74,7 @@ test('diff reviewer sends only the supplied packet in one tool-free request', as
   assert.equal(result.files_read, 0);
 });
 
-test('diff reviewer refuses a tool request without making a second model call', async () => {
+test('diff reviewer refuses repository tools without making a second model call', async () => {
   let calls = 0;
   await assert.rejects(runReview({ ...input, mode: 'diff' }, { apiKey: 'fake-test-key', fetch: async () => {
     calls++;
@@ -93,7 +99,7 @@ test('all findings survive the Pi response without a count limit', async () => {
     path: 'a.go', start_line: i + 1, end_line: i + 1, body: `Distinct bug ${i + 1}`,
   }));
   const result = await runReview(input, { apiKey: 'fake-test-key',
-    fetch: async () => mockResponse(JSON.stringify({ findings })),
+    fetch: async () => mockSubmission(findings),
   });
   assert.deepEqual(result.findings, findings);
 });
@@ -125,11 +131,11 @@ test('Pi follows a repository tool result and meters every model turn', async ()
     const reply = body.messages.find(message => message.role === 'tool');
     assert.ok(reply, 'the second request must contain the actual tool result');
     assert.deepEqual(JSON.parse(reply.content).paths, []);
-    return mockResponse('{"findings":[]}');
+    return mockSubmission();
   } });
   assert.equal(calls, 2);
   assert.equal(result.requests, 2);
-  assert.deepEqual(result.usage, { prompt_tokens: 2400, completion_tokens: 60 });
+  assert.deepEqual(result.usage, { prompt_tokens: 2400, completion_tokens: 60, cached_prompt_tokens: 400 });
 });
 
 test('remaining dollars shrink output allowance instead of blocking affordable tool turns', async () => {
@@ -146,7 +152,7 @@ test('remaining dollars shrink output allowance instead of blocking affordable t
     assert.ok(payload.max_tokens < firstLimit && payload.max_tokens < 200000);
     const inputBound = Buffer.byteLength(JSON.stringify({ ...payload, max_tokens: undefined })) + 2048 + payload.messages.length * 128;
     assert.ok(0.36036 + inputBound * 0.30 / 1e6 + payload.max_tokens * 1.20 / 1e6 <= 0.6);
-    return mockResponse('{"findings":[]}');
+    return mockSubmission();
   } });
   assert.equal(calls, 2);
   assert.equal(result.requests, 2);
@@ -158,7 +164,7 @@ test('tool continuation remains affordable past the old $0.43 cutoff', async () 
     assert.equal(JSON.parse(init.body).max_tokens, 393216);
     if (++calls === 1) return mockResponse({ tool_calls: [{ index: 0, id: 'list1', type: 'function',
       function: { name: 'list_files', arguments: '{}' } }] }, 'tool_calls', true, 360000);
-    return mockResponse('{"findings":[]}');
+    return mockSubmission();
   } });
   assert.equal(result.requests, 2);
   assert.equal(result.usage.completion_tokens, 360030);
@@ -171,7 +177,7 @@ test('an unaffordable input is refused before sending and reports metered usage'
   }), error => {
     assert.match(error.message, /allowance/);
     assert.equal(error.metrics.requests, 0);
-    assert.deepEqual(error.metrics.usage, { prompt_tokens: 0, completion_tokens: 0 });
+    assert.deepEqual(error.metrics.usage, { prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 });
     return true;
   });
   assert.equal(calls, 0);
@@ -197,5 +203,72 @@ test('timeout aborts a stalled provider without retrying', async () => {
       });
     },
   }), /timed out|cancelled/);
+  assert.equal(calls, 1);
+});
+
+test('plain text or JSON final messages do not complete a review or trigger a format retry', async () => {
+  for (const mode of ['repository', 'diff']) {
+    for (const text of ['Normal review prose.', '{"findings":[]}']) {
+      let calls = 0;
+      await assert.rejects(runReview({ ...input, mode }, { apiKey: 'fake-test-key', fetch: async () => {
+        calls++;
+        return mockResponse(text);
+      } }), /without a valid submit_review/);
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test('repository mode can correct rejected submission arguments before completing', async () => {
+  let calls = 0;
+  const result = await runReview(input, { apiKey: 'fake-test-key', fetch: async (_url, init) => {
+    if (++calls === 1) return mockSubmission([{ path: 'outside.go', start_line: 1, end_line: 1, body: 'Bug' }]);
+    const payload = JSON.parse(init.body);
+    const rejected = payload.messages.find(message => message.role === 'tool');
+    assert.match(rejected.content, /supplied changed file/);
+    return mockSubmission([{ path: 'a.go', start_line: null, end_line: null, body: 'A supported bug.' }]);
+  } });
+  assert.equal(result.requests, 2);
+  assert.equal(result.submission_calls, 2);
+  assert.equal(result.findings[0].path, 'a.go');
+  assert.equal(result.finish_reason, 'submitted');
+});
+
+test('diff mode rejects malformed submissions without another request', async () => {
+  const cases = [
+    [{ path: 'outside.go', start_line: 1, end_line: 1, body: 'Bug' }],
+    [{ path: 'a.go', start_line: 1, end_line: null, body: 'Bug' }],
+    [{ path: 'a.go', start_line: 2, end_line: 1, body: 'Bug' }],
+    [{ path: 'a.go', start_line: null, end_line: null, body: ' ' }],
+    [{ path: 'a.go', body: 'Missing required locations' }],
+  ];
+  for (const findings of cases) {
+    let calls = 0;
+    await assert.rejects(runReview({ ...input, mode: 'diff' }, { apiKey: 'fake-test-key', fetch: async () => {
+      calls++;
+      return mockSubmission(findings);
+    } }), /without a valid submit_review/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('truncated or unmetered submissions never complete a review', async () => {
+  for (const [finish, usage] of [['length', true], ['tool_calls', false]]) {
+    await assert.rejects(runReview({ ...input, mode: 'diff' }, { apiKey: 'fake-test-key', fetch: async () =>
+      mockResponse({ tool_calls: [{ index: 0, id: 'submit1', type: 'function', function: {
+        name: 'submit_review', arguments: '{"findings":[]}',
+      } }] }, finish, usage),
+    }));
+  }
+});
+
+test('a submission cannot be mixed with other tool calls in the same turn', async () => {
+  let calls = 0;
+  await assert.rejects(runReview({ ...input, mode: 'diff' }, { apiKey: 'fake-test-key', fetch: async () => {
+    calls++;
+    return mockResponse({ tool_calls: [0, 1].map(index => ({ index, id: `submit${index}`, type: 'function',
+      function: { name: 'submit_review', arguments: '{"findings":[]}' },
+    })) }, 'tool_calls');
+  } }), /without a valid submit_review/);
   assert.equal(calls, 1);
 });

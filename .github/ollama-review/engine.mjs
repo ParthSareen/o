@@ -3,6 +3,7 @@ import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { repositoryTools } from './repository.mjs';
+import { compactToolHistory } from './context.mjs';
 
 const model = {
   id: 'deepseek-v4.1-flash:1017',
@@ -14,7 +15,7 @@ const model = {
   input: ['text'],
   contextWindow: 1048576,
   maxTokens: 393216,
-  cost: { input: 0.30, output: 1.20, cacheRead: 0.30, cacheWrite: 0.30 },
+  cost: { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0.30 },
   thinkingLevelMap: { low: 'low' },
   compat: {
     supportsDeveloperRole: false,
@@ -55,22 +56,75 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
   let requests = 0;
   let payloads = 0;
   let failure;
-  const usage = { prompt_tokens: 0, completion_tokens: 0 };
+  let submission;
+  let submissionCalls = 0;
+  let peakInputTokens = 0;
+  const compactedTools = new Set();
+  const usage = { prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
+  const deadline = performance.now() + timeoutMs;
   const cost = () => (usage.prompt_tokens * model.cost.input + usage.completion_tokens * model.cost.output) / 1e6;
   const filesRead = new Set();
   let toolCalls = 0;
-  const tools = (mode === 'diff' ? [] : repositoryTools(repository, input.review.head, path => filesRead.add(path))).map(tool => ({
+  const readers = (mode === 'diff' ? [] : repositoryTools(repository, input.review.head, path => filesRead.add(path))).map(tool => ({
     ...tool, execute: (...args) => { toolCalls++; return tool.execute(...args); },
   }));
+  const changedPaths = new Set(input.review.files.map(file => file.path));
+  const line = { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] };
+  const submitReview = {
+    name: 'submit_review', label: 'Submit review',
+    description: 'Finish this review with all supported findings. Call once, alone, after investigation. Use an empty findings array when no bug is supported. This records the result locally; it does not publish to GitHub.',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['findings'],
+      properties: { findings: { type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        required: ['path', 'start_line', 'end_line', 'body'],
+        properties: { path: { type: 'string', minLength: 1 }, start_line: line, end_line: line,
+          body: { type: 'string', minLength: 1, maxLength: 8000 } },
+      } } },
+    },
+    execute: async (_id, args, signal) => {
+      if (signal?.aborted) throw new Error('Review cancelled.');
+      if (submission) throw new Error('Review already submitted.');
+      const findings = args.findings.map(finding => {
+        if (!changedPaths.has(finding.path)) throw new Error('Finding must refer to a supplied changed file.');
+        if (!finding.body.trim()) throw new Error('Finding body must not be blank.');
+        const { start_line: start, end_line: end } = finding;
+        if ((start === null) !== (end === null) || (start !== null && (start > end || end - start >= 20))) {
+          throw new Error('Use a valid span of at most 20 lines, or null for both line numbers.');
+        }
+        return { ...finding, body: finding.body.trim() };
+      });
+      submission = { findings };
+      return { content: [{ type: 'text', text: `Recorded ${findings.length} findings. Review complete.` }],
+        details: {}, terminate: true };
+    },
+  };
+  const tools = [...readers, submitReview];
   const names = new Set(tools.map(tool => tool.name));
   const incomplete = message => new ReviewError(
-    `${message} (${requests} requests attempted; metered cost $${cost().toFixed(4)}.)`,
-    { requests, tool_calls: toolCalls, files_read: filesRead.size, usage: { ...usage } },
+    `${message} (${requests} requests attempted; uncached estimate for reported usage $${cost().toFixed(4)}.)`,
+    { requests, tool_calls: toolCalls, files_read: filesRead.size, usage: { ...usage },
+      peak_input_tokens: peakInputTokens, compacted_tool_results: compactedTools.size, submission_calls: submissionCalls },
   );
   const agent = new Agent({
     initialState: { model, tools, thinkingLevel: 'low', systemPrompt: input.policy },
     toolExecution: 'sequential',
+    beforeToolCall: ({ toolCall, assistantMessage }) => {
+      if (toolCall.name === 'submit_review' && assistantMessage.content.filter(block => block.type === 'toolCall').length !== 1) {
+        return { block: true, reason: 'Call submit_review by itself after all investigation tools have completed.' };
+      }
+    },
+    transformContext: async messages => {
+      if (mode === 'diff') return messages;
+      const result = compactToolHistory(messages);
+      for (const id of result.compacted) compactedTools.add(id);
+      return result.messages;
+    },
     streamFn: (selectedModel, context, options) => {
+      if (performance.now() >= deadline) {
+        failure = 'The review exceeded its runtime allowance.';
+        throw new ReviewError(failure);
+      }
       if (mode === 'diff' && requests !== 0) {
         failure = 'Diff review cannot make additional model requests.';
         throw new ReviewError(failure);
@@ -80,7 +134,7 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
         ...options,
         apiKey,
         maxRetries: 0,
-        timeoutMs,
+        timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())),
         cacheRetention: 'none',
         fetch: (url, init) => {
           if (dispatched) throw new ReviewError('Unexpected transport retry.');
@@ -122,15 +176,20 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
       }
       usage.prompt_tokens += counts[0] + counts[1] + counts[2];
       usage.completion_tokens += counts[3];
+      usage.cached_prompt_tokens += counts[1];
+      peakInputTokens = Math.max(peakInputTokens, counts[0] + counts[1] + counts[2]);
       if (cost() > budget) {
         failure = 'The review exceeded its cost allowance; review is incomplete.';
         return { action: 'end' };
       }
       const calls = message.content.filter(block => block.type === 'toolCall');
+      submissionCalls += calls.filter(call => call.name === 'submit_review').length;
       if (calls.some(call => !names.has(call.name))) {
         failure = 'The model requested an unavailable tool; review is incomplete.';
         return { action: 'end' };
       }
+      if (submission) return { action: 'end' };
+      if (mode === 'diff') return { action: 'end' };
       if (message.stopReason === 'toolUse' && message.rawStopReason === 'tool_calls' && calls.length) return;
       return { action: 'end' };
     },
@@ -140,38 +199,22 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
   process.once('SIGTERM', cancel);
   try {
     await agent.prompt(JSON.stringify(input.review));
+    if (failure) throw incomplete(failure);
+    const answer = agent.state.messages.findLast(message => message.role === 'assistant');
+    if (!answer || answer.stopReason === 'error' || answer.stopReason === 'aborted') throw incomplete(providerFailure(answer?.errorMessage));
+    if (!submission || answer.stopReason !== 'toolUse' || answer.rawStopReason !== 'tool_calls') {
+      throw incomplete('The model ended without a valid submit_review call; review is incomplete.');
+    }
+    return { findings: submission.findings, requests, tool_calls: toolCalls, files_read: filesRead.size,
+      finish_reason: 'submitted', usage, peak_input_tokens: peakInputTokens,
+      compacted_tool_results: compactedTools.size, submission_calls: submissionCalls };
   } catch (error) {
+    if (error instanceof ReviewError) throw error;
     throw incomplete(failure ?? 'Pi could not complete the review; check runtime and input.');
   } finally {
     clearTimeout(timer);
     process.removeListener('SIGTERM', cancel);
   }
-  if (failure) throw incomplete(failure);
-  const answer = agent.state.messages.findLast(message => message.role === 'assistant');
-  if (!answer || answer.stopReason === 'error' || answer.stopReason === 'aborted') {
-    throw incomplete(providerFailure(answer?.errorMessage));
-  }
-  if (answer.stopReason !== 'stop' || answer.rawStopReason !== 'stop') {
-    throw incomplete(`Ollama returned an incomplete response (${answer.stopReason}, ${answer.usage?.output ?? 0} output tokens); no review is claimed.`);
-  }
-  const text = answer.content.filter(block => block.type === 'text').map(block => block.text).join('');
-  let parsed;
-  try {
-    parsed = JSON.parse(text.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/, '$1'));
-  } catch {
-    throw incomplete(`Pi received invalid review JSON (${text.length} answer characters); no review is claimed.`);
-  }
-  if (!parsed || !Array.isArray(parsed.findings)) {
-    throw incomplete('Pi received invalid findings; no review is claimed.');
-  }
-  return {
-    findings: parsed.findings,
-    requests,
-    tool_calls: toolCalls,
-    files_read: filesRead.size,
-    finish_reason: answer.rawStopReason,
-    usage,
-  };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

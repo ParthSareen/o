@@ -12,7 +12,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / ".github" / "ollama-review"
 RUNTIME = (
-    ".gitignore", "engine.mjs", "engine.test.mjs", "repository.mjs", "repository.test.mjs",
+    ".gitignore", "engine.mjs", "engine.test.mjs", "context.mjs", "context.test.mjs", "repository.mjs", "repository.test.mjs",
     "review.py", "test_review.py", "feedback.py", "test_feedback.py", "package.json",
     "package-lock.json", "prompt.md", "security.md", "settings.json", "evaluate.py", "test_evaluate.py",
 )

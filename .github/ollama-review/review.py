@@ -29,6 +29,8 @@ BUDGET_USD = 5.0
 # Admission estimate only. Provider billing is reconciled during the pilot.
 INPUT_USD_PER_M = 0.30
 OUTPUT_USD_PER_M = 1.20
+CACHED_INPUT_USD_PER_M = 0.006
+METRIC_FIELDS = ("tool_calls", "files_read", "repository_omitted", "peak_input_tokens", "compacted_tool_results", "submission_calls")
 EXCLUDES = [
     "vendor/**", "**/vendor/**", "node_modules/**", "**/node_modules/**",
     "*.lock", "go.sum", "*.pb.go", "*.generated.*", "*.min.js", "*.map",
@@ -297,16 +299,21 @@ def normalize(raw, request):
         raise ReviewError("Pi returned invalid findings; no clean result is claimed")
     if not isinstance(usage, dict):
         raise ReviewError("Pi omitted usage metadata")
-    if type(raw.get("requests")) is not int or raw["requests"] < 1 or raw.get("finish_reason") != "stop":
-        raise ReviewError("Pi did not finish normally")
-    if request.get("mode", "repository") == "diff" and (raw["requests"] != 1 or raw.get("tool_calls", 0) != 0 or raw.get("files_read", 0) != 0):
-        raise ReviewError("Diff review must use one model request without tools")
+    if (type(raw.get("requests")) is not int or raw["requests"] < 1 or raw.get("finish_reason") != "submitted"
+            or type(raw.get("submission_calls")) is not int or raw["submission_calls"] < 1):
+        raise ReviewError("Pi did not complete through submit_review")
+    if request.get("mode", "repository") == "diff" and (raw["requests"] != 1 or raw.get("tool_calls", 0) != 0
+            or raw.get("files_read", 0) != 0 or raw["submission_calls"] != 1):
+        raise ReviewError("Diff review must use one model request with only submit_review")
     if not all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("prompt_tokens", "completion_tokens")):
         raise ReviewError("Pi did not report token usage; review remains incomplete")
+    cached = usage.get("cached_prompt_tokens")
+    if cached is not None and (type(cached) is not int or not 0 <= cached <= usage["prompt_tokens"]):
+        raise ReviewError("Pi reported invalid cached token usage")
     cost = (usage["prompt_tokens"] * INPUT_USD_PER_M + usage["completion_tokens"] * OUTPUT_USD_PER_M) / 1e6
     if cost > request.get("budget_usd", BUDGET_USD):
         raise ReviewError("Pi exceeded the review cost allowance")
-    for field in ("tool_calls", "files_read", "repository_omitted"):
+    for field in METRIC_FIELDS:
         if type(raw.get(field, 0)) is not int or raw.get(field, 0) < 0:
             raise ReviewError("Pi returned invalid repository usage")
     findings, fingerprints = [], set()
@@ -330,12 +337,14 @@ def normalize(raw, request):
                          "end_line": end if anchored else None, "body": body.strip(),
                          "fingerprint": fingerprint})
     return {"status": "complete", "model": MODEL,
+            "finish_reason": "submitted",
             "profile": request.get("profile", "general"), "budget_usd": request.get("budget_usd", BUDGET_USD),
             "mode": request.get("mode", "repository"),
             "thinking": "low", "base": request["base"], "head": request["head"],
             "findings": findings, "omitted": request["omitted"], "requests": raw["requests"],
-            **{field: raw.get(field, 0) for field in ("tool_calls", "files_read", "repository_omitted")},
-            "usage": {k: usage[k] for k in ("prompt_tokens", "completion_tokens")},
+            **{field: raw.get(field, 0) for field in METRIC_FIELDS},
+            "usage": {k: usage[k] for k in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens") if k in usage},
+            **({"cache_adjusted_cost_usd": round(cost - cached * (INPUT_USD_PER_M - CACHED_INPUT_USD_PER_M) / 1e6, 6)} if cached is not None else {}),
             "estimated_cost_usd": round(cost, 6)}
 
 
@@ -425,7 +434,12 @@ def analyze(request, directory, github, key):
             metrics["usage"] = {k: usage[k] for k in ("prompt_tokens", "completion_tokens")}
             metrics["estimated_cost_usd"] = round((usage["prompt_tokens"] * INPUT_USD_PER_M
                 + usage["completion_tokens"] * OUTPUT_USD_PER_M) / 1e6, 6)
-        for field in ("requests", "tool_calls", "files_read"):
+            cached = usage.get("cached_prompt_tokens")
+            if type(cached) is int and 0 <= cached <= usage["prompt_tokens"]:
+                metrics["usage"]["cached_prompt_tokens"] = cached
+                metrics["cache_adjusted_cost_usd"] = round(metrics["estimated_cost_usd"]
+                    - cached * (INPUT_USD_PER_M - CACHED_INPUT_USD_PER_M) / 1e6, 6)
+        for field in ("requests", *METRIC_FIELDS):
             if type(raw.get(field)) is int and raw[field] >= 0:
                 metrics[field] = raw[field]
         raise ReviewError(error if isinstance(error, str) and len(error) <= 500 else "Pi review failed", metrics)
@@ -467,7 +481,12 @@ def summary(result):
                      f"distinct files read with read_file: {result.get('files_read', 0)}. "
                      f"Repository files unavailable to tools: {result.get('repository_omitted', 0)}.")
         lines.append(f"<pre>{escaped(json.dumps(result['usage']))}</pre>")
-        lines.append(f"Estimated list-price cost: ${result['estimated_cost_usd']:.4f}; actual billing may differ.")
+        if result.get("peak_input_tokens"):
+            lines.append(f"Largest single prompt: {result['peak_input_tokens']:,} tokens. Input usage above is cumulative across requests.")
+        lines.append(f"Compacted tool payloads: {result.get('compacted_tool_results', 0)}. Submission tool calls: {result.get('submission_calls', 0)}.")
+        lines.append(f"Uncached cost estimate: ${result['estimated_cost_usd']:.4f}; actual billing may differ.")
+        if "cache_adjusted_cost_usd" in result:
+            lines.append(f"Cache-adjusted estimate from reported usage: ${result['cache_adjusted_cost_usd']:.4f}.")
     return "\n".join(lines) + "\n"
 
 
@@ -510,9 +529,9 @@ def main(mode="repository"):
         path.write_text(json.dumps(result, indent=2))
         if args.command == "analyze":
             usage = result["usage"]
-            print(f"Pi review complete: {result['requests']} request; "
-                  f"{usage['prompt_tokens']} input tokens; {usage['completion_tokens']} output tokens; "
-                  f"estimated list-price cost ${result['estimated_cost_usd']:.4f}; "
+            print(f"Pi review complete: {result['requests']} requests; "
+                  f"{usage['prompt_tokens']} cumulative input tokens; {usage['completion_tokens']} output tokens; "
+                  f"uncached cost estimate ${result['estimated_cost_usd']:.4f}; "
                   f"{result['seconds']} seconds")
     except (ReviewError, ValueError, KeyError, OSError) as error:
         reason = str(error) if isinstance(error, ReviewError) else "Review failed while validating local or remote data."
