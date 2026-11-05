@@ -349,12 +349,13 @@ func (m chatModel) completeCloudAuth() (tea.Model, tea.Cmd) {
 	m.modelPickerModels = nil
 	m.openModelOnInit = false
 	m.status = "ready"
-	if err := m.applyModelSelection(pending, true); err != nil {
+	cmd, err := m.applyModelSelectionWith(pending, modelSelectionConfig{persist: true, notify: true, preload: true})
+	if err != nil {
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: fmt.Sprintf("Could not switch model: %v", err), err: err.Error()}))
 		m.status = "error"
 		return m, nil
 	}
-	return m, m.startModelPreload(pending)
+	return m, cmd
 }
 
 func (m chatModel) renderCloudAuthPrompt(width int) string {

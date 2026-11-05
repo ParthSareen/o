@@ -4,7 +4,6 @@ package fileutil
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,19 +16,6 @@ import (
 // Keep a bounded number of backups per file so config backups do not grow
 // without limit. We keep the 5 most recent backups and do not pin the oldest.
 const maxBackupsPerFile = 5
-
-// ReadJSON reads a JSON object file into a generic map.
-func ReadJSON(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var result map[string]any
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
 
 func copyFile(src, dst string) error {
 	info, err := os.Stat(src)

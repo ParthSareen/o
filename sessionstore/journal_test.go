@@ -164,6 +164,30 @@ func TestJournalCrashRecoveryThenRetryBlocksUnsafeTools(t *testing.T) {
 	}
 }
 
+// TestJournalBlockedToolsReadFailureFailsClosed verifies an unreadable
+// blocked-tool query rejects admission instead of admitting an unguarded run.
+func TestJournalBlockedToolsReadFailureFailsClosed(t *testing.T) {
+	store := openJournalStore(t)
+	sess, err := store.CreateSession("test-model", "", "system", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE tool_calls`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.AdmitRun(admission(sess.ID, "r-fail", "do work")); err == nil {
+		t.Fatal("admission must fail when blocked tools cannot be read")
+	}
+	runs, err := store.ListRuns(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs = %d, want 0", len(runs))
+	}
+}
+
 // TestJournalRunLockRejectsSecondWriter verifies the single-writer contract:
 // a second process-like handle cannot admit a run while one is in flight.
 func TestJournalRunLockRejectsSecondWriter(t *testing.T) {

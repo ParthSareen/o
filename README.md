@@ -37,13 +37,13 @@ One module: `github.com/ParthSareen/o`.
 | `agent/tools/` | bash, file, web, and skill tools |
 | `cmd/o/` | The entry point of the agent TUI (`package main`) |
 | `cmd/tui/chat/` | The interactive chat UI (bubbletea) |
-| `cmd/launch/` | A trimmed shim: the spinner and the types that the TUI uses. The integration runners (claude, codex, …) are not included. |
+| `cmd/launch/` | A trimmed shim: the types that the TUI uses. The integration runners (claude, codex, …) are not included. |
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
 | `.agents/skills/` | Project skills. `update-o` runs the build/test/install/ship loop for the CLI. |
-| `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
+| `api/`, `auth/`, `envconfig/`, `format/`, `version/`, `logutil/` | Public support packages |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
-| `types/model/` | Model capabilities and names |
+| `types/model/` | Model capabilities |
 
 ## Run
 

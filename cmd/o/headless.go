@@ -167,87 +167,13 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 		workingDir,
 	)
 
-	return runHeadlessSession(ctx, client, opts, store, catalog, registry, systemPrompt, prompt, workingDir, stdout, stderr)
+	return runHeadlessTurn(ctx, client, opts, store, catalog, registry, systemPrompt, nil, prompt, workingDir, stdout, stderr, false)
 }
 
-// runHeadlessSession drives one agent session against any ChatClient; split
-// out so tests can run without a real server.
+// runHeadlessSession drives one fresh agent session against any ChatClient;
+// split out so tests can run without a real server.
 func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt, prompt, workingDir string, stdout, stderr io.Writer) int {
-	// Kill background tasks on exit so their processes cannot outlive the run.
-	defer func() { _ = registry.Close() }()
-	state, approvalPrompter := headlessApproval(client, opts)
-
-	renderer := newHeadlessRenderer(stdout, stderr, true)
-	var journal coreagent.RunJournal
-	session := &coreagent.Session{
-		Client:           client,
-		EventSinks:       []coreagent.EventSink{coreagent.EventSinkFunc(renderer.Emit)},
-		Tools:            registry,
-		Skills:           catalog,
-		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: approvalPrompter,
-		ApprovalState:    state,
-		WorkingDir:       workingDir,
-		SupportsImages:   opts.MultiModal,
-		Compactor: &coreagent.SimpleCompactor{
-			Client:  client,
-			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
-		},
-		Background: registry.BackgroundSource(),
-	}
-
-	// Create a session in the store for headless mode so the conversation
-	// is persisted and can be resumed later.
-	var chatID string
-	if store != nil {
-		sess, err := store.CreateSession(opts.Model, workingDir, systemPrompt, opts.Name)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
-		} else {
-			chatID = sess.ID
-			journal = store
-			// Surface the saved session so a parent agent can follow up with
-			// o --resume-id; background logs rely on this line.
-			fmt.Fprintf(stderr, "session: %s\n", chatID)
-			if err := store.AddPrompt(chatID, prompt); err != nil {
-				fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
-			}
-		}
-	}
-	session.Journal = journal
-
-	result, err := session.Run(ctx, coreagent.RunOptions{
-		ChatID:       chatID,
-		Model:        opts.Model,
-		SystemPrompt: systemPrompt,
-		NewMessages:  []api.Message{{Role: "user", Content: prompt}},
-		Format:       opts.Format,
-		Options:      opts.Options,
-		Think:        opts.Think,
-		KeepAlive:    opts.KeepAlive,
-		RequestID:    opts.RequestID,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintln(stdout)
-
-	// Persist the conversation to the session store unless the journal
-	// already committed it. The store row is empty for a fresh session, so
-	// this persists the full result; compaction, if any, already rewrote
-	// result.Messages.
-	if store != nil && chatID != "" && result != nil && !result.Committed && !result.Replayed {
-		if err := store.SyncMessages(chatID, result.Messages); err != nil {
-			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
-		}
-	}
-
-	if renderer.sawError || renderer.runStatus == coreagent.RunStatusDenied || renderer.runStatus == coreagent.RunStatusCanceled {
-		return 1
-	}
-	return 0
+	return runHeadlessTurn(ctx, client, opts, store, catalog, registry, systemPrompt, nil, prompt, workingDir, stdout, stderr, false)
 }
 
 // runHeadlessResume runs one headless turn against a previously saved session,
@@ -265,8 +191,6 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 	fmt.Fprintf(stderr, "session: %s\n", sess.ID)
 
 	registry := agentToolsRegistry(ctx, client, opts.Model, catalog)
-	// Kill background tasks on exit so their processes cannot outlive the run.
-	defer func() { _ = registry.Close() }()
 	if len(registry.Names()) > 0 {
 		fmt.Fprintf(stderr, "tools: %s\n", strings.Join(registry.Names(), ", "))
 	}
@@ -276,14 +200,24 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		workingDir,
 	)
 
-	state, approvalPrompter := headlessApproval(client, opts)
-
-	return runHeadlessResumeSession(ctx, client, opts, store, catalog, registry, systemPrompt, sess, prompt, workingDir, stdout, stderr, state, approvalPrompter)
+	return runHeadlessTurn(ctx, client, opts, store, catalog, registry, systemPrompt, sess, prompt, workingDir, stdout, stderr, true)
 }
 
 // runHeadlessResumeSession drives one resumed headless turn against any
 // ChatClient; split out so tests can run without a real server.
-func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt string, sess *sessionstore.Session, prompt, workingDir string, stdout, stderr io.Writer, state *coreagent.ApprovalState, approvalPrompter coreagent.ApprovalPrompter) int {
+func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt string, sess *sessionstore.Session, prompt, workingDir string, stdout, stderr io.Writer, _ *coreagent.ApprovalState, _ coreagent.ApprovalPrompter) int {
+	return runHeadlessTurn(ctx, client, opts, store, catalog, registry, systemPrompt, sess, prompt, workingDir, stdout, stderr, false)
+}
+
+// runHeadlessTurn owns the common fresh/resume session path: approval setup,
+// registry lifetime, session persistence, and the output/exit contract.
+func runHeadlessTurn(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt string, sess *sessionstore.Session, prompt, workingDir string, stdout, stderr io.Writer, sessionAnnounced bool) int {
+	if registry != nil {
+		// Kill background tasks on exit so their processes cannot outlive the run.
+		defer func() { _ = registry.Close() }()
+	}
+	state, approvalPrompter := headlessApproval(client, opts)
+
 	renderer := newHeadlessRenderer(stdout, stderr, true)
 	session := &coreagent.Session{
 		Client:           client,
@@ -299,23 +233,51 @@ func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, 
 			Client:  client,
 			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
 		},
-		Background: registry.BackgroundSource(),
 	}
-	if store != nil {
-		session.Journal = store
+	if registry != nil {
+		session.Background = registry.BackgroundSource()
 	}
 
-	if store != nil {
-		if err := store.AddPrompt(sess.ID, prompt); err != nil {
-			fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
+	chatID := ""
+	var history []api.Message
+	fresh := sess == nil
+	if fresh {
+		// Create a session in the store for headless mode so the conversation
+		// is persisted and can be resumed later.
+		if store != nil {
+			created, err := store.CreateSession(opts.Model, workingDir, systemPrompt, opts.Name)
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: could not create session: %v\n", err)
+			} else {
+				chatID = created.ID
+				session.Journal = store
+				// Surface the saved session so a parent agent can follow up with
+				// o --resume-id; background logs rely on this line.
+				fmt.Fprintf(stderr, "session: %s\n", chatID)
+				if err := store.AddPrompt(chatID, prompt); err != nil {
+					fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
+				}
+			}
+		}
+	} else {
+		chatID = sess.ID
+		history = sess.Messages
+		if store != nil {
+			session.Journal = store
+			if !sessionAnnounced {
+				fmt.Fprintf(stderr, "session: %s\n", chatID)
+			}
+			if err := store.AddPrompt(chatID, prompt); err != nil {
+				fmt.Fprintf(stderr, "warning: could not save prompt history: %v\n", err)
+			}
 		}
 	}
 
 	result, err := session.Run(ctx, coreagent.RunOptions{
-		ChatID:       sess.ID,
+		ChatID:       chatID,
 		Model:        opts.Model,
 		SystemPrompt: systemPrompt,
-		Messages:     sess.Messages,
+		Messages:     history,
 		NewMessages:  []api.Message{{Role: "user", Content: prompt}},
 		Format:       opts.Format,
 		Options:      opts.Options,
@@ -330,11 +292,10 @@ func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, 
 
 	fmt.Fprintln(stdout)
 
-	if store != nil && result != nil && !result.Committed && !result.Replayed {
-		// SyncMessages replaces the store when the run compacted the history,
-		// so a later resume loads the compacted form. A journaled run
-		// committed its projection already.
-		if err := store.SyncMessages(sess.ID, result.Messages); err != nil {
+	// A journaled run already committed its projection; otherwise sync the
+	// store. SyncMessages replaces the store when the run compacted history.
+	if store != nil && chatID != "" && result != nil && !result.Committed && !result.Replayed {
+		if err := store.SyncMessages(chatID, result.Messages); err != nil {
 			fmt.Fprintf(stderr, "warning: could not save session: %v\n", err)
 		}
 	}
