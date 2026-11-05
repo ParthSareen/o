@@ -4,36 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { repositoryTools } from './repository.mjs';
 import { compactToolHistory } from './context.mjs';
-
-const model = {
-  id: 'deepseek-v4.1-flash:1017',
-  name: 'DeepSeek V4.1 Flash 1017',
-  provider: 'ollama-cloud',
-  api: 'openai-completions',
-  baseUrl: 'https://ollama.com/v1',
-  reasoning: true,
-  input: ['text'],
-  contextWindow: 1048576,
-  maxTokens: 393216,
-  cost: { input: 0.30, output: 1.20, cacheRead: 0.006, cacheWrite: 0.30 },
-  thinkingLevelMap: { low: 'low' },
-  compat: {
-    supportsDeveloperRole: false,
-    supportsReasoningEffort: true,
-    supportsUsageInStreaming: true,
-    supportsFinishReason: true,
-    supportsStore: false,
-    maxTokensField: 'max_tokens',
-    thinkingFormat: 'openai',
-  },
-};
-
-class ReviewError extends Error {
-  constructor(message, metrics = {}) {
-    super(message);
-    this.metrics = metrics;
-  }
-}
+import { reviewModel, limits, cost as estimateCost, ReviewError } from './config.mjs';
 
 function providerFailure(message = '') {
   const outputLimit = message.match(/maximum output tokens \((\d+)\)/)?.[1];
@@ -44,17 +15,17 @@ function providerFailure(message = '') {
   return 'Ollama request failed before a complete response; no review is claimed.';
 }
 
-export async function runReview(input, { apiKey, repository, fetch = globalThis.fetch, timeoutMs = 480000 } = {}) {
+export async function runReview(input, { apiKey, repository, fetch = globalThis.fetch, timeoutMs = limits.inferenceMs } = {}) {
   if (!apiKey) throw new ReviewError('OLLAMA_API_KEY is required.');
   if (!input || typeof input.policy !== 'string' || !Array.isArray(input.review?.files)) {
     throw new ReviewError('Invalid review input.');
   }
+  const model = reviewModel(input.model, input.thinking);
   const budget = input.budget_usd;
   const mode = input.mode ?? 'repository';
   if (!['repository', 'diff'].includes(mode)) throw new ReviewError('Invalid review mode.');
-  if (!Number.isFinite(budget) || budget <= 0 || budget > 5) throw new ReviewError('Invalid review cost allowance.');
+  if (!Number.isFinite(budget) || budget <= 0 || budget > limits.budget) throw new ReviewError('Invalid review cost allowance.');
   let requests = 0;
-  let payloads = 0;
   let failure;
   let submission;
   let submissionCalls = 0;
@@ -62,7 +33,7 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
   const compactedTools = new Set();
   const usage = { prompt_tokens: 0, completion_tokens: 0, cached_prompt_tokens: 0 };
   const deadline = performance.now() + timeoutMs;
-  const cost = () => (usage.prompt_tokens * model.cost.input + usage.completion_tokens * model.cost.output) / 1e6;
+  const cost = () => estimateCost(usage, model);
   const filesRead = new Set();
   let toolCalls = 0;
   const readers = (mode === 'diff' ? [] : repositoryTools(repository, input.review.head, path => filesRead.add(path))).map(tool => ({
@@ -107,7 +78,7 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
       peak_input_tokens: peakInputTokens, compacted_tool_results: compactedTools.size, submission_calls: submissionCalls },
   );
   const agent = new Agent({
-    initialState: { model, tools, thinkingLevel: 'low', systemPrompt: input.policy },
+    initialState: { model, tools, thinkingLevel: input.thinking, systemPrompt: input.policy },
     toolExecution: 'sequential',
     beforeToolCall: ({ toolCall, assistantMessage }) => {
       if (toolCall.name === 'submit_review' && assistantMessage.content.filter(block => block.type === 'toolCall').length !== 1) {
@@ -143,18 +114,12 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
           return fetch(url, { ...init, redirect: 'error' });
         },
         onPayload: (payload) => {
-          if (++payloads !== requests + 1 || payload.model !== model.id
-              || payload.reasoning_effort !== 'low'
-              || (payload.tools ?? []).length !== tools.length
-              || (payload.tools ?? []).some(tool => !names.has(tool.function?.name))) {
-            throw new Error('Unexpected model request configuration.');
-          }
           delete payload.max_tokens;
           delete payload.max_completion_tokens;
           // UTF-8 bytes bound text tokenization; leave margin for chat/tool framing.
           const inputReserve = Buffer.byteLength(JSON.stringify(payload)) + 2048 + payload.messages.length * 128;
           const remaining = budget - cost() - inputReserve * model.cost.input / 1e6;
-          const outputAllowance = Math.floor(remaining * 1e6 / model.cost.output);
+          const outputAllowance = model.cost.output === 0 && remaining >= 0 ? Infinity : Math.floor(remaining * 1e6 / model.cost.output);
           const maxTokens = Math.min(model.maxTokens, model.contextWindow - inputReserve, outputAllowance);
           if (maxTokens < 1) {
             failure = 'The remaining cost or context allowance cannot cover another model request; review is incomplete.';
@@ -205,7 +170,7 @@ export async function runReview(input, { apiKey, repository, fetch = globalThis.
     if (!submission || answer.stopReason !== 'toolUse' || answer.rawStopReason !== 'tool_calls') {
       throw incomplete('The model ended without a valid submit_review call; review is incomplete.');
     }
-    return { findings: submission.findings, requests, tool_calls: toolCalls, files_read: filesRead.size,
+    return { findings: submission.findings, model: model.id, thinking: input.thinking, requests, tool_calls: toolCalls, files_read: filesRead.size,
       finish_reason: 'submitted', usage, peak_input_tokens: peakInputTokens,
       compacted_tool_results: compactedTools.size, submission_calls: submissionCalls };
   } catch (error) {

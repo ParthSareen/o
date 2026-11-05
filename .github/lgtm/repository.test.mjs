@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { repositoryTools } from './repository.mjs';
 import { runReview } from './engine.mjs';
+import { settings } from './config.mjs';
+import { testConfig } from './test-model.mjs';
+const selected = settings(testConfig, 'repository');
 
 test('Pi reads unchanged source through repository tools without host filesystem access', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-review-'));
@@ -27,7 +30,7 @@ test('Pi reads unchanged source through repository tools without host filesystem
     assert.throws(() => repositoryTools(repository, 'c'.repeat(40)), /snapshot/);
 
     let requests = 0;
-    const result = await runReview({ policy: 'Inspect authorization before reviewing.', budget_usd: 5, review: {
+    const result = await runReview({ ...selected, policy: 'Inspect authorization before reviewing.', budget_usd: 5, review: {
       head, files: [{ path: 'src/caller.js', patch: '+authorize(user)' }],
     } }, { apiKey: 'fake-test-key', repository, fetch: async (_url, init) => {
       requests++;

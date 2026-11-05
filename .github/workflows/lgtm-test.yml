@@ -1,0 +1,26 @@
+name: LGTM tests
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/lgtm/**', '.github/workflows/lgtm*.yml']
+  pull_request:
+    paths: ['.github/lgtm/**', '.github/workflows/lgtm*.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/lgtm
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.2'
+      - run: npm ci --prefix .github/lgtm --ignore-scripts --no-audit --no-fund
+      - run: npm test --prefix .github/lgtm
