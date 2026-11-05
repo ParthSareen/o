@@ -205,8 +205,9 @@ AGENTS
 	return b.String()
 }
 
-// run mirrors ollama's launchInteractiveModel flow from cmd/cmd.go, with a
-// headless addition.
+// run mirrors ollama's launchInteractiveModel flow, with headless and pipe
+// additions. Fresh and resumed starts share one preparation and dispatch path;
+// only loading the saved session and replaying its history differ.
 func run(model, prompt string, opts *cliOptions) error {
 	// Open the session store for persistence (non-fatal if it fails).
 	store, storeErr := sessionstore.Open()
@@ -214,7 +215,7 @@ func run(model, prompt string, opts *cliOptions) error {
 		fmt.Fprintf(os.Stderr, "warning: could not open session store: %v\n", storeErr)
 	}
 
-	// --resume / --resume-id: load a saved session and continue it.
+	var sess *sessionstore.Session
 	if opts.resume || opts.resumeID != "" {
 		if store == nil {
 			return fmt.Errorf("session store unavailable, cannot resume")
@@ -230,101 +231,16 @@ func run(model, prompt string, opts *cliOptions) error {
 			}
 			opts.resumeID = meta.ID
 		}
-		sess, err := store.LoadSession(opts.resumeID)
+		loaded, err := store.LoadSession(opts.resumeID)
 		if err != nil {
 			return fmt.Errorf("resume session: %w", err)
 		}
+		sess = loaded
 		// Use the session's model unless overridden by a positional arg.
 		if model == "" {
 			model = sess.Model
 		}
-		if model == "" {
-			model = config.LastModel()
-		}
-		if model == "" {
-			return fmt.Errorf("model is required (run `o <model>` once; it is remembered after that)")
-		}
-
-		ensureDedicatedServer(realServerBootstrap(func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		}))
-
-		client, err := api.ClientFromEnvironment()
-		if err != nil {
-			return err
-		}
-
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-
-		cmd := &cobra.Command{}
-		cmd.SetContext(ctx)
-
-		agentOpts := agentTUIOptions{
-			Model:               model,
-			System:              opts.system,
-			AllowAllTools:       opts.allowAllTools,
-			AutoReview:          opts.autoReview,
-			ReviewModel:         opts.reviewModel,
-			ToolsDisabled:       opts.toolsDisabled,
-			MultiModal:          opts.multiModal,
-			ContextWindowTokens: opts.contextWindowTokens,
-			Options:             map[string]any{},
-			RequestID:           opts.requestID,
-			PipeApprovals:       opts.pipeApprovals,
-		}
-
-		info, err := prepareAgentModel(cmd, client, &agentOpts, false)
-		if err != nil {
-			return err
-		}
-		if model != sess.Model {
-			// Persist an explicit override so the sidebar and future plain
-			// resumes reflect the chosen model. Only reached after the model
-			// validated, so a mistyped name cannot clobber the stored one.
-			if err := store.SetModel(sess.ID, model); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not save model choice: %v\n", err)
-			}
-		}
-		agentOpts.System = firstNonEmpty(opts.system, info.System)
-
-		if err := saveLastAgentModel(agentOpts.Model); err != nil {
-			return err
-		}
-
-		if opts.pipe {
-			if code := runPipeResume(ctx, client, &agentOpts, store, sess, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
-				os.Exit(code)
-			}
-			return nil
-		}
-
-		if opts.headless {
-			if prompt == "" {
-				raw, err := io.ReadAll(os.Stdin)
-				if err != nil {
-					return fmt.Errorf("read prompt from stdin: %w", err)
-				}
-				prompt = strings.TrimSpace(string(raw))
-			}
-			if prompt == "" {
-				return fmt.Errorf("headless mode needs a prompt (positional args or stdin)")
-			}
-			if code := runHeadlessResume(ctx, client, &agentOpts, store, sess, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
-				os.Exit(code)
-			}
-			return nil
-		}
-
-		// Interactive resume: pass the session's messages and ChatID to the TUI.
-		agentOpts.ChatID = sess.ID
-		agentOpts.Messages = sess.Messages
-		if err := GenerateAgentTUI(cmd, client, agentOpts, store); err != nil {
-			return fmt.Errorf("error running agent: %w", err)
-		}
-		return nil
 	}
-
 	if model == "" {
 		model = config.LastModel()
 	}
@@ -349,9 +265,13 @@ func run(model, prompt string, opts *cliOptions) error {
 	cmd := &cobra.Command{}
 	cmd.SetContext(ctx)
 
+	name := opts.name
+	if sess != nil {
+		name = ""
+	}
 	agentOpts := agentTUIOptions{
 		Model:               model,
-		Name:                opts.name,
+		Name:                name,
 		System:              opts.system,
 		AllowAllTools:       opts.allowAllTools,
 		AutoReview:          opts.autoReview,
@@ -368,6 +288,14 @@ func run(model, prompt string, opts *cliOptions) error {
 	if err != nil {
 		return err
 	}
+	if sess != nil && model != sess.Model {
+		// Persist an explicit override so the sidebar and future plain
+		// resumes reflect the chosen model. Only reached after the model
+		// validated, so a mistyped name cannot clobber the stored one.
+		if err := store.SetModel(sess.ID, model); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save model choice: %v\n", err)
+		}
+	}
 	agentOpts.System = firstNonEmpty(opts.system, info.System)
 
 	if err := saveLastAgentModel(agentOpts.Model); err != nil {
@@ -375,7 +303,13 @@ func run(model, prompt string, opts *cliOptions) error {
 	}
 
 	if opts.pipe {
-		if code := runPipe(ctx, client, &agentOpts, store, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt); code != 0 {
+		code := 0
+		if sess != nil {
+			code = runPipeResume(ctx, client, &agentOpts, store, sess, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt)
+		} else {
+			code = runPipe(ctx, client, &agentOpts, store, agentWorkingDir(), os.Stdin, os.Stdout, os.Stderr, prompt)
+		}
+		if code != 0 {
 			os.Exit(code)
 		}
 		return nil
@@ -392,12 +326,23 @@ func run(model, prompt string, opts *cliOptions) error {
 		if prompt == "" {
 			return fmt.Errorf("headless mode needs a prompt (positional args or stdin)")
 		}
-		if code := runHeadless(ctx, client, &agentOpts, store, prompt, agentWorkingDir(), os.Stdout, os.Stderr); code != 0 {
+		code := 0
+		if sess != nil {
+			code = runHeadlessResume(ctx, client, &agentOpts, store, sess, prompt, agentWorkingDir(), os.Stdout, os.Stderr)
+		} else {
+			code = runHeadless(ctx, client, &agentOpts, store, prompt, agentWorkingDir(), os.Stdout, os.Stderr)
+		}
+		if code != 0 {
 			os.Exit(code)
 		}
 		return nil
 	}
 
+	if sess != nil {
+		// Interactive resume: pass the session's messages and ChatID to the TUI.
+		agentOpts.ChatID = sess.ID
+		agentOpts.Messages = sess.Messages
+	}
 	if err := GenerateAgentTUI(cmd, client, agentOpts, store); err != nil {
 		return fmt.Errorf("error running agent: %w", err)
 	}

@@ -66,6 +66,7 @@ type recordingJournal struct {
 	replayQueued *RunAdmissionResult
 	blockOnAdmit []BlockedTool
 	commitErr    error
+	rawErr       error
 
 	intents      []ToolIntent
 	outcomes     []ToolOutcome
@@ -137,6 +138,9 @@ func (j *recordingJournal) RecordApprovalDecision(decision ApprovalDecision) err
 func (j *recordingJournal) RecordRawSegment(runID string, segment []api.Message) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.rawErr != nil {
+		return j.rawErr
+	}
 	j.rawSegs = append(j.rawSegs, segment)
 	return nil
 }
@@ -399,6 +403,32 @@ func TestJournalCommitFailureNotPublished(t *testing.T) {
 	}
 	if eventOrder(sink.events, EventRunCommitted) >= 0 {
 		t.Fatal("run_committed must not publish when the terminal commit fails")
+	}
+}
+
+// TestJournalRawSegmentFailureNotCommitted verifies a failed raw-segment
+// write surfaces from the run and prevents the terminal commit.
+func TestJournalRawSegmentFailureNotCommitted(t *testing.T) {
+	journal := &recordingJournal{rawErr: errors.New("raw write failed")}
+	session, sink := journalSessionForTest(t, journal, &Registry{})
+	session.Client = &fakeClient{responses: [][]api.ChatResponse{journalText("done")}}
+
+	result, err := session.Run(context.Background(), RunOptions{
+		ChatID:      "chat-1",
+		Model:       "m",
+		NewMessages: []api.Message{{Role: "user", Content: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "raw write failed") {
+		t.Fatalf("want raw segment failure surfaced, got %v", err)
+	}
+	if result != nil && result.Committed {
+		t.Fatal("run must not commit after a failed raw segment")
+	}
+	if journal.commitCalls != 0 {
+		t.Fatalf("commit calls = %d, want 0", journal.commitCalls)
+	}
+	if eventOrder(sink.events, EventRunFinished) >= 0 || eventOrder(sink.events, EventRunCommitted) >= 0 {
+		t.Fatal("terminal events must not publish after a failed raw segment")
 	}
 }
 

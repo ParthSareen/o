@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	coreagent "github.com/ParthSareen/o/agent"
 	apptui "github.com/ParthSareen/o/cmd/tui"
 )
 
@@ -187,13 +188,14 @@ func (m chatModel) selectModel() (tea.Model, tea.Cmd) {
 	m.modelPicker = nil
 	m.modelPickerModels = nil
 	m.openModelOnInit = false
-	if err := m.applyModelSelection(selected.Name, true); err != nil {
+	cmd, err := m.applyModelSelectionWith(selected.Name, modelSelectionConfig{persist: true, notify: true, preload: true})
+	if err != nil {
 		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: fmt.Sprintf("Could not switch model: %v", err), err: err.Error()}))
 		m.status = "error"
 		return m, nil
 	}
 	m.status = "ready"
-	return m, tea.Batch(m.startModelPreload(selected.Name), cloudModelPreflightCmd(m.ctx, m.opts, selected.Name, selected.RequiredPlan))
+	return m, tea.Batch(cmd, cloudModelPreflightCmd(m.ctx, m.opts, selected.Name, selected.RequiredPlan))
 }
 
 func (m chatModel) modelOptionForSelection(name string) (ModelOption, bool) {
@@ -205,15 +207,47 @@ func (m chatModel) modelOptionForSelection(name string) (ModelOption, bool) {
 	return ModelOption{}, false
 }
 
-func (m *chatModel) applyModelSelection(modelName string, persist bool) error {
+// modelSelectionConfig controls how a model switch applies to a chat or a
+// side pane.
+type modelSelectionConfig struct {
+	// registry rebuilds tools for the model; nil uses opts.ToolRegistryForModel.
+	registry func(context.Context, string) *coreagent.Registry
+	// closePreviousTools closes the registry being replaced.
+	closePreviousTools bool
+	// disableToolsWhenMissing marks tools disabled when no registry is built.
+	disableToolsWhenMissing bool
+	// persist saves the selected model through OnModelSelected.
+	persist bool
+	// notify calls OnModelSelected; persist implies the save itself.
+	notify bool
+	// preload starts background model preload.
+	preload bool
+}
+
+func (m *chatModel) applyModelSelectionWith(modelName string, cfg modelSelectionConfig) (tea.Cmd, error) {
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
-		return nil
+		return nil, nil
 	}
 	m.opts.Model = modelName
 	m.opts.ContextWindowTokens = 0
-	if m.opts.ToolRegistryForModel != nil {
-		m.opts.Tools = m.opts.ToolRegistryForModel(m.ctx, modelName)
+
+	registryForModel := cfg.registry
+	if registryForModel == nil {
+		registryForModel = m.opts.ToolRegistryForModel
+	}
+	var previous *coreagent.Registry
+	if cfg.closePreviousTools {
+		previous = m.opts.Tools
+	}
+	if registryForModel != nil {
+		m.opts.Tools = registryForModel(m.ctx, modelName)
+	}
+	if cfg.closePreviousTools && previous != nil && previous != m.opts.Tools {
+		_ = previous.Close()
+	}
+	if cfg.disableToolsWhenMissing && (m.opts.ToolsDisabled || m.opts.Tools == nil) {
+		m.opts.ToolsDisabled = true
 	}
 	if m.opts.SystemPromptForModel != nil {
 		m.opts.SystemPrompt = m.opts.SystemPromptForModel(m.ctx, modelName, m.opts.Tools, m.opts.ToolsDisabled)
@@ -228,14 +262,25 @@ func (m *chatModel) applyModelSelection(modelName string, persist bool) error {
 	m.refreshContextWindowTokens(modelName)
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
 	m.contextEstimate = true
-	if persist && m.opts.OnModelSelected != nil {
+	var cmd tea.Cmd
+	if cfg.preload {
+		cmd = m.startModelPreload(modelName)
+	}
+	if cfg.persist && cfg.notify && m.opts.OnModelSelected != nil {
 		ctx := m.ctx
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		return m.opts.OnModelSelected(ctx, modelName)
+		if err := m.opts.OnModelSelected(ctx, modelName); err != nil {
+			return cmd, err
+		}
 	}
-	return nil
+	return cmd, nil
+}
+
+func (m *chatModel) applyModelSelection(modelName string, persist bool) error {
+	_, err := m.applyModelSelectionWith(modelName, modelSelectionConfig{persist: persist, notify: persist})
+	return err
 }
 
 func (m *chatModel) startModelPreload(modelName string) tea.Cmd {

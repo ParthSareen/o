@@ -80,13 +80,13 @@ List current worktrees: `git worktree list`.
 | `agent/tools/` | bash, file, web, and skill tools |
 | `cmd/o/` | Entry point of the agent TUI (`package main`) |
 | `cmd/tui/chat/` | Interactive chat UI (bubbletea) |
-| `cmd/launch/` | Trimmed shim: spinner + types the TUI uses. Integration runners are not included. |
+| `cmd/launch/` | Trimmed shim: types the TUI uses. Integration runners are not included. |
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
 | `.agents/skills/` | Project skills (`update-o`). |
-| `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
+| `api/`, `auth/`, `envconfig/`, `format/`, `version/`, `logutil/` | Public support packages |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
-| `types/model/` | Model capabilities and names |
+| `types/model/` | Model capabilities |
 
 ## Sessions
 

@@ -85,7 +85,7 @@ func (m *chatModel) applyAgentEvent(event coreagent.Event) {
 			if event.Tokens > 0 {
 				m.thinkingTokens = max(m.thinkingTokens, event.Tokens)
 			} else {
-				m.thinkingTokens += approximateTokenCount(event.Thinking)
+				m.thinkingTokens += coreagent.ApproximateTokens(len([]rune(event.Thinking)))
 			}
 			idx := m.ensureLiveAssistantMessage()
 			m.liveMessages[idx].Thinking += event.Thinking

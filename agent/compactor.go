@@ -441,6 +441,13 @@ func estimateMessagesTokens(messages []api.Message) int {
 	return total
 }
 
+// EstimatePromptTokens approximates the token count of a chat prompt composed
+// of a system prompt, messages, tools, and format. It is the single estimate
+// used for both compaction decisions and displayed context usage.
+func EstimatePromptTokens(systemPrompt string, messages []api.Message, tools api.Tools, format string) int {
+	return estimatePromptTokens(systemPrompt, messages, tools, format)
+}
+
 // estimatePromptTokens approximates the token count of a chat prompt
 // composed of a system prompt, messages, tools, and format. It mirrors the
 // request payload the model would receive (marshal + chars/4 heuristic). It is

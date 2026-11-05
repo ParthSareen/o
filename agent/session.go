@@ -501,7 +501,9 @@ func (r *run) runCompactionStep(ctx context.Context) error {
 	}
 	r.messages = compactedMessages
 	if compacted {
-		r.flushRawSegment()
+		// The projection was rewritten; the remaining messages are a new raw
+		// segment that starts at the compacted boundary.
+		r.rawBaseline = len(r.messages)
 	}
 	if err != nil {
 		r.session.emit(newErrorEvent(meta, err.Error()))
@@ -553,7 +555,6 @@ func (r *run) finishRun(ctx context.Context) (*RunResult, error) {
 	result := &RunResult{Messages: r.messages, Latest: r.latest, WorkingDir: r.session.WorkingDir}
 	var commitSeq int64
 	if r.admitted != nil && r.session.Journal != nil {
-		r.flushRawSegment()
 		if err := r.flushRawSegment(); err != nil {
 			return result, err
 		}
@@ -1525,10 +1526,10 @@ func (r *run) flushRawSegment() error {
 		return nil
 	}
 	segment := append([]api.Message(nil), r.messages[r.rawBaseline:]...)
-	r.rawBaseline = len(r.messages)
 	if err := r.session.Journal.RecordRawSegment(r.runID, segment); err != nil {
 		return fmt.Errorf("record raw segment: %w", err)
 	}
+	r.rawBaseline = len(r.messages)
 	return nil
 }
 

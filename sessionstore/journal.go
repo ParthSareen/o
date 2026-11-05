@@ -253,7 +253,10 @@ func (s *Store) AdmitRun(ad agent.RunAdmission) (agent.RunAdmissionResult, error
 		attempt = prev.attempt + 1
 	}
 	runID := uuid.NewString()
-	res.BlockedTools = s.blockedToolsTx(tx, ad.ChatID)
+	res.BlockedTools, err = s.blockedToolsTx(tx, ad.ChatID)
+	if err != nil {
+		return agent.RunAdmissionResult{}, err
+	}
 
 	now := time.Now().Unix()
 	thunk := capString(ad.Prompt, journalPromptMax)
@@ -864,15 +867,19 @@ func processAlive(pid int) (alive, known bool) {
 	}
 }
 
-// recoverSessionTx classifies state a crashed process left behind:
+// sqlExecer is the shared Exec surface of *sql.Tx and *sql.DB.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// classifyCrashResidue classifies state a crashed process left behind:
 // un-terminated runs become interrupted, their pending tool intents become
-// unknown-outcome, and their pending approvals expire (never grant). The
-// run lock itself is managed by acquire/commit; classification only.
-func (s *Store) recoverSessionTx(tx *sql.Tx, sessionID string) []string {
+// unknown-outcome, and their pending approvals expire (never grant).
+func classifyCrashResidue(ex sqlExecer, sessionID string) []string {
 	now := time.Now().Unix()
 	var lines []string
 
-	res, err := tx.Exec(
+	res, err := ex.Exec(
 		`UPDATE runs SET status = ?, error = ?, terminal_at = ?
 		 WHERE session_id = ? AND status IN (?, ?)`,
 		agent.RunStatusInterrupted, "process ended before a terminal commit (recovery)", now,
@@ -885,7 +892,7 @@ func (s *Store) recoverSessionTx(tx *sql.Tx, sessionID string) []string {
 		lines = append(lines, fmt.Sprintf("recovered %d interrupted run(s); classification only, nothing re-executed", n))
 	}
 
-	res, err = tx.Exec(
+	res, err = ex.Exec(
 		`UPDATE tool_calls SET status = ?, settled_at = ?
 		 WHERE session_id = ? AND status = ?`,
 		agent.ToolJournalUnknown, now, sessionID, agent.ToolJournalPending,
@@ -897,7 +904,7 @@ func (s *Store) recoverSessionTx(tx *sql.Tx, sessionID string) []string {
 		lines = append(lines, fmt.Sprintf("reclassified %d tool intent(s) as unknown-outcome", n))
 	}
 
-	res, err = tx.Exec(
+	res, err = ex.Exec(
 		`UPDATE approvals SET status = ?, decided_at = ?
 		 WHERE session_id = ? AND status = ? AND run_id IN
 		   (SELECT run_id FROM runs WHERE session_id = ? AND status = ?)`,
@@ -910,6 +917,12 @@ func (s *Store) recoverSessionTx(tx *sql.Tx, sessionID string) []string {
 		lines = append(lines, fmt.Sprintf("expired %d pending approval(s) from interrupted runs", n))
 	}
 	return lines
+}
+
+// recoverSessionTx classifies state a crashed process left behind. The
+// run lock itself is managed by acquire/commit; classification only.
+func (s *Store) recoverSessionTx(tx *sql.Tx, sessionID string) []string {
+	return classifyCrashResidue(tx, sessionID)
 }
 
 // RecoverSession force-classifies a session's in-flight state as crash
@@ -927,51 +940,11 @@ func (s *Store) RecoverSession(sessionID string) []string {
 	return s.recoverSessionLocked(sessionID, true)
 }
 
-// recoverSessionLocked classifies crash residue (interrupted runs,
-// unknown-outcome tool intents, expired pending approvals) with plain db
-// access; clears the run lock only when clearLock is set — force recovery
-// for diagnostics, after confirming no live owner.
+// recoverSessionLocked classifies crash residue with plain db access; clears
+// the run lock only when clearLock is set — force recovery for diagnostics,
+// after confirming no live owner.
 func (s *Store) recoverSessionLocked(sessionID string, clearLock bool) []string {
-	now := time.Now().Unix()
-	var lines []string
-
-	res, err := s.db.Exec(
-		`UPDATE runs SET status = ?, error = ?, terminal_at = ?
-		 WHERE session_id = ? AND status IN (?, ?)`,
-		agent.RunStatusInterrupted, "process ended before a terminal commit (recovery)", now,
-		sessionID, agent.RunStatusAdmitted, agent.RunStatusRunning,
-	)
-	if err != nil {
-		return append(lines, "recovery query failed: "+err.Error())
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		lines = append(lines, fmt.Sprintf("recovered %d interrupted run(s); classification only, nothing re-executed", n))
-	}
-
-	res, err = s.db.Exec(
-		`UPDATE tool_calls SET status = ?, settled_at = ?
-		 WHERE session_id = ? AND status = ?`,
-		agent.ToolJournalUnknown, now, sessionID, agent.ToolJournalPending,
-	)
-	if err != nil {
-		return append(lines, "tool intent recovery query failed: "+err.Error())
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		lines = append(lines, fmt.Sprintf("reclassified %d tool intent(s) as unknown-outcome", n))
-	}
-
-	res, err = s.db.Exec(
-		`UPDATE approvals SET status = ?, decided_at = ?
-		 WHERE session_id = ? AND status = ? AND run_id IN
-		   (SELECT run_id FROM runs WHERE session_id = ? AND status = ?)`,
-		"expired", now, sessionID, "pending", sessionID, agent.RunStatusInterrupted,
-	)
-	if err != nil {
-		return append(lines, "approval recovery query failed: "+err.Error())
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		lines = append(lines, fmt.Sprintf("expired %d pending approval(s) from interrupted runs", n))
-	}
+	lines := classifyCrashResidue(s.db, sessionID)
 	if clearLock {
 		if _, err := s.db.Exec(`DELETE FROM run_locks WHERE session_id = ?`, sessionID); err != nil {
 			return append(lines, "run lock cleanup failed: "+err.Error())
@@ -984,7 +957,7 @@ func (s *Store) recoverSessionLocked(sessionID string, clearLock bool) []string 
 // non-replay-safe intents from interrupted runs, inside the admission
 // transaction (the store has a single connection, so reads racing a tx must
 // share it).
-func (s *Store) blockedToolsTx(tx *sql.Tx, sessionID string) []agent.BlockedTool {
+func (s *Store) blockedToolsTx(tx *sql.Tx, sessionID string) ([]agent.BlockedTool, error) {
 	rows, err := tx.Query(
 		`SELECT tc.run_id, tc.tool_call_id, tc.tool_name, tc.args_hash
 		 FROM tool_calls tc JOIN runs r ON r.run_id = tc.run_id
@@ -993,19 +966,22 @@ func (s *Store) blockedToolsTx(tx *sql.Tx, sessionID string) []agent.BlockedTool
 		sessionID, agent.ToolJournalUnknown, agent.RunStatusInterrupted,
 	)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("query blocked tools: %w", err)
 	}
 	defer rows.Close()
 	var blocked []agent.BlockedTool
 	for rows.Next() {
 		var b agent.BlockedTool
 		if err := rows.Scan(&b.PriorRunID, &b.PriorCallID, &b.Name, &b.ArgsKey); err != nil {
-			continue
+			return nil, fmt.Errorf("scan blocked tools: %w", err)
 		}
 		b.Reason = blockedToolSummary(b)
 		blocked = append(blocked, b)
 	}
-	return blocked
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read blocked tools: %w", err)
+	}
+	return blocked, nil
 }
 
 func blockedToolSummary(b agent.BlockedTool) string {

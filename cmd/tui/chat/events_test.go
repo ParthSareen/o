@@ -430,3 +430,15 @@ func TestApplyAgentEventShowsReviewDecision(t *testing.T) {
 		t.Fatalf("review line should render:\n%s", view)
 	}
 }
+
+func TestApplyAgentEventEstimatesThinkingTokensFromText(t *testing.T) {
+	m := chatModel{running: true}
+
+	for range 3 {
+		m.applyAgentEvent(coreagent.Event{Type: coreagent.EventThinkingDelta, Thinking: "word"})
+	}
+
+	if m.thinkingTokens != 3 {
+		t.Fatalf("thinkingTokens = %d, want 3", m.thinkingTokens)
+	}
+}

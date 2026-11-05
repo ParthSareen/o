@@ -1769,33 +1769,7 @@ func (m chatModel) estimatePromptTokens(messages []api.Message, systemPrompt str
 	if m.opts.Tools != nil {
 		tools = m.opts.Tools.Tools()
 	}
-	return estimatePromptTokenCount(systemPrompt, messages, tools, m.opts.Format)
-}
-
-func estimatePromptTokenCount(systemPrompt string, messages []api.Message, tools api.Tools, format string) int {
-	total := approximateTokenCount(systemPrompt)
-	for _, msg := range messages {
-		total += approximateTokenCount(msg.Role)
-		total += approximateTokenCount(msg.Content)
-		total += approximateTokenCount(msg.Thinking)
-		total += approximateTokenCount(msg.ToolName)
-		total += approximateTokenCount(msg.ToolCallID)
-		for _, call := range msg.ToolCalls {
-			total += approximateTokenCount(call.Function.Name)
-			total += approximateTokenCount(call.Function.Arguments.String())
-		}
-	}
-	total += approximateTokenCount(tools.String())
-	total += approximateTokenCount(format)
-	return total
-}
-
-func approximateTokenCount(text string) int {
-	n := len([]rune(text))
-	if n <= 0 {
-		return 0
-	}
-	return max(1, (n+3)/4)
+	return coreagent.EstimatePromptTokens(systemPrompt, messages, tools, m.opts.Format)
 }
 
 func formatTokenCount(count int) string {

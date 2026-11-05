@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"slices"
 	"strings"
 
@@ -201,11 +202,7 @@ func (m *chatModel) inheritedSideMessages() ([]api.Message, int) {
 }
 
 func approximateMessageTokens(msg api.Message) int {
-	total := approximateTokenCount(msg.Content) + approximateTokenCount(msg.Thinking) + 8
-	for _, call := range msg.ToolCalls {
-		total += approximateTokenCount(call.Function.Name) + approximateTokenCount(call.Function.Arguments.String())
-	}
-	return total
+	return coreagent.EstimatePromptTokens("", []api.Message{msg}, nil, "")
 }
 
 // closeSidePane stops the fork's run, releases its tools (killing any
@@ -425,33 +422,22 @@ func (m chatModel) selectPaneModel() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	m.opts.Model = selected.Name
 	m.modelPicker = nil
 	m.modelPickerModels = nil
 	m.openModelOnInit = false
 	m.status = "ready"
 
-	previous := m.opts.Tools
-	registry := (&m).sideToolRegistry(selected.Name)
-	m.opts.Tools = registry
-	if previous != nil && previous != registry {
-		_ = previous.Close()
+	cmd, err := (&m).applyModelSelectionWith(selected.Name, modelSelectionConfig{
+		registry:                func(_ context.Context, model string) *coreagent.Registry { return (&m).sideToolRegistry(model) },
+		closePreviousTools:      true,
+		disableToolsWhenMissing: true,
+	})
+	if err != nil {
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "error", content: "Could not switch model: " + err.Error(), err: err.Error()}))
+		m.status = "error"
+		return m, nil
 	}
-	if m.opts.ToolsDisabled || registry == nil {
-		m.opts.ToolsDisabled = true
-	}
-	if m.opts.SystemPromptForModel != nil {
-		m.opts.SystemPrompt = m.opts.SystemPromptForModel(m.ctx, selected.Name, registry, m.opts.ToolsDisabled)
-	}
-	if m.opts.MultiModalForModel != nil {
-		m.opts.MultiModal = m.opts.MultiModalForModel(m.ctx, selected.Name)
-	}
-	if m.opts.ContextWindowTokensForModel != nil {
-		m.opts.ContextWindowTokens = m.opts.ContextWindowTokensForModel(m.ctx, selected.Name, m.opts.ContextWindowTokens)
-	}
-	m.contextTokens = m.estimatePromptTokens(m.messages, m.opts.SystemPrompt)
-	m.contextEstimate = true
-	return m, nil
+	return m, cmd
 }
 
 // paneHeaderLines is the side pane's title row. It reports the model, the

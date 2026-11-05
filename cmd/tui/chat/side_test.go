@@ -553,6 +553,66 @@ func TestSideModelSwitchClosesTheOldRegistry(t *testing.T) {
 	}
 }
 
+func TestSideModelSwitchUsesTheSameContextWindowAsMain(t *testing.T) {
+	gotFallback := -1
+	selected := 0
+	preloaded := 0
+	m := chatModel{
+		ctx:    context.Background(),
+		width:  120,
+		height: 20,
+		opts: Options{
+			Model:               "model-a",
+			ContextWindowTokens: 4096,
+			ModelOptions: func(context.Context) ([]ModelOption, error) {
+				return []ModelOption{{Name: "model-a"}, {Name: "model-b"}}, nil
+			},
+			ToolRegistryForModel: func(context.Context, string) *coreagent.Registry {
+				return &coreagent.Registry{}
+			},
+			ContextWindowTokensForModel: func(_ context.Context, model string, fallback int) int {
+				gotFallback = fallback
+				if model == "model-b" {
+					return 262144
+				}
+				return 4096
+			},
+			OnModelSelected: func(context.Context, string) error {
+				selected++
+				return nil
+			},
+			PreloadModel: func(context.Context, string, *api.ThinkValue) (int, error) {
+				preloaded++
+				return 0, nil
+			},
+		},
+	}
+	updated, _ := m.openSidePane()
+	m = updated.(chatModel)
+	gotFallback = -1
+
+	updated, _ = m.side.openModelPicker("model-b")
+	*m.side = updated.(chatModel)
+	updated, _ = m.side.selectModel()
+	*m.side = updated.(chatModel)
+
+	if m.side.opts.Model != "model-b" {
+		t.Fatalf("side model = %q, want model-b", m.side.opts.Model)
+	}
+	if gotFallback != 0 {
+		t.Fatalf("context fallback = %d, want 0 after model switch", gotFallback)
+	}
+	if m.side.opts.ContextWindowTokens != 262144 {
+		t.Fatalf("side context window = %d, want 262144", m.side.opts.ContextWindowTokens)
+	}
+	if selected != 0 {
+		t.Fatal("side model switch must not persist or notify the root model")
+	}
+	if preloaded != 0 {
+		t.Fatal("side model switch must not preload a model")
+	}
+}
+
 // Mouse reporting is terminal-wide: while it is on, the terminal sends clicks
 // to the program instead of opening cmd+click links or selecting natively. The
 // pane is the only thing that needs the mouse, so capture stays scoped to it.
