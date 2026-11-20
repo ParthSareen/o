@@ -14,18 +14,22 @@ import (
 )
 
 type chatApprovalChoice struct {
-	label      string
-	key        string
-	allow      bool
-	allowTools bool
-	allowAll   bool
-	reason     string
+	label       string
+	key         string
+	allow       bool
+	allowTools  bool
+	allowAll    bool
+	continueRun bool
+	reason      string
 }
 
 var chatApprovalChoices = []chatApprovalChoice{
 	{label: "Approve once", key: "1", allow: true},
 	{label: "Always allow tool", key: "2", allow: true, allowTools: true},
-	{label: "Deny", key: "3", reason: "Tool execution denied."},
+	// Denying refuses the calls for this run but hands the refusal back to
+	// the model as a tool result, so the agent adapts instead of the run
+	// ending on the spot. Esc still stops the run outright.
+	{label: "Deny", key: "3", reason: "Tool execution denied.", continueRun: true},
 }
 
 type chatApprovalPrompt struct {
@@ -312,7 +316,7 @@ func (m chatModel) resolveApprovalPrompt(choice chatApprovalChoice) (tea.Model, 
 	prompt := m.approvalPrompt
 	m.approvalPrompt = nil
 	m.status = "running"
-	if !choice.allow {
+	if !choice.allow && !choice.continueRun {
 		m.status = "denied"
 	}
 	if choice.allowAll {
@@ -336,7 +340,7 @@ func (m chatModel) resolveApprovalPrompt(choice chatApprovalChoice) (tea.Model, 
 			m.markEntryDirty(idx)
 		}
 	}
-	result := coreagent.Approval{Allow: choice.allow, AllowAll: choice.allowAll, Reason: choice.reason}
+	result := coreagent.Approval{Allow: choice.allow, AllowAll: choice.allowAll, Reason: choice.reason, Continue: choice.continueRun}
 	if choice.allowTools {
 		result.AllowScopes = allowScopes
 	}

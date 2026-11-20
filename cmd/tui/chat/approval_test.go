@@ -80,6 +80,31 @@ func TestChatApprovalAllowsTool(t *testing.T) {
 	}
 }
 
+func TestChatApprovalDenyContinuesRun(t *testing.T) {
+	reply := make(chan coreagent.Approval, 1)
+	m := chatModel{
+		approvalPrompt: &chatApprovalPrompt{
+			request: testApprovalRequest(),
+			reply:   reply,
+			cursor:  2,
+		},
+		events: make(chan tea.Msg),
+	}
+
+	updated, _ := m.updateApprovalPrompt(tea.KeyMsg{Type: tea.KeyEnter})
+	fm := updated.(chatModel)
+	if fm.status == "denied" {
+		t.Fatal("deny should leave the run live, not mark it denied")
+	}
+	result := <-reply
+	if result.Allow || !result.Continue {
+		t.Fatalf("approval = %#v, want a continuing deny", result)
+	}
+	if result.Reason == "" {
+		t.Fatal("deny should carry a reason for the model-facing tool result")
+	}
+}
+
 func TestChatApprovalLabelsSecondChoiceAsPerTool(t *testing.T) {
 	lines := stripANSI(strings.Join(renderApprovalChoices(testApprovalRequest(), 1, 80), "\n"))
 	if !strings.Contains(lines, "2. Always allow Edit") {

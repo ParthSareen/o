@@ -173,6 +173,11 @@ type run struct {
 	// blockedTools refuses re-execution of a prior attempt's
 	// unknown-outcome tool calls, keyed by ToolArgsKey.
 	blockedTools map[string]BlockedTool
+	// deniedTools refuses re-asking about calls a human already denied in
+	// this run, keyed by ToolArgsKey; the value is the model-facing denial
+	// text. Denials keep the run alive, so a model that retries the same
+	// call must get the refusal back instead of another prompt.
+	deniedTools map[string]string
 	// rawBaseline is the index into r.messages where the current unflushed raw
 	// segment starts; compaction and run end flush each segment through the
 	// journal's append-only record.
@@ -291,6 +296,7 @@ func (s *Session) Run(ctx context.Context, opts RunOptions) (*RunResult, error) 
 		budget:        budget,
 		maxToolRounds: resolvedMaxToolRounds(opts.Model, opts.MaxToolRounds),
 		rawBaseline:   rawBaseline,
+		deniedTools:   make(map[string]string),
 	}
 	if admitted != nil {
 		r.admitted = admitted
@@ -308,6 +314,7 @@ func (s *Session) Run(ctx context.Context, opts RunOptions) (*RunResult, error) 
 		runID:   runID,
 		meta:    newEventMetadata(runID, opts),
 		blocked: r.blockedTools,
+		denied:  r.deniedTools,
 	})
 	return r.run(ctx)
 }
@@ -467,7 +474,7 @@ func (r *run) runModelStep(ctx context.Context) error {
 }
 
 func (r *run) runToolStep(ctx context.Context) error {
-	batch, err := r.session.executeToolCalls(ctx, r.runID, r.opts, r.budget, r.messages, r.pendingToolCalls, r.blockedTools)
+	batch, err := r.session.executeToolCalls(ctx, r.runID, r.opts, r.budget, r.messages, r.pendingToolCalls, r.blockedTools, r.deniedTools)
 	if err != nil {
 		r.session.emit(newErrorEvent(newEventMetadata(r.runID, r.opts), err.Error()))
 		return err
@@ -841,7 +848,7 @@ func buildChatRequest(opts RunOptions, messages []api.Message, tools api.Tools) 
 	return req
 }
 
-func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, calls []api.ToolCall, blocked map[string]BlockedTool) (toolBatchResult, error) {
+func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, calls []api.ToolCall, blocked map[string]BlockedTool, denied map[string]string) (toolBatchResult, error) {
 	meta := newEventMetadata(runID, opts)
 	batch := toolBatchResult{
 		messages: make([]api.Message, 0, len(calls)),
@@ -874,6 +881,11 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			args:       args,
 			workingDir: batchWorkingDir,
 		})
+		if _, wasDenied := denied[ToolArgsKey(toolName, args)]; wasDenied {
+			// Already refused this run; the execution loop hands the refusal
+			// back without another prompt.
+			continue
+		}
 		if ok && s.needsApproval(tool, toolName, args, batchWorkingDir) {
 			approvalReq.AddToolCall(call.ID, toolName, toolApprovalScope(tool, toolName, args, batchWorkingDir), args)
 		}
@@ -899,9 +911,14 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 			}
 		}
 		if !approvalResult.Allow {
-			content := approvalResult.Reason
-			if content == "" {
-				content = "Tool execution denied."
+			content := deniedToolContent(approvalResult.Reason, approvalResult.Continue)
+			if approvalResult.Continue && denied != nil {
+				// A continuing deny refuses the calls the human saw for the rest
+				// of the run, so a model that retries them gets the refusal back
+				// instead of re-prompting.
+				for _, call := range approvalReq.Calls {
+					denied[ToolArgsKey(call.ToolName, call.Args)] = content
+				}
 			}
 			for _, plan := range plans {
 				// Denial is a settled outcome: journal intent and decision
@@ -920,7 +937,9 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 					return toolBatchResult{}, emitErr
 				}
 			}
-			batch.stop = toolExecutionDenied
+			if !approvalResult.Continue {
+				batch.stop = toolExecutionDenied
+			}
 			return batch, nil
 		}
 	}
@@ -963,6 +982,20 @@ func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOp
 		// audit evidence) before any further work.
 		if err := s.journalToolIntent(runID, call.ID, plan.tool, toolName, args); err != nil {
 			return toolBatchResult{}, journalErr(meta, "tool intent", err)
+		}
+		if reason, wasDenied := denied[ToolArgsKey(toolName, args)]; wasDenied {
+			// The human refused this exact call earlier in the run; hand the
+			// refusal back as a tool result without prompting again.
+			if err := s.journalToolOutcome(runID, call.ID, ToolJournalDenied, "", reason); err != nil {
+				return toolBatchResult{}, journalErr(meta, "tool outcome", err)
+			}
+			msg := budget.FitToolResult(toolName, call.ID, reason, historyTokens+batchTokens, CeilingThreshold)
+			batch.messages = append(batch.messages, msg)
+			batchTokens += estimateMessagesTokens([]api.Message{msg})
+			if emitErr := s.emit(newToolFinished(meta, ToolStatusDenied, call.ID, toolName, plan.workingDir, args, msg.Content, reason)); emitErr != nil {
+				return toolBatchResult{}, emitErr
+			}
+			continue
 		}
 		if plan.tool != nil {
 			if prior, isBlocked := blocked[ToolArgsKey(toolName, args)]; isBlocked {
@@ -1504,6 +1537,21 @@ func blockedToolReason(blocked BlockedTool) string {
 	return fmt.Sprintf("tool call has an unknown outcome from interrupted run %s (prior call %s); refusing to re-execute automatically", blocked.PriorRunID, blocked.PriorCallID)
 }
 
+// deniedToolContent renders the model-facing result of a refused call. When
+// the run continues past the denial, the text says the tool did not run and
+// that retrying is pointless, because the same call is refused for the rest
+// of the run without another prompt.
+func deniedToolContent(reason string, continuing bool) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Tool execution denied."
+	}
+	if !continuing {
+		return reason
+	}
+	return reason + " The tool did not run. Do not retry this call; choose another approach or ask the user how to proceed."
+}
+
 // recordCompaction journals one compaction fact; raw history stays append-
 // only around it.
 func (s *Session) recordCompaction(runID, chatID string, trigger CompactionTrigger, summary string) error {
@@ -1538,6 +1586,7 @@ type nestedRunIDs struct {
 	runID   string
 	meta    eventMetadata
 	blocked map[string]BlockedTool
+	denied  map[string]string
 }
 
 // installNestedExecutor wires composing tools (codemode) to this run's
@@ -1612,6 +1661,15 @@ func (s *Session) executeNestedToolCall(ctx context.Context, config nestedRunIDs
 		}
 	}
 	workingDir := s.currentWorkingDir()
+	if reason, wasDenied := config.denied[ToolArgsKey(toolName, args)]; wasDenied {
+		// The human refused this exact call earlier in the run; hand the
+		// refusal back without prompting again.
+		if s.Journal != nil {
+			_ = s.journalToolOutcome(config.runID, callID, ToolJournalDenied, "", reason)
+		}
+		_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusDenied, callID, toolName, "", args, reason, reason))
+		return ToolResult{}, errors.New(reason)
+	}
 	if s.needsApproval(tool, toolName, args, workingDir) {
 		req := ApprovalRequest{RunID: config.runID, WorkingDir: workingDir, Calls: []ApprovalToolCall{{
 			ToolCallID:    callID,
@@ -1628,9 +1686,9 @@ func (s *Session) executeNestedToolCall(ctx context.Context, config nestedRunIDs
 			_ = s.emit(newApprovalReviewed(meta, result.Review))
 		}
 		if !result.Allow {
-			reason := result.Reason
-			if reason == "" {
-				reason = "Tool execution denied."
+			reason := deniedToolContent(result.Reason, true)
+			if config.denied != nil {
+				config.denied[ToolArgsKey(toolName, args)] = reason
 			}
 			if err := s.journalToolOutcome(config.runID, callID, ToolJournalDenied, "", reason); err != nil {
 				return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)

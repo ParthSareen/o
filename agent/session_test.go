@@ -1893,6 +1893,127 @@ func TestSessionDeniesWithoutApprovalPrompter(t *testing.T) {
 	}
 }
 
+// A human deny that sets Continue refuses the call without ending the run:
+// the refusal reaches the model as a synthetic tool result and the model gets
+// another step.
+func TestSessionDenialWithContinueFeedsSyntheticResultAndContinues(t *testing.T) {
+	args := api.NewToolCallFunctionArguments()
+	args.Set("value", "should not run")
+	client := &fakeClient{
+		responses: [][]api.ChatResponse{
+			{
+				{Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{
+					{ID: "call-1", Function: api.ToolCallFunction{Name: "approval_tool", Arguments: args}},
+				}}},
+			},
+			{
+				{Message: api.Message{Role: "assistant", Content: "took another route"}},
+			},
+		},
+	}
+	called := false
+	registry := &Registry{}
+	registry.Register(approvalTestTool{called: &called})
+	prompter := &recordingApprovalPrompter{
+		results: []Approval{{Reason: "user denied this", Continue: true}},
+	}
+	session := &Session{
+		Client:           client,
+		Tools:            registry,
+		ApprovalPrompter: prompter,
+	}
+
+	result, err := session.Run(context.Background(), RunOptions{
+		Model:       "model",
+		NewMessages: []api.Message{{Role: "user", Content: "use tools"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("tool ran despite denial")
+	}
+	if client.calls != 2 {
+		t.Fatalf("client calls = %d, want 2 (run continues past denial)", client.calls)
+	}
+	if len(result.Messages) != 4 {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	denial := result.Messages[2]
+	if denial.Role != "tool" || denial.ToolCallID != "call-1" {
+		t.Fatalf("denial tool message = %#v", denial)
+	}
+	if !strings.Contains(denial.Content, "user denied this") || !strings.Contains(denial.Content, "did not run") {
+		t.Fatalf("denial content = %q, want the refusal plus the continue hint", denial.Content)
+	}
+	if result.Messages[3].Role != "assistant" || result.Messages[3].Content != "took another route" {
+		t.Fatalf("continuation message = %#v", result.Messages[3])
+	}
+}
+
+// The same call is refused for the rest of the run without re-prompting the
+// human, so a model that retries cannot turn one denial into a prompt loop.
+func TestSessionDenialWithContinueRefusesRepeatWithoutPrompt(t *testing.T) {
+	first := api.NewToolCallFunctionArguments()
+	first.Set("value", "rm -rf build")
+	client := &fakeClient{
+		responses: [][]api.ChatResponse{
+			{
+				{Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{
+					{ID: "call-1", Function: api.ToolCallFunction{Name: "approval_tool", Arguments: first}},
+				}}},
+			},
+			{
+				{Message: api.Message{Role: "assistant", ToolCalls: []api.ToolCall{
+					{ID: "call-2", Function: api.ToolCallFunction{Name: "approval_tool", Arguments: first}},
+				}}},
+			},
+			{
+				{Message: api.Message{Role: "assistant", Content: "stopping here"}},
+			},
+		},
+	}
+	called := false
+	registry := &Registry{}
+	registry.Register(approvalTestTool{called: &called})
+	prompter := &recordingApprovalPrompter{
+		results: []Approval{{Reason: "denied once", Continue: true}},
+	}
+	session := &Session{
+		Client:           client,
+		Tools:            registry,
+		ApprovalPrompter: prompter,
+	}
+
+	result, err := session.Run(context.Background(), RunOptions{
+		Model:       "model",
+		NewMessages: []api.Message{{Role: "user", Content: "use tools"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("tool ran despite denial")
+	}
+	if len(prompter.requests) != 1 {
+		t.Fatalf("approval prompts = %d, want 1 (repeat refusal must not re-prompt)", len(prompter.requests))
+	}
+	if client.calls != 3 {
+		t.Fatalf("client calls = %d, want 3", client.calls)
+	}
+	if len(result.Messages) != 6 {
+		t.Fatalf("messages = %#v", result.Messages)
+	}
+	for _, msg := range []api.Message{result.Messages[2], result.Messages[4]} {
+		if msg.Role != "tool" || !strings.Contains(msg.Content, "denied once") {
+			t.Fatalf("denial tool message = %#v", msg)
+		}
+	}
+	if result.Messages[5].Role != "assistant" || result.Messages[5].Content != "stopping here" {
+		t.Fatalf("continuation message = %#v", result.Messages[5])
+	}
+}
+
 func TestSessionPromptsOnceForApprovalBatch(t *testing.T) {
 	args := api.NewToolCallFunctionArguments()
 	client := &fakeClient{

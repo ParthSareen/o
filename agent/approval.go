@@ -47,6 +47,11 @@ type Approval struct {
 	// Review carries the auto-review verdict when the decision came from the
 	// review model, so the session can surface it to UIs.
 	Review *ReviewDecision
+	// Continue keeps the run alive after a denial: the refusal is appended
+	// as a synthetic tool result and the model gets another step, instead of
+	// the run finishing with RunStatusDenied. A human deny sets it; denies
+	// that must end the run (headless, critical-risk review verdicts) do not.
+	Continue bool
 }
 
 type ApprovalPrompter interface {
