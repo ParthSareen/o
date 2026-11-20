@@ -5,13 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -118,13 +114,6 @@ const (
 	toolExecutionDenied   toolExecutionStop = "denied"
 	toolExecutionCanceled toolExecutionStop = "canceled"
 )
-
-// maxBackgroundContinuations caps how many times a single run can extend
-// itself to report background task completions. Each completion is reported
-// exactly once so continuations terminate on their own; the cap only guards
-// against pathological crash-loops, and anything still buffered past the
-// cap surfaces at the next run's start drain.
-const maxBackgroundContinuations = 8
 
 const toolExecutionDisabledMessage = "Tool execution disabled."
 
@@ -532,39 +521,6 @@ func (r *run) runModelStep(ctx context.Context) error {
 	return nil
 }
 
-// modelRetryDelays is the backoff between resends of a model request that
-// failed transiently; its length caps the retries per model step.
-var modelRetryDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-
-// isToolCallParseError reports a server-side failure to parse the model's
-// tool-call output. Resending the same request would likely fail the same
-// way, so the model is asked to correct itself instead.
-func isToolCallParseError(err api.StatusError) bool {
-	if err.StatusCode < 500 {
-		return false
-	}
-	msg := strings.ToLower(err.ErrorMessage)
-	return strings.Contains(msg, "tool call") && (strings.Contains(msg, "pars") || strings.Contains(msg, "invalid"))
-}
-
-// isTransientModelError reports failures worth resending unchanged: server
-// errors, rate limits, timeouts, and dropped connections.
-func isTransientModelError(err error) bool {
-	var statusErr api.StatusError
-	if errors.As(err, &statusErr) {
-		switch statusErr.StatusCode {
-		case http.StatusRequestTimeout, http.StatusTooManyRequests:
-			return true
-		}
-		return statusErr.StatusCode >= 500
-	}
-	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) {
-		return true
-	}
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
-}
-
 func (r *run) runToolStep(ctx context.Context) error {
 	batch, err := r.session.executeToolCalls(ctx, r.runID, r.opts, r.budget, r.messages, r.pendingToolCalls, r.blockedTools, r.deniedTools)
 	if err != nil {
@@ -731,124 +687,6 @@ func (s *Session) finishUnstartedRun(admitted *RunAdmissionResult, runID, chatID
 	_, _ = s.Journal.CommitRun(RunTerminal{RunID: runID, ChatID: chatID, Status: RunStatusFailed, Err: err.Error()})
 }
 
-// injectPendingBackgroundEvents delivers background work that finished (or
-// polls that published) while the run was in flight: when the source pushes
-// a signal, buffered completions are drained into a synthetic user notice
-// ahead of the next model request, so the agent reacts mid-run instead of
-// only at run boundaries. Injection happens only before a model
-// step: at that point the message tail is turn-complete and appending a user
-// notice is protocol-safe — during tool execution the tail is an assistant
-// message with unanswered tool calls. Signals are capacity-1 coalesced and
-// never consumed without draining, so a signal observed during a non-model
-// phase waits for the next model step.
-func (r *run) injectPendingBackgroundEvents() {
-	if r.phase != runPhaseModel || r.session.Background == nil {
-		return
-	}
-	signaler, ok := r.session.Background.(BackgroundSignaler)
-	if !ok {
-		return
-	}
-	select {
-	case <-signaler.BackgroundSignals():
-	default:
-		return
-	}
-	if notice := r.session.backgroundNotice(); notice != "" {
-		r.messages = append(r.messages, api.Message{Role: "user", Content: notice})
-		// Best-effort like the boundary drains: a dropped render must not
-		// fail the run.
-		_ = r.session.emit(newBackgroundTasks(newEventMetadata(r.runID, r.opts), notice))
-	}
-}
-
-// backgroundNotice drains pending background task completions and renders
-// them as one synthetic user message. Empty when no source is set or nothing
-// finished. Completions are removed from the source by the drain, so each is
-// reported exactly once.
-func (s *Session) backgroundNotice() string {
-	if s == nil || s.Background == nil {
-		return ""
-	}
-	completions := s.Background.DrainCompletions()
-	if len(completions) == 0 {
-		return ""
-	}
-	return formatBackgroundNotice(completions)
-}
-
-// formatBackgroundNotice renders completion entries plus bounded failure
-// tails as a system-attributed notice.
-func formatBackgroundNotice(completions []BackgroundCompletion) string {
-	var sb strings.Builder
-	sb.WriteString("[background task update — system notice, not a user message]\n")
-	for _, c := range completions {
-		if c.Poll {
-			formatPollNotice(&sb, c)
-			continue
-		}
-		var status string
-		switch {
-		case c.Killed:
-			status = "killed"
-		case c.Failure != "":
-			status = "failed to run: " + c.Failure
-		case c.ExitCode == 0:
-			status = "finished: exit 0"
-		default:
-			status = fmt.Sprintf("failed: exit %d", c.ExitCode)
-		}
-		fmt.Fprintf(&sb, "\n%s: %s after %s — %q\n  log: %s\n",
-			c.ID, status, formatBackgroundTaskDuration(c.Duration), backgroundCommandSummary(c.Command), c.LogPath)
-		if c.SessionID != "" {
-			fmt.Fprintf(&sb, "  o session %s: after the child exits, follow up with o --resume-id %s --headless --allow-all-tools \"follow-up\"\n", c.SessionID, c.SessionID)
-		}
-		if tail := strings.TrimRight(c.Tail, "\n"); tail != "" {
-			sb.WriteString("  log tail:\n")
-			for _, line := range strings.Split(tail, "\n") {
-				sb.WriteString("    " + line + "\n")
-			}
-		}
-	}
-	return strings.TrimRight(sb.String(), "\n")
-}
-
-func formatPollNotice(sb *strings.Builder, c BackgroundCompletion) {
-	var status string
-	switch {
-	case c.Failure != "":
-		status = "tick failed: " + c.Failure
-	case c.ExitCode != 0:
-		status = fmt.Sprintf("tick command exited %d", c.ExitCode)
-	default:
-		status = "new output"
-	}
-	fmt.Fprintf(sb, "\n%s tick %d: %s after %s — %q\n  log: %s\n",
-		c.ID, c.Tick, status, formatBackgroundTaskDuration(c.Duration), backgroundCommandSummary(c.Command), c.LogPath)
-	if output := strings.TrimRight(c.Tail, "\n"); output != "" {
-		sb.WriteString("  output:\n")
-		for _, line := range strings.Split(output, "\n") {
-			sb.WriteString("    " + line + "\n")
-		}
-	}
-}
-
-func backgroundCommandSummary(command string) string {
-	summary := strings.Join(strings.Fields(command), " ")
-	runes := []rune(summary)
-	if len(runes) > 60 {
-		summary = string(runes[:60]) + "…"
-	}
-	return summary
-}
-
-func formatBackgroundTaskDuration(d time.Duration) string {
-	if d < time.Second {
-		return d.Round(10 * time.Millisecond).String()
-	}
-	return d.Round(100 * time.Millisecond).String()
-}
-
 func (s *Session) chatRound(ctx context.Context, runID string, opts RunOptions, messages []api.Message, latest *api.ChatResponse) (api.Message, []api.ToolCall, bool, error) {
 	meta := newEventMetadata(runID, opts)
 	var tools api.Tools
@@ -1001,159 +839,6 @@ func isContextCanceledError(ctx context.Context, err error) bool {
 	return ctx != nil && errors.Is(ctx.Err(), context.Canceled) && strings.Contains(err.Error(), "context canceled")
 }
 
-func (s *Session) maybeCompact(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse, skipNotified bool) ([]api.Message, bool, bool, error) {
-	if s.Compactor == nil {
-		return messages, false, skipNotified, nil
-	}
-	req := s.compactionRequest(runID, opts, budget, messages, latest)
-	trigger := s.autoCompactionTrigger(req)
-	if trigger != "" {
-		s.emitCompactionStarted(runID, opts, trigger)
-	}
-	result, err := s.Compactor.MaybeCompact(ctx, req)
-	if err != nil {
-		if result.Due && !skipNotified {
-			if trigger == "" {
-				trigger = CompactionTriggerError
-			}
-			s.emitCompactionSkipped(runID, opts, trigger, result.Reason)
-			skipNotified = true
-		}
-		return messages, false, skipNotified, nil
-	}
-	if !result.Compacted {
-		if result.Due && !skipNotified {
-			if trigger == "" {
-				trigger = CompactionTriggerDue
-			}
-			s.emitCompactionSkipped(runID, opts, trigger, result.Reason)
-			skipNotified = true
-		}
-		return messages, false, skipNotified, nil
-	}
-	s.emitCompacted(runID, opts, result.Messages, trigger, result.Summary)
-	if err := s.recordCompaction(runID, opts.ChatID, trigger, result.Summary); err != nil {
-		return result.Messages, true, skipNotified, err
-	}
-	if err := s.checkPostCompactionPromptBudget(budget, opts, result.Messages); err != nil {
-		return result.Messages, true, skipNotified, err
-	}
-	return result.Messages, true, skipNotified, nil
-}
-
-func (s *Session) compactForToolOutputOverflow(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse, assistant api.Message, toolMessages []api.Message, overflows []toolOutputOverflow, skipNotified bool) ([]api.Message, bool, bool, error) {
-	if s.Compactor == nil {
-		return messages, false, skipNotified, nil
-	}
-
-	keepUserTurns := 0
-	req := s.compactionRequest(runID, opts, budget, messages, latest)
-	req.Force = true
-	req.KeepUserTurns = &keepUserTurns
-	s.emitCompactionStarted(runID, opts, CompactionTriggerToolOutput)
-
-	result, err := s.Compactor.MaybeCompact(ctx, req)
-	if err != nil {
-		if result.Due && !skipNotified {
-			s.emitCompactionSkipped(runID, opts, CompactionTriggerToolOutput, result.Reason)
-			skipNotified = true
-		}
-		return messages, false, skipNotified, nil
-	}
-	if !result.Compacted {
-		if result.Due && !skipNotified {
-			s.emitCompactionSkipped(runID, opts, CompactionTriggerToolOutput, result.Reason)
-			skipNotified = true
-		}
-		return messages, false, skipNotified, nil
-	}
-
-	overflowByID := make(map[string]toolOutputOverflow, len(overflows))
-	for _, overflow := range overflows {
-		overflowByID[overflow.toolCallID] = overflow
-	}
-
-	compacted := append([]api.Message(nil), result.Messages...)
-	if !messageEmpty(assistant) {
-		compacted = append(compacted, assistant)
-	}
-
-	historyTokens := budget.Estimate(compacted)
-	batchTokens := 0
-	for _, msg := range toolMessages {
-		content := msg.Content
-		toolName := msg.ToolName
-		if overflow, ok := overflowByID[msg.ToolCallID]; ok {
-			content = overflow.content
-			if overflow.toolName != "" {
-				toolName = overflow.toolName
-			}
-		}
-		refit := budget.FitToolResult(toolName, msg.ToolCallID, content, historyTokens+batchTokens, CeilingContextWindow)
-		refit.Images = msg.Images
-		compacted = append(compacted, refit)
-		batchTokens += estimateMessagesTokens([]api.Message{refit})
-	}
-
-	s.emitCompacted(runID, opts, compacted, CompactionTriggerToolOutput, result.Summary)
-	if err := s.recordCompaction(runID, opts.ChatID, CompactionTriggerToolOutput, result.Summary); err != nil {
-		return compacted, true, skipNotified, err
-	}
-	if err := s.checkPostCompactionPromptBudget(budget, opts, compacted); err != nil {
-		return compacted, true, skipNotified, err
-	}
-	return compacted, true, skipNotified, nil
-}
-
-func (s *Session) compactionRequest(runID string, opts RunOptions, budget PromptBudget, messages []api.Message, latest api.ChatResponse) CompactionRequest {
-	meta := newEventMetadata(runID, opts)
-	return CompactionRequest{
-		ChatID:       opts.ChatID,
-		Model:        opts.Model,
-		Messages:     messages,
-		Latest:       latest,
-		Options:      opts.Options,
-		KeepAlive:    opts.KeepAlive,
-		Think:        opts.Think,
-		ContinueTask: true,
-		Budget:       budget,
-		Progress: func(progress CompactionProgress) {
-			_ = s.emit(newCompactionProgress(meta, progress.Tokens))
-		},
-	}
-}
-
-func (s *Session) emitCompactionStarted(runID string, opts RunOptions, trigger CompactionTrigger) {
-	_ = s.emit(newCompactionStarted(newEventMetadata(runID, opts), trigger))
-}
-
-func (s *Session) emitCompactionSkipped(runID string, opts RunOptions, trigger CompactionTrigger, reason string) {
-	_ = s.emit(newCompactionSkipped(newEventMetadata(runID, opts), trigger, CompactionSkippedMessage(reason)))
-}
-
-func (s *Session) emitCompacted(runID string, opts RunOptions, messages []api.Message, trigger CompactionTrigger, summary string) {
-	_ = s.emit(newCompacted(newEventMetadata(runID, opts), messages, trigger, summary))
-}
-
-func (s *Session) autoCompactionTrigger(req CompactionRequest) CompactionTrigger {
-	if s.Compactor == nil {
-		return ""
-	}
-	trigger, should := s.Compactor.ShouldCompact(req)
-	if should {
-		return trigger
-	}
-	return ""
-}
-
-func CompactionSkippedMessage(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "compaction could not run"
-	}
-	return reason
-}
-
 func resolvedMaxToolRounds(model string, value int) int {
 	if value != 0 {
 		return value
@@ -1164,26 +849,6 @@ func resolvedMaxToolRounds(model string, value int) int {
 	return defaultMaxToolRounds
 }
 
-func toolMessageWithLimit(toolName, toolCallID, content string, maxRunes int) api.Message {
-	return api.Message{
-		Role:       "tool",
-		Content:    truncateToolResultContentTo(content, maxRunes),
-		ToolName:   toolName,
-		ToolCallID: toolCallID,
-	}
-}
-
-func smallContextToolResultLimitRunes(contextWindow int) int {
-	switch {
-	case contextWindow > 0 && contextWindow <= tinyContextToolResultTokenWindow:
-		return tinyContextToolResultRunes
-	case contextWindow > 0 && contextWindow <= smallContextToolResultTokenWindow:
-		return smallContextToolResultRunes
-	default:
-		return 0
-	}
-}
-
 func (s *Session) availableTools() api.Tools {
 	if s == nil || s.Tools == nil {
 		return nil
@@ -1191,138 +856,8 @@ func (s *Session) availableTools() api.Tools {
 	return s.Tools.Tools()
 }
 
-func toolMessage(toolName, toolCallID, content string) api.Message {
-	return toolMessageWithLimit(toolName, toolCallID, content, maxToolResultRunes)
-}
-
-func sanitizeMessageForRun(msg api.Message) api.Message {
-	if msg.Role == "tool" {
-		msg.Content = truncateToolResultContent(msg.Content)
-	}
-	return msg
-}
-
-func sanitizeMessagesForRequest(messages []api.Message) []api.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-	sanitized := make([]api.Message, len(messages))
-	for i, msg := range messages {
-		sanitized[i] = sanitizeMessageForRun(msg)
-	}
-	return sanitized
-}
-
-func truncateToolResultContent(content string) string {
-	return truncateToolResultContentTo(content, maxToolResultRunes)
-}
-
-func truncateToolResultContentTo(content string, maxRunes int) string {
-	return Truncate(content, TruncateConfig{
-		MaxRunes:           maxRunes,
-		HeadTail:           true,
-		HeadPct:            75,
-		Label:              "tool output",
-		Hint:               "Use a narrower command, line range, or search query if more detail is needed.",
-		FullOmissionPrefix: toolOutputFullOmissionPrefix,
-	})
-}
-
-// TruncateConfig configures content truncation via Truncate.
-type TruncateConfig struct {
-	MaxRunes           int    // rune limit; <= 0 means full omission
-	HeadTail           bool   // true = head + tail split; false = head only
-	HeadPct            int    // percentage of MaxRunes for head (e.g. 75); tail gets the rest
-	Label              string // e.g. "tool output", "summary", "stdout"
-	Hint               string // guidance text appended to marker (optional)
-	FullOmissionPrefix string // marker prefix when MaxRunes <= 0
-}
-
-// Truncate truncates content to at most cfg.MaxRunes runes. When HeadTail is
-// true, it preserves the first HeadPct% and last (100-HeadPct)% of the budget
-// with a marker between; otherwise it keeps only the head. MaxRunes <= 0
-// triggers full omission using FullOmissionPrefix. All token counts in
-// markers use ApproximateTokens.
-func Truncate(content string, cfg TruncateConfig) string {
-	runes := []rune(content)
-	total := len(runes)
-
-	if cfg.MaxRunes <= 0 {
-		return fmt.Sprintf("%s omitted ~%d tokens.%s]", cfg.FullOmissionPrefix, ApproximateTokens(total), truncHint(cfg.Hint))
-	}
-	if total <= cfg.MaxRunes {
-		return content
-	}
-
-	if !cfg.HeadTail {
-		head := cfg.MaxRunes
-		omitted := total - head
-		return string(runes[:head]) + TruncMarker(cfg.Label, head, 0, omitted, false, cfg.Hint)
-	}
-
-	head := cfg.MaxRunes * cfg.HeadPct / 100
-	tail := cfg.MaxRunes - head
-	omitted := total - head - tail
-	return string(runes[:head]) + TruncMarker(cfg.Label, head, tail, omitted, true, cfg.Hint) + string(runes[len(runes)-tail:])
-}
-
-func truncHint(hint string) string {
-	hint = strings.TrimSpace(hint)
-	if hint == "" {
-		return ""
-	}
-	if !strings.HasSuffix(hint, ".") {
-		hint += "."
-	}
-
-	return " " + hint
-}
-
-// TruncMarker formats a truncation marker with consistent wording. head and
-// tail are rune counts; omitted is the count of runes removed. headTail
-// selects the head+tail vs head-only format. hint is optional guidance text.
-func TruncMarker(label string, head, tail, omitted int, headTail bool, hint string) string {
-	var b strings.Builder
-	b.WriteString("\n\n[")
-	b.WriteString(label)
-	b.WriteString(" truncated: ")
-	if headTail {
-		fmt.Fprintf(&b, "showing first ~%d tokens and last ~%d tokens; ", ApproximateTokens(head), ApproximateTokens(tail))
-	} else {
-		fmt.Fprintf(&b, "showing first ~%d tokens; ", ApproximateTokens(head))
-	}
-	fmt.Fprintf(&b, "omitted ~%d tokens.%s]", ApproximateTokens(omitted), truncHint(hint))
-	if headTail {
-		b.WriteString("\n\n")
-	}
-	return b.String()
-}
-
-func toolOutputFullyOmitted(content string) bool {
-	return strings.HasPrefix(content, toolOutputFullOmissionPrefix)
-}
-
-// ApproximateTokens estimates token count from a character/byte count using
-// the standard ~4 chars-per-token heuristic. It is intentionally rough; all
-// callers use it only for sizing/truncation decisions, not billing.
-func ApproximateTokens(n int) int {
-	if n <= 0 {
-		return 0
-	}
-	return max(1, (n+3)/4)
-}
-
 func messageEmpty(msg api.Message) bool {
 	return msg.Content == "" && msg.Thinking == "" && len(msg.ToolCalls) == 0
-}
-
-// recordCompaction journals one compaction fact; raw history stays append-
-// only around it.
-func (s *Session) recordCompaction(runID, chatID string, trigger CompactionTrigger, summary string) error {
-	if s == nil || s.Journal == nil {
-		return nil
-	}
-	return s.Journal.RecordCompaction(CompactionRecord{RunID: runID, SessionID: chatID, Trigger: string(trigger), Summary: summary})
 }
 
 // flushRawSegment journals the run's messages added since the last flush
