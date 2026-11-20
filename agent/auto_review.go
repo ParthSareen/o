@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -328,6 +329,9 @@ func (p AutoReviewPrompter) PromptApproval(ctx context.Context, req ApprovalRequ
 	escalated.DeniedReview = approval.Review
 	human, herr := p.next(ctx, escalated)
 	if herr != nil {
+		if ctx.Err() != nil {
+			return Approval{}, herr
+		}
 		return approval, nil
 	}
 	human.Review = approval.Review
@@ -433,13 +437,22 @@ func autoReviewStaticallySafe(req ApprovalRequest) bool {
 			// Relative reads are confined by the tool. Grade absolute paths
 			// rather than trusting the tool's resolver here.
 			path, _ := call.Args["path"].(string)
-			if filepath.IsAbs(strings.TrimSpace(path)) {
+			path = strings.TrimSpace(path)
+			if filepath.IsAbs(path) || sensitivePath(path) {
 				return false
 			}
 		case "bash":
 			command, _ := call.Args["command"].(string)
 			if !bashCommandReadOnly(command) {
 				return false
+			}
+			for _, arg := range bashCommandArgs(command) {
+				if _, value, ok := strings.Cut(arg, "="); ok {
+					arg = value
+				}
+				if sensitivePath(arg) || escapesWorkingDir(req.WorkingDir, arg) {
+					return false
+				}
 			}
 		default:
 			return false
@@ -460,6 +473,88 @@ var findUnsafeFlags = map[string]bool{
 	"-delete": true, "-exec": true, "-execdir": true, "-ok": true,
 	"-okdir": true, "-fprint": true, "-fprint0": true, "-fprintf": true,
 	"-fls": true, "-files0-from": true,
+}
+
+// sensitivePathNames are secret-bearing files that a read-only command may
+// still not read unreviewed: their contents would go to the model.
+var sensitivePathNames = []string{
+	".env", ".env.*", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
+	"*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_dsa*", "id_ecdsa*",
+	"id_ed25519*", "credentials", "credentials.*", "*.kdbx",
+}
+
+var sensitiveDirNames = map[string]bool{".ssh": true, ".aws": true, ".gnupg": true, ".kube": true, ".docker": true}
+
+// sensitivePath reports whether path names a secret-bearing file or lives
+// under a credentials directory.
+func sensitivePath(path string) bool {
+	parts := strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts[:len(parts)-1] {
+		if sensitiveDirNames[part] {
+			return true
+		}
+	}
+	base := parts[len(parts)-1]
+	if sensitiveDirNames[base] {
+		return true
+	}
+	for _, pattern := range sensitivePathNames {
+		if ok, _ := filepath.Match(pattern, base); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// escapesWorkingDir reports whether a relative path argument resolves, via
+// symlinks, outside the working directory (the process directory when
+// unset, matching where tools run). Paths that do not exist cannot leak
+// anything and stay safe.
+func escapesWorkingDir(workingDir, arg string) bool {
+	if arg == "" || strings.HasPrefix(arg, "-") {
+		return false
+	}
+	if workingDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return true
+		}
+		workingDir = wd
+	}
+	root, err := filepath.EvalSymlinks(workingDir)
+	if err != nil {
+		root = filepath.Clean(workingDir)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, arg))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, resolved)
+	return err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// bashCommandArgs returns the literal arguments of every command in a
+// command that bashCommandReadOnly accepted.
+func bashCommandArgs(command string) []string {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil
+	}
+	var args []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok {
+			for _, word := range call.Args[1:] {
+				if arg, ok := literalWord(word); ok {
+					args = append(args, arg)
+				}
+			}
+		}
+		return true
+	})
+	return args
 }
 
 // bashCommandReadOnly reports whether the command is provably read-only:

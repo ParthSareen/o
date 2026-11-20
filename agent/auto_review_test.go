@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -134,6 +136,21 @@ func TestAutoReviewStaticallySafe(t *testing.T) {
 		{
 			name: "unsafe bash",
 			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "rm -rf build"}}}},
+			want: false,
+		},
+		{
+			name: "secret read is graded",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "read", Args: map[string]any{"path": "config/.env.local"}}}},
+			want: false,
+		},
+		{
+			name: "bash secret read is graded",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "cat .env"}}}},
+			want: false,
+		},
+		{
+			name: "bash read under credentials dir is graded",
+			req:  ApprovalRequest{Calls: []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": "ls deploy/.ssh"}}}},
 			want: false,
 		},
 		{
@@ -551,6 +568,14 @@ func (p recordingPrompter) PromptApproval(_ context.Context, req ApprovalRequest
 	return p.approval, nil
 }
 
+// cancelingPrompter cancels the run while the human prompt is open.
+type cancelingPrompter struct{ cancel context.CancelFunc }
+
+func (p cancelingPrompter) PromptApproval(ctx context.Context, _ ApprovalRequest) (Approval, error) {
+	p.cancel()
+	return Approval{}, ctx.Err()
+}
+
 func TestAutoReviewPrompterModes(t *testing.T) {
 	bashCall := ApprovalToolCall{ToolName: "bash", Args: map[string]any{"command": "go test ./..."}}
 	req := ApprovalRequest{WorkingDir: "/repo", Calls: []ApprovalToolCall{bashCall}}
@@ -632,6 +657,20 @@ func TestAutoReviewPrompterModes(t *testing.T) {
 		}
 		if approval.Review == nil || approval.Review.Outcome != "deny" {
 			t.Fatalf("escalated approval should keep the review verdict, got %+v", approval.Review)
+		}
+	})
+
+	t.Run("canceled escalation propagates", func(t *testing.T) {
+		state := &ApprovalState{}
+		state.SetMode(ApprovalModeAuto)
+		ctx, cancel := context.WithCancel(context.Background())
+		next := cancelingPrompter{cancel: cancel}
+		client := &fakeClient{responses: [][]api.ChatResponse{
+			{decisionResponse("deny", "high", "out of scope")},
+		}}
+		prompter := AutoReviewPrompter{Reviewer: &AutoReviewer{Client: client, Model: "m"}, State: state, Next: next, EscalateDeny: true}
+		if _, err := prompter.PromptApproval(ctx, req); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled human prompt should surface the cancel, got %v", err)
 		}
 	})
 
@@ -812,5 +851,28 @@ func TestSessionEmitsApprovalReviewedEvent(t *testing.T) {
 		if event.Type == EventApprovalReviewed && firstToolStarted >= 0 && i > firstToolStarted {
 			t.Fatal("approval_reviewed should be emitted before tool_started")
 		}
+	}
+}
+
+func TestAutoReviewStaticallySafeSymlinkEscape(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "notes.txt"), []byte("private"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wd, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "notes.txt"), filepath.Join(wd, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	bash := func(command string) ApprovalRequest {
+		return ApprovalRequest{WorkingDir: wd, Calls: []ApprovalToolCall{{ToolName: "bash", Args: map[string]any{"command": command}}}}
+	}
+	if !autoReviewStaticallySafe(bash("cat main.go")) {
+		t.Fatal("in-tree read should stay in the static tier")
+	}
+	if autoReviewStaticallySafe(bash("cat link.txt")) {
+		t.Fatal("symlink escaping the working directory should be graded")
 	}
 }
