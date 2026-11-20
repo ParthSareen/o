@@ -78,10 +78,9 @@ func (r *Read) ApprovalScopeIn(args map[string]any, workingDir string) string {
 }
 
 func (r *Read) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
-	// TODO: use shared agent.RequiredStringArg / agent.OptionalIntArg for args (see agent package cleanup plan).
-	path, ok := args["path"].(string)
-	if !ok || strings.TrimSpace(path) == "" {
-		return agent.ToolResult{}, fmt.Errorf("path parameter is required")
+	path, err := agent.RequiredStringArg(args, "path")
+	if err != nil {
+		return agent.ToolResult{}, err
 	}
 
 	file, info, err := openRegularFile(toolCtx.WorkingDir, path, true)
@@ -235,10 +234,9 @@ func (e *Edit) ApprovalScopeIn(args map[string]any, workingDir string) string {
 }
 
 func (e *Edit) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
-	// TODO: use shared agent.RequiredStringArg / agent.OptionalBoolArg for args (see agent package cleanup plan).
-	path, ok := args["path"].(string)
-	if !ok || strings.TrimSpace(path) == "" {
-		return agent.ToolResult{}, fmt.Errorf("path parameter is required")
+	path, err := agent.RequiredStringArg(args, "path")
+	if err != nil {
+		return agent.ToolResult{}, err
 	}
 
 	edits, replaceAll, err := parseEditArgs(args)
@@ -359,7 +357,7 @@ type editMatch struct {
 // top-level old_text/new_text args as well as stringified JSON, mirroring
 // the pi coding agent's argument handling.
 func parseEditArgs(args map[string]any) ([]editReplacement, bool, error) {
-	replaceAll, _ := args["replace_all"].(bool)
+	replaceAll, _ := agent.OptionalBoolArg(args, "replace_all")
 
 	var edits []editReplacement
 	if raw, ok := args["edits"]; ok {
@@ -943,13 +941,13 @@ type readSelection struct {
 func readSelectionFromArgs(args map[string]any) (readSelection, error) {
 	selection := readSelection{start: 1}
 
-	if start, ok, err := intReadArg(args, "start"); err != nil {
+	if start, ok, err := agent.OptionalIntArg(args, "start"); err != nil {
 		return readSelection{}, err
 	} else if ok {
 		selection.enabled = true
 		selection.start = start
 	}
-	if end, ok, err := intReadArg(args, "end"); err != nil {
+	if end, ok, err := agent.OptionalIntArg(args, "end"); err != nil {
 		return readSelection{}, err
 	} else if ok {
 		selection.enabled = true
@@ -994,36 +992,6 @@ func readLineSelection(file *os.File, selection readSelection) (string, error) {
 		lineNo++
 	}
 	return b.String(), nil
-}
-
-func intReadArg(args map[string]any, key string) (int, bool, error) {
-	value, ok := args[key]
-	if !ok {
-		return 0, false, nil
-	}
-	switch v := value.(type) {
-	case int:
-		return v, true, nil
-	case int64:
-		return int(v), true, nil
-	case float64:
-		if v != float64(int(v)) {
-			return 0, true, fmt.Errorf("%s must be a whole number", key)
-		}
-		return int(v), true, nil
-	case string:
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return 0, false, nil
-		}
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return 0, true, fmt.Errorf("%s must be a whole number", key)
-		}
-		return n, true, nil
-	default:
-		return 0, true, fmt.Errorf("%s must be a whole number", key)
-	}
 }
 
 func plural(n int) string {

@@ -53,13 +53,12 @@ func (w *WebSearch) RequiresApproval(map[string]any) bool {
 }
 
 func (w *WebSearch) Execute(ctx context.Context, _ agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
-	// TODO: use shared agent.RequiredStringArg for the "query" parameter (see agent package cleanup plan).
 	if internalcloud.Disabled() {
 		return agent.ToolResult{}, errors.New(internalcloud.DisabledError("web search is unavailable"))
 	}
-	query, ok := args["query"].(string)
-	if !ok || strings.TrimSpace(query) == "" {
-		return agent.ToolResult{}, fmt.Errorf("query parameter is required")
+	query, err := agent.RequiredStringArg(args, "query")
+	if err != nil {
+		return agent.ToolResult{}, err
 	}
 
 	client, err := api.ClientFromEnvironment()
@@ -131,13 +130,12 @@ func (w *WebFetch) RequiresApproval(map[string]any) bool {
 }
 
 func (w *WebFetch) Execute(ctx context.Context, _ agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
-	// TODO: use shared agent.RequiredStringArg for the "url" parameter (see agent package cleanup plan).
 	if internalcloud.Disabled() {
 		return agent.ToolResult{}, errors.New(internalcloud.DisabledError("web fetch is unavailable"))
 	}
-	urlStr, ok := args["url"].(string)
-	if !ok || strings.TrimSpace(urlStr) == "" {
-		return agent.ToolResult{}, fmt.Errorf("url parameter is required")
+	urlStr, err := agent.RequiredStringArg(args, "url")
+	if err != nil {
+		return agent.ToolResult{}, err
 	}
 	parsed, err := url.Parse(urlStr)
 	if err != nil {

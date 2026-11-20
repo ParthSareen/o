@@ -100,10 +100,9 @@ func (b *Bash) ApprovalScopeIn(args map[string]any, workingDir string) string {
 }
 
 func (b *Bash) Execute(ctx context.Context, toolCtx agent.ToolContext, args map[string]any) (agent.ToolResult, error) {
-	// TODO: use shared agent.RequiredStringArg for the "command" parameter (see agent package cleanup plan).
-	command, ok := args["command"].(string)
-	if !ok || strings.TrimSpace(command) == "" {
-		return agent.ToolResult{}, fmt.Errorf("command parameter is required")
+	command, err := agent.RequiredStringArg(args, "command")
+	if err != nil {
+		return agent.ToolResult{}, err
 	}
 	if err := rejectUnsafeShellCommand(command); err != nil {
 		return agent.ToolResult{}, err

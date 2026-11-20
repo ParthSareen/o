@@ -35,13 +35,7 @@ const (
 // (tail/grep the log, cat the exit record); completions and poll
 // publications are reported to the session via DrainCompletions, which the
 // run loop turns into synthetic notices, and pushed mid-run via
-// BackgroundSignals.
-//
-// TODO(lifecycle): Close is not yet wired into session/process teardown —
-// registries are built in agentToolsRegistry with no destruction hook. Until
-// then, tasks orphaned at process exit keep running on Unix; on Windows the
-// job object's KILL_ON_JOB_CLOSE handles it. Wire Close into headless/TUI/
-// pipe teardown as a follow-up.
+// BackgroundSignals. Callers tear down the manager through Registry.Close.
 type BackgroundManager struct {
 	mu         sync.Mutex
 	tasks      map[string]*BackgroundTask
