@@ -1,6 +1,7 @@
 package sessionstore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -464,4 +465,55 @@ func TestMigrationRepeatableUpgradesLegacyDB(t *testing.T) {
 		}
 	}
 	_ = store1.Close()
+}
+
+// erroringChatClient fails the first call with err, then answers "ok".
+type erroringChatClient struct {
+	err   error
+	calls int
+}
+
+func (c *erroringChatClient) Chat(_ context.Context, _ *api.ChatRequest, fn api.ChatResponseFunc) error {
+	c.calls++
+	if c.calls == 1 {
+		return c.err
+	}
+	return fn(api.ChatResponse{Message: api.Message{Role: "assistant", Content: "ok"}, Done: true})
+}
+
+// TestJournalModelErrorReleasesRunLock pins that a run failing on a model
+// error still commits a terminal state, so the same process can run the
+// session again instead of being rejected as busy.
+func TestJournalModelErrorReleasesRunLock(t *testing.T) {
+	store := openJournalStore(t)
+	sess, err := store.CreateSession("test-model", "", "system", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &agent.Session{
+		Client:  &erroringChatClient{err: api.StatusError{StatusCode: 404, ErrorMessage: "model not found"}},
+		Journal: store,
+	}
+	run := func(prompt string) (*agent.RunResult, error) {
+		return session.Run(context.Background(), agent.RunOptions{
+			ChatID:      sess.ID,
+			Model:       "test-model",
+			NewMessages: []api.Message{{Role: "user", Content: prompt}},
+		})
+	}
+
+	first, err := run("first")
+	if err == nil {
+		t.Fatal("first run should fail with the model error")
+	}
+	if first == nil || !first.Committed {
+		t.Fatalf("failed run should commit a terminal state, got %+v", first)
+	}
+	if _, err := run("second"); err != nil {
+		var busy *agent.RunBusyError
+		if errors.As(err, &busy) {
+			t.Fatalf("run lock leaked after model error: %v", err)
+		}
+		t.Fatalf("second run: %v", err)
+	}
 }

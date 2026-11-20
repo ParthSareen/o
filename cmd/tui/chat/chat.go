@@ -561,7 +561,7 @@ func (m chatModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.result == nil {
-			m.finishLiveMessagesForStoppedRun(msg.newMessagesPersisted, msg.persistedMessages)
+			m.finishLiveMessagesForStoppedRun(msg.runEmitted, msg.persistedMessages)
 		}
 		if wasCanceling || isChatContextCanceledError(msg.err) {
 			m.status = "Tell the model what to do instead."
@@ -626,7 +626,7 @@ func (m chatModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.Update(chatCompactDoneMsg{err: context.Canceled})
 		}
 		if m.running {
-			return m.Update(chatRunDoneMsg{err: context.Canceled, newMessagesPersisted: true})
+			return m.Update(chatRunDoneMsg{err: context.Canceled, runEmitted: true})
 		}
 		return m, nil
 
@@ -1532,15 +1532,15 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 	m.events = events
 	m.approvalController = newChatApprovalController(events, m.ensureApprovalState())
 
-	var newMessagesPersisted bool
-	eventSinks := []coreagent.EventSink{chatEventSink{ctx: runCtx, ch: events, newMessagesPersisted: &newMessagesPersisted}}
+	var runEmitted bool
+	eventSinks := []coreagent.EventSink{chatEventSink{ctx: runCtx, ch: events, runEmitted: &runEmitted}}
 	eventSinks = append(eventSinks, m.opts.EventSinks...)
 
 	var journal coreagent.RunJournal
 	if m.store != nil && m.chatID != "" {
 		journal = m.store
 	}
-	session := &coreagent.Session{
+	session := coreagent.NewSession(coreagent.SessionConfig{
 		Client:           m.opts.Client,
 		EventSinks:       eventSinks,
 		Tools:            m.opts.Tools,
@@ -1552,8 +1552,7 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 		SupportsImages:   m.opts.MultiModal,
 		Journal:          journal,
 		Compactor:        m.opts.Compactor,
-		Background:       m.opts.Tools.BackgroundSource(),
-	}
+	})
 	opts := coreagent.RunOptions{
 		ChatID:       m.chatID,
 		Model:        m.opts.Model,
@@ -1570,12 +1569,15 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 	persistedMessages := make([]api.Message, 0, len(m.messages)+len(newMessages))
 	persistedMessages = append(persistedMessages, slices.Clone(m.messages)...)
 	persistedMessages = append(persistedMessages, slices.Clone(newMessages)...)
+	// Wait on the chat's lifetime, not the run's: a canceled run still has a
+	// result (and committed history) the chat must receive.
+	chatCtx := m.ctx
 	go func() {
 		defer close(events)
 		result, err := session.Run(runCtx, opts)
 		select {
-		case events <- chatRunDoneMsg{result: result, err: err, newMessagesPersisted: newMessagesPersisted, persistedMessages: persistedMessages}:
-		case <-runCtx.Done():
+		case events <- chatRunDoneMsg{result: result, err: err, runEmitted: runEmitted, persistedMessages: persistedMessages}:
+		case <-chatCtx.Done():
 		}
 	}()
 
@@ -1587,6 +1589,19 @@ func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newM
 
 func (m *chatModel) finishLiveMessagesForStoppedRun(promote bool, persistedMessages []api.Message) {
 	if len(m.liveMessages) == 0 {
+		return
+	}
+	if m.store != nil && m.chatID != "" {
+		// A journaled run commits its own projection (or none, if it never
+		// started); the store is the source of truth. Syncing the in-memory
+		// copy here could truncate what the journal committed.
+		if sess, err := m.store.LoadSession(m.chatID); err == nil {
+			m.messages = sess.Messages
+		}
+		m.maybeNameSession(m.messages)
+		m.liveMessages = nil
+		m.contextTokens = m.estimatePromptTokens(m.messages, "")
+		m.contextEstimate = true
 		return
 	}
 	if promote {

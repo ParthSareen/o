@@ -198,50 +198,15 @@ func runPipeSession(ctx context.Context, client coreagent.ChatClient, opts *agen
 	// run. --auto swaps the blanket grant for review-model grading.
 	// --pipe-approvals opens that channel: approvals are asked over the wire
 	// (falling back to review-model grading first when --auto is set).
-	state, approvalPrompter := headlessApproval(client, opts)
 	var approver *pipeApprovalPrompter
+	var next coreagent.ApprovalPrompter
 	if opts.PipeApprovals {
-		var journal coreagent.RunJournal
-		if store != nil {
-			journal = store
-		}
-		approver = newPipeApprovalPrompter(sink, journal)
-		if opts.AutoReview {
-			state = &coreagent.ApprovalState{}
-			state.SetMode(coreagent.ApprovalModeAuto)
-			approvalPrompter = &coreagent.AutoReviewPrompter{
-				Reviewer: &coreagent.AutoReviewer{
-					Client: client,
-					Model:  coreagent.ResolveAutoReviewModel(opts.ReviewModel, opts.Model),
-				},
-				State: state,
-				Next:  approver,
-			}
-		} else {
-			state = &coreagent.ApprovalState{}
-			approvalPrompter = approver
-		}
+		approver = newPipeApprovalPrompter(sink, storeJournal(store))
+		next = approver
 	}
+	state, approvalPrompter := cliApproval(client, opts, next)
 
-	session := &coreagent.Session{
-		Client:           client,
-		EventSinks:       []coreagent.EventSink{sink},
-		Tools:            registry,
-		Skills:           catalog,
-		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: approvalPrompter,
-		ApprovalState:    state,
-		WorkingDir:       workingDir,
-		SupportsImages:   opts.MultiModal,
-		Compactor: &coreagent.SimpleCompactor{
-			Client:  client,
-			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
-		},
-		Background: registry.BackgroundSource(),
-	}
-	if store != nil {
-		session.Journal = store
-	}
+	session := newCLISession(client, opts, registry, catalog, workingDir, sink, state, approvalPrompter, storeJournal(store))
 
 	r := &pipeRunner{
 		opts:         opts,

@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -161,6 +163,7 @@ type run struct {
 	toolBatch *toolBatchResult
 
 	consecutiveModelErrors  int
+	modelRetries            int
 	toolRounds              int
 	maxToolRounds           int
 	backgroundContinuations int
@@ -326,23 +329,63 @@ func (s *Session) Run(ctx context.Context, opts RunOptions) (*RunResult, error) 
 func (r *run) run(ctx context.Context) (*RunResult, error) {
 	for {
 		r.injectPendingBackgroundEvents()
+		var err error
 		switch r.phase {
 		case runPhaseModel:
-			if err := r.runModelStep(ctx); err != nil {
-				return nil, err
-			}
+			err = r.runModelStep(ctx)
 		case runPhaseTools:
-			if err := r.runToolStep(ctx); err != nil {
-				return nil, err
-			}
+			err = r.runToolStep(ctx)
 		case runPhaseCompact:
-			if err := r.runCompactionStep(ctx); err != nil {
-				return nil, err
-			}
+			err = r.runCompactionStep(ctx)
 		case runPhaseDone:
 			return r.finishRun(ctx)
 		}
+		if err != nil {
+			r.abort(ctx, err)
+		}
 	}
+}
+
+// abort settles a run whose step failed so it still reaches finishRun: an
+// admitted run must commit a terminal state, or its run lock stays held by
+// this process and every later prompt in the session is rejected as busy.
+// Tool calls left unanswered by the failed step get synthetic results so the
+// committed history stays protocol-valid.
+func (r *run) abort(ctx context.Context, err error) {
+	r.messages = append(r.messages, unansweredToolResults(r.messages, "Tool execution aborted: "+err.Error())...)
+	if isContextCanceledError(ctx, err) {
+		r.finishCanceled()
+		return
+	}
+	r.finishError(err)
+}
+
+// unansweredToolResults returns a tool result for every tool call in the
+// trailing assistant turn that has no result yet.
+func unansweredToolResults(messages []api.Message, content string) []api.Message {
+	last := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			last = i
+			break
+		}
+	}
+	if last < 0 || len(messages[last].ToolCalls) == 0 {
+		return nil
+	}
+	answered := make(map[string]bool)
+	for _, msg := range messages[last+1:] {
+		if msg.Role == "tool" {
+			answered[msg.ToolCallID] = true
+		}
+	}
+	var out []api.Message
+	for _, call := range messages[last].ToolCalls {
+		if !answered[call.ID] {
+			out = append(out, toolMessage(call.Function.Name, call.ID, content))
+		}
+	}
+	return out
 }
 
 // validateRun checks the preconditions for a run.
@@ -401,18 +444,34 @@ func (r *run) runModelStep(ctx context.Context) error {
 	assistant, pendingToolCalls, canceled, err := r.session.chatRound(ctx, r.runID, opts, r.messages, &r.latest)
 	if err != nil {
 		var statusErr api.StatusError
-		if errors.As(err, &statusErr) && statusErr.StatusCode >= 500 && r.consecutiveModelErrors < 2 {
+		switch {
+		case errors.As(err, &statusErr) && isToolCallParseError(statusErr) && r.consecutiveModelErrors < 2:
+			// The model produced output the server could not parse; tell it so
+			// it can correct itself, rather than resending the same request.
 			r.consecutiveModelErrors++
 			r.messages = append(r.messages, api.Message{
 				Role:    "user",
 				Content: fmt.Sprintf("Your previous response caused an error: %s\n\nPlease try again with a valid response.", statusErr.ErrorMessage),
 			})
 			return nil
+		case messageEmpty(assistant) && isTransientModelError(err) && r.modelRetries < len(modelRetryDelays):
+			// Nothing streamed, so the same request can be resent without
+			// leaving partial output behind in any UI.
+			delay := modelRetryDelays[r.modelRetries]
+			r.modelRetries++
+			_ = r.session.emit(newModelRetry(meta, r.modelRetries, delay, err.Error()))
+			select {
+			case <-time.After(delay):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		r.session.emit(newErrorEvent(meta, err.Error()))
 		return err
 	}
 	r.consecutiveModelErrors = 0
+	r.modelRetries = 0
 	r.assistant = assistant
 	r.pendingToolCalls = pendingToolCalls
 	r.canceled = canceled
@@ -428,7 +487,7 @@ func (r *run) runModelStep(ctx context.Context) error {
 	}
 
 	if canceled {
-		skipped, skipErr := r.session.skipToolCalls(ctx, r.runID, opts, pendingToolCalls, "Tool execution skipped because the run was canceled.")
+		skipped, skipErr := r.session.skipToolCalls(ctx, r.runID, opts, r.budget, r.messages, pendingToolCalls, toolSkippedCanceled)
 		if skipErr != nil {
 			r.session.emit(newErrorEvent(meta, skipErr.Error()))
 			return skipErr
@@ -457,7 +516,7 @@ func (r *run) runModelStep(ctx context.Context) error {
 
 	if r.maxToolRounds >= 0 && r.toolRounds >= r.maxToolRounds {
 		content := fmt.Sprintf("Tool execution skipped because the max tool-round limit of %d was reached. Send another message to continue.", r.maxToolRounds)
-		toolMessages, skipErr := r.session.skipToolCalls(ctx, r.runID, opts, pendingToolCalls, content)
+		toolMessages, skipErr := r.session.skipToolCalls(ctx, r.runID, opts, r.budget, r.messages, pendingToolCalls, content)
 		if skipErr != nil {
 			r.session.emit(newErrorEvent(meta, skipErr.Error()))
 			return skipErr
@@ -471,6 +530,39 @@ func (r *run) runModelStep(ctx context.Context) error {
 
 	r.phase = runPhaseTools
 	return nil
+}
+
+// modelRetryDelays is the backoff between resends of a model request that
+// failed transiently; its length caps the retries per model step.
+var modelRetryDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+// isToolCallParseError reports a server-side failure to parse the model's
+// tool-call output. Resending the same request would likely fail the same
+// way, so the model is asked to correct itself instead.
+func isToolCallParseError(err api.StatusError) bool {
+	if err.StatusCode < 500 {
+		return false
+	}
+	msg := strings.ToLower(err.ErrorMessage)
+	return strings.Contains(msg, "tool call") && (strings.Contains(msg, "pars") || strings.Contains(msg, "invalid"))
+}
+
+// isTransientModelError reports failures worth resending unchanged: server
+// errors, rate limits, timeouts, and dropped connections.
+func isTransientModelError(err error) bool {
+	var statusErr api.StatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests:
+			return true
+		}
+		return statusErr.StatusCode >= 500
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (r *run) runToolStep(ctx context.Context) error {
@@ -508,7 +600,9 @@ func (r *run) runCompactionStep(ctx context.Context) error {
 	}
 	r.messages = compactedMessages
 	if compacted {
-		r.flushRawSegment()
+		// The compacted projection is not raw history; the next segment
+		// starts after it.
+		r.rawBaseline = len(r.messages)
 	}
 	if err != nil {
 		r.session.emit(newErrorEvent(meta, err.Error()))
@@ -560,8 +654,16 @@ func (r *run) finishRun(ctx context.Context) (*RunResult, error) {
 	result := &RunResult{Messages: r.messages, Latest: r.latest, WorkingDir: r.session.WorkingDir}
 	var commitSeq int64
 	if r.admitted != nil && r.session.Journal != nil {
-		r.flushRawSegment()
 		if err := r.flushRawSegment(); err != nil {
+			// The raw record is incomplete, so the run cannot finish cleanly,
+			// but it must still reach a terminal state to release its lock.
+			_, _ = r.session.Journal.CommitRun(RunTerminal{
+				RunID:   r.runID,
+				ChatID:  r.opts.ChatID,
+				Status:  RunStatusFailed,
+				Err:     err.Error(),
+				History: r.messages,
+			})
 			return result, err
 		}
 		commit, err := r.session.Journal.CommitRun(RunTerminal{
@@ -846,285 +948,6 @@ func buildChatRequest(opts RunOptions, messages []api.Message, tools api.Tools) 
 		req.Tools = tools
 	}
 	return req
-}
-
-func (s *Session) executeToolCalls(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, calls []api.ToolCall, blocked map[string]BlockedTool, denied map[string]string) (toolBatchResult, error) {
-	meta := newEventMetadata(runID, opts)
-	batch := toolBatchResult{
-		messages: make([]api.Message, 0, len(calls)),
-	}
-	// Pre-compute the full-history token estimate once per batch instead of
-	// re-marshaling the entire history for each tool call. Per-call deltas
-	// (tool messages already appended this batch) are tracked in batchTokens
-	// and added to historyTokens for a lightweight running total.
-	historyTokens := budget.Estimate(messages)
-	batchTokens := 0
-
-	type plannedToolCall struct {
-		call       api.ToolCall
-		tool       Tool
-		toolName   string
-		args       map[string]any
-		workingDir string
-	}
-	plans := make([]plannedToolCall, 0, len(calls))
-	batchWorkingDir := s.currentWorkingDir()
-	approvalReq := ApprovalRequest{RunID: runID, WorkingDir: batchWorkingDir, Task: latestUserMessageContent(messages)}
-	for _, call := range calls {
-		toolName := call.Function.Name
-		args := call.Function.Arguments.ToMap()
-		tool, ok := s.Tools.Get(toolName)
-		plans = append(plans, plannedToolCall{
-			call:       call,
-			tool:       tool,
-			toolName:   toolName,
-			args:       args,
-			workingDir: batchWorkingDir,
-		})
-		if _, wasDenied := denied[ToolArgsKey(toolName, args)]; wasDenied {
-			// Already refused this run; the execution loop hands the refusal
-			// back without another prompt.
-			continue
-		}
-		if ok && s.needsApproval(tool, toolName, args, batchWorkingDir) {
-			approvalReq.AddToolCall(call.ID, toolName, toolApprovalScope(tool, toolName, args, batchWorkingDir), args)
-		}
-	}
-
-	if len(approvalReq.Calls) > 0 {
-		approvalResult, err := s.authorizeToolCalls(ctx, approvalReq)
-		if err != nil {
-			if ctx.Err() != nil {
-				skipped, skipErr := s.skipToolCalls(ctx, runID, opts, calls, "Tool execution skipped because the run was canceled.")
-				if skipErr != nil {
-					return toolBatchResult{}, skipErr
-				}
-				batch.messages = append(batch.messages, skipped...)
-				batch.stop = toolExecutionCanceled
-				return batch, nil
-			}
-			return toolBatchResult{}, err
-		}
-		if approvalResult.Review != nil {
-			if emitErr := s.emit(newApprovalReviewed(meta, approvalResult.Review)); emitErr != nil {
-				return toolBatchResult{}, emitErr
-			}
-		}
-		if !approvalResult.Allow {
-			content := deniedToolContent(approvalResult.Reason, approvalResult.Continue)
-			if approvalResult.Continue && denied != nil {
-				// A continuing deny refuses the calls the human saw for the rest
-				// of the run, so a model that retries them gets the refusal back
-				// instead of re-prompting.
-				for _, call := range approvalReq.Calls {
-					denied[ToolArgsKey(call.ToolName, call.Args)] = content
-				}
-			}
-			for _, plan := range plans {
-				// Denial is a settled outcome: journal intent and decision
-				// before publishing it.
-				if err := s.journalToolIntent(runID, plan.call.ID, plan.tool, plan.toolName, plan.args); err != nil {
-					return toolBatchResult{}, journalErr(meta, "tool intent", err)
-				}
-				if err := s.journalToolOutcome(runID, plan.call.ID, ToolJournalDenied, "", content); err != nil {
-					return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-				}
-				msg := budget.FitToolResult(plan.toolName, plan.call.ID, content, historyTokens+batchTokens, CeilingThreshold)
-				batch.messages = append(batch.messages, msg)
-				batchTokens += estimateMessagesTokens([]api.Message{msg})
-				deniedContent := msg.Content
-				if emitErr := s.emit(newToolFinished(meta, "denied", plan.call.ID, plan.toolName, "", plan.args, deniedContent, deniedContent)); emitErr != nil {
-					return toolBatchResult{}, emitErr
-				}
-			}
-			if !approvalResult.Continue {
-				batch.stop = toolExecutionDenied
-			}
-			return batch, nil
-		}
-	}
-
-	for i, plan := range plans {
-		call := plan.call
-		toolName := plan.toolName
-		args := plan.args
-		if ctx.Err() != nil {
-			skipped, skipErr := s.skipToolCalls(ctx, runID, opts, calls[i:], "Tool execution skipped because the run was canceled.")
-			if skipErr != nil {
-				return toolBatchResult{}, skipErr
-			}
-			batch.messages = append(batch.messages, skipped...)
-			batch.stop = toolExecutionCanceled
-			return batch, nil
-		}
-		if plan.tool == nil {
-			if err := s.journalToolIntent(runID, call.ID, nil, toolName, args); err != nil {
-				return toolBatchResult{}, journalErr(meta, "tool intent", err)
-			}
-			if err := s.journalToolOutcome(runID, call.ID, ToolJournalFailed, "", fmt.Sprintf("unknown tool: %s", toolName)); err != nil {
-				return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-			}
-			content := fmt.Sprintf("Error: unknown tool: %s", toolName)
-			msg := budget.FitToolResult(toolName, call.ID, content, historyTokens+batchTokens, CeilingThreshold)
-			batch.messages = append(batch.messages, msg)
-			batchTokens += estimateMessagesTokens([]api.Message{msg})
-			content = msg.Content
-			if toolOutputFullyOmitted(content) {
-				batch.overflows = append(batch.overflows, toolOutputOverflow{toolName: toolName, toolCallID: call.ID, content: fmt.Sprintf("Error: unknown tool: %s", toolName)})
-			}
-			if emitErr := s.emit(newToolFinished(meta, "failed", call.ID, toolName, "", args, content, fmt.Sprintf("unknown tool: %s", toolName))); emitErr != nil {
-				return toolBatchResult{}, emitErr
-			}
-			continue
-		}
-
-		// Journal the intent of this attempt (blocked calls included, as
-		// audit evidence) before any further work.
-		if err := s.journalToolIntent(runID, call.ID, plan.tool, toolName, args); err != nil {
-			return toolBatchResult{}, journalErr(meta, "tool intent", err)
-		}
-		if reason, wasDenied := denied[ToolArgsKey(toolName, args)]; wasDenied {
-			// The human refused this exact call earlier in the run; hand the
-			// refusal back as a tool result without prompting again.
-			if err := s.journalToolOutcome(runID, call.ID, ToolJournalDenied, "", reason); err != nil {
-				return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-			}
-			msg := budget.FitToolResult(toolName, call.ID, reason, historyTokens+batchTokens, CeilingThreshold)
-			batch.messages = append(batch.messages, msg)
-			batchTokens += estimateMessagesTokens([]api.Message{msg})
-			if emitErr := s.emit(newToolFinished(meta, ToolStatusDenied, call.ID, toolName, plan.workingDir, args, msg.Content, reason)); emitErr != nil {
-				return toolBatchResult{}, emitErr
-			}
-			continue
-		}
-		if plan.tool != nil {
-			if prior, isBlocked := blocked[ToolArgsKey(toolName, args)]; isBlocked {
-				reason := blockedToolReason(prior)
-				if err := s.journalToolOutcome(runID, call.ID, ToolJournalBlocked, "", reason); err != nil {
-					return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-				}
-				blockedContent := "Error: " + reason + ". Reconcile the interrupted run manually, or retry with a new request."
-				msg := budget.FitToolResult(toolName, call.ID, blockedContent, historyTokens+batchTokens, CeilingThreshold)
-				batch.messages = append(batch.messages, msg)
-				batchTokens += estimateMessagesTokens([]api.Message{msg})
-				content := msg.Content
-				if toolOutputFullyOmitted(content) {
-					batch.overflows = append(batch.overflows, toolOutputOverflow{toolName: toolName, toolCallID: call.ID, content: blockedContent})
-				}
-				if emitErr := s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusSkipped, call.ID, toolName, plan.workingDir, args, content, reason)); emitErr != nil {
-					return toolBatchResult{}, emitErr
-				}
-				continue
-			}
-		}
-
-		if err := s.emit(newToolStarted(meta, call.ID, toolName, plan.workingDir, args)); err != nil {
-			return toolBatchResult{}, err
-		}
-
-		result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: plan.workingDir, SupportsImages: s.SupportsImages, ToolCallID: call.ID}, call)
-		if err != nil {
-			rawContent := fmt.Sprintf("Error: %v", err)
-			if err := s.journalToolOutcome(runID, call.ID, ToolJournalFailed, "", err.Error()); err != nil {
-				return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-			}
-			msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)
-			batch.messages = append(batch.messages, msg)
-			batchTokens += estimateMessagesTokens([]api.Message{msg})
-			content := msg.Content
-			if toolOutputFullyOmitted(content) {
-				batch.overflows = append(batch.overflows, toolOutputOverflow{toolName: toolName, toolCallID: call.ID, content: rawContent})
-			}
-			if emitErr := s.emitIgnoringCanceled(ctx, newToolFinished(meta, "failed", call.ID, toolName, "", args, content, err.Error())); emitErr != nil {
-				return toolBatchResult{}, emitErr
-			}
-			if ctx.Err() != nil {
-				skipped, skipErr := s.skipToolCalls(ctx, runID, opts, calls[i+1:], "Tool execution skipped because the run was canceled.")
-				if skipErr != nil {
-					return toolBatchResult{}, skipErr
-				}
-				batch.messages = append(batch.messages, skipped...)
-				batch.stop = toolExecutionCanceled
-				return batch, nil
-			}
-			continue
-		}
-
-		eventWorkingDir := plan.workingDir
-		if s.applyToolWorkingDir(result.WorkingDir) {
-			eventWorkingDir = s.WorkingDir
-		}
-		rawContent := result.Content
-		if err := s.journalToolOutcome(runID, call.ID, ToolJournalDone, rawContent, ""); err != nil {
-			return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-		}
-
-		msg := budget.FitToolResult(toolName, call.ID, rawContent, historyTokens+batchTokens, CeilingThreshold)
-		msg.Images = result.Images
-		batch.messages = append(batch.messages, msg)
-		batchTokens += estimateMessagesTokens([]api.Message{msg})
-		content := msg.Content
-
-		if toolOutputFullyOmitted(content) {
-			batch.overflows = append(batch.overflows, toolOutputOverflow{toolName: toolName, toolCallID: call.ID, content: rawContent})
-		}
-		if err := s.emitIgnoringCanceled(ctx, newToolFinished(meta, "done", call.ID, toolName, eventWorkingDir, args, content, "")); err != nil {
-			return toolBatchResult{}, err
-		}
-		if ctx.Err() != nil {
-			skipped, skipErr := s.skipToolCalls(ctx, runID, opts, calls[i+1:], "Tool execution skipped because the run was canceled.")
-			if skipErr != nil {
-				return toolBatchResult{}, skipErr
-			}
-			batch.messages = append(batch.messages, skipped...)
-			batch.stop = toolExecutionCanceled
-			return batch, nil
-		}
-	}
-	return batch, nil
-}
-
-func (s *Session) disabledToolCalls(ctx context.Context, runID string, opts RunOptions, budget PromptBudget, messages []api.Message, calls []api.ToolCall) (toolBatchResult, error) {
-	meta := newEventMetadata(runID, opts)
-	batch := toolBatchResult{
-		messages: make([]api.Message, 0, len(calls)),
-	}
-	historyTokens := budget.Estimate(messages)
-	batchTokens := 0
-	for _, call := range calls {
-		toolName := call.Function.Name
-		args := call.Function.Arguments.ToMap()
-		_ = s.journalToolIntent(runID, call.ID, nil, toolName, args)
-		if err := s.journalToolOutcome(runID, call.ID, ToolJournalDisabled, "", ""); err != nil {
-			return toolBatchResult{}, journalErr(meta, "tool outcome", err)
-		}
-		msg := budget.FitToolResult(toolName, call.ID, toolExecutionDisabledMessage, historyTokens+batchTokens, CeilingThreshold)
-		batch.messages = append(batch.messages, msg)
-		batchTokens += estimateMessagesTokens([]api.Message{msg})
-		if emitErr := s.emitIgnoringCanceled(ctx, newToolFinished(meta, "disabled", call.ID, toolName, "", args, msg.Content, msg.Content)); emitErr != nil {
-			return toolBatchResult{}, emitErr
-		}
-	}
-	return batch, nil
-}
-
-func (s *Session) skipToolCalls(ctx context.Context, runID string, opts RunOptions, calls []api.ToolCall, content string) ([]api.Message, error) {
-	meta := newEventMetadata(runID, opts)
-	toolMessages := make([]api.Message, 0, len(calls))
-	for _, call := range calls {
-		toolName := call.Function.Name
-		args := call.Function.Arguments.ToMap()
-		_ = s.journalToolIntent(runID, call.ID, nil, toolName, args)
-		if err := s.journalToolOutcome(runID, call.ID, ToolJournalSkipped, "", content); err != nil {
-			return nil, journalErr(meta, "tool outcome", err)
-		}
-		msg := toolMessage(toolName, call.ID, content)
-		toolMessages = append(toolMessages, msg)
-		if emitErr := s.emitIgnoringCanceled(ctx, newToolFinished(meta, "skipped", call.ID, toolName, "", args, msg.Content, msg.Content)); emitErr != nil {
-			return nil, emitErr
-		}
-	}
-	return toolMessages, nil
 }
 
 func (s *Session) currentWorkingDir() string {
@@ -1493,65 +1316,6 @@ func messageEmpty(msg api.Message) bool {
 	return msg.Content == "" && msg.Thinking == "" && len(msg.ToolCalls) == 0
 }
 
-// journalToolIntent records the intent to invoke one call. A nil tool (or nil
-// journal) records with the conservative non-replay-safe classification.
-func (s *Session) journalToolIntent(runID, callID string, tool Tool, toolName string, args map[string]any) error {
-	if s == nil || s.Journal == nil {
-		return nil
-	}
-	return s.Journal.RecordToolIntent(ToolIntent{
-		RunID:      runID,
-		ToolCallID: callID,
-		Name:       toolName,
-		Args:       args,
-		ReplaySafe: toolReplaySafe(tool),
-	})
-}
-
-// journalToolOutcome records a settled tool-call outcome.
-func (s *Session) journalToolOutcome(runID, callID, status, result, errMsg string) error {
-	if s == nil || s.Journal == nil {
-		return nil
-	}
-	return s.Journal.RecordToolOutcome(ToolOutcome{RunID: runID, ToolCallID: callID, Status: status, Result: result, Err: errMsg})
-}
-
-// journalErr wraps a journal write failure:
-// un-journaled state must not be treated as execution state.
-func journalErr(meta eventMetadata, what string, err error) error {
-	return fmt.Errorf("journal %s: %w", what, err)
-}
-
-// toolReplaySafe reports whether a tool explicitly declares that re-running
-// it with an unknown earlier outcome is safe. Everything unclassified is
-// treated as unsafe.
-func toolReplaySafe(tool Tool) bool {
-	if safe, ok := tool.(ReplaySafeTool); ok {
-		return safe.ReplaySafe()
-	}
-	return false
-}
-
-// blockedToolReason explains why a prior attempt's call is refused.
-func blockedToolReason(blocked BlockedTool) string {
-	return fmt.Sprintf("tool call has an unknown outcome from interrupted run %s (prior call %s); refusing to re-execute automatically", blocked.PriorRunID, blocked.PriorCallID)
-}
-
-// deniedToolContent renders the model-facing result of a refused call. When
-// the run continues past the denial, the text says the tool did not run and
-// that retrying is pointless, because the same call is refused for the rest
-// of the run without another prompt.
-func deniedToolContent(reason string, continuing bool) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "Tool execution denied."
-	}
-	if !continuing {
-		return reason
-	}
-	return reason + " The tool did not run. Do not retry this call; choose another approach or ask the user how to proceed."
-}
-
 // recordCompaction journals one compaction fact; raw history stays append-
 // only around it.
 func (s *Session) recordCompaction(runID, chatID string, trigger CompactionTrigger, summary string) error {
@@ -1573,174 +1337,9 @@ func (r *run) flushRawSegment() error {
 		return nil
 	}
 	segment := append([]api.Message(nil), r.messages[r.rawBaseline:]...)
-	r.rawBaseline = len(r.messages)
 	if err := r.session.Journal.RecordRawSegment(r.runID, segment); err != nil {
 		return fmt.Errorf("record raw segment: %w", err)
 	}
+	r.rawBaseline = len(r.messages)
 	return nil
-}
-
-// nestedRunIDs carries what a composing tool's nested calls need to route
-// through the run's normal execution path.
-type nestedRunIDs struct {
-	runID   string
-	meta    eventMetadata
-	blocked map[string]BlockedTool
-	denied  map[string]string
-}
-
-// installNestedExecutor wires composing tools (codemode) to this run's
-// nested-call path. Executed per run and uninstalled on return, so a leaked
-// executor cannot outlive the run it belongs to.
-func (s *Session) installNestedExecutor(config nestedRunIDs) func() {
-	if s == nil || s.Tools == nil {
-		return func() {}
-	}
-	exec := runNestedExecutor{session: s, config: config}
-	var setters []NestedExecutorSetter
-	s.Tools.VisitTools(func(tool Tool) {
-		if setter, ok := tool.(NestedExecutorSetter); ok {
-			setter.SetNestedExecutor(exec)
-			setters = append(setters, setter)
-		}
-	})
-	return func() {
-		for _, setter := range setters {
-			setter.SetNestedExecutor(nil)
-		}
-	}
-}
-
-// uninstallNestedExecutor clears executor state left behind if Run exits
-// before its deferred undo (it is idempotent).
-func (s *Session) uninstallNestedExecutor() {
-	if s == nil || s.Tools == nil {
-		return
-	}
-	s.Tools.VisitTools(func(tool Tool) {
-		if setter, ok := tool.(NestedExecutorSetter); ok {
-			setter.SetNestedExecutor(nil)
-		}
-	})
-}
-
-// runNestedExecutor points composing tools at the session's nested-call path.
-type runNestedExecutor struct {
-	session *Session
-	config  nestedRunIDs
-}
-
-func (e runNestedExecutor) ExecuteNested(ctx context.Context, parentToolCallID, toolName string, args map[string]any) (ToolResult, error) {
-	return e.session.executeNestedToolCall(ctx, e.config, parentToolCallID, toolName, args)
-}
-
-// executeNestedToolCall runs one tool call nested inside a composing call
-// (e.g. codemode) through the same authorization, journaling, blocking, and
-// cancellation rules as top-level calls, with the parent correlation for the
-// journal.
-func (s *Session) executeNestedToolCall(ctx context.Context, config nestedRunIDs, parentToolCallID, toolName string, args map[string]any) (ToolResult, error) {
-	meta := config.meta
-	callID := "nested-" + uuid.NewString()
-	tool, ok := s.Tools.Get(toolName)
-	if !ok {
-		return ToolResult{}, fmt.Errorf("unknown tool: %s", toolName)
-	}
-	if s.DisableTools {
-		return ToolResult{}, errors.New(toolExecutionDisabledMessage)
-	}
-	if s.Journal != nil {
-		if err := s.Journal.RecordToolIntent(ToolIntent{RunID: config.runID, ToolCallID: callID, ParentToolCallID: parentToolCallID, Name: toolName, Args: args, ReplaySafe: toolReplaySafe(tool)}); err != nil {
-			return ToolResult{}, fmt.Errorf("journal nested tool intent: %w", err)
-		}
-		if prior, isBlocked := config.blocked[ToolArgsKey(toolName, args)]; isBlocked {
-			reason := blockedToolReason(prior)
-			if err := s.journalToolOutcome(config.runID, callID, ToolJournalBlocked, "", reason); err != nil {
-				return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
-			}
-			return ToolResult{}, errors.New(reason)
-		}
-	}
-	workingDir := s.currentWorkingDir()
-	if reason, wasDenied := config.denied[ToolArgsKey(toolName, args)]; wasDenied {
-		// The human refused this exact call earlier in the run; hand the
-		// refusal back without prompting again.
-		if s.Journal != nil {
-			_ = s.journalToolOutcome(config.runID, callID, ToolJournalDenied, "", reason)
-		}
-		_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusDenied, callID, toolName, "", args, reason, reason))
-		return ToolResult{}, errors.New(reason)
-	}
-	if s.needsApproval(tool, toolName, args, workingDir) {
-		req := ApprovalRequest{RunID: config.runID, WorkingDir: workingDir, Calls: []ApprovalToolCall{{
-			ToolCallID:    callID,
-			ToolName:      toolName,
-			Args:          args,
-			ApprovalScope: toolApprovalScope(tool, toolName, args, workingDir),
-		}}}
-		result, err := s.authorizeToolCalls(ctx, req)
-		if err != nil {
-			_ = s.journalToolOutcome(config.runID, callID, ToolJournalFailed, "", err.Error())
-			return ToolResult{}, err
-		}
-		if result.Review != nil {
-			_ = s.emit(newApprovalReviewed(meta, result.Review))
-		}
-		if !result.Allow {
-			reason := deniedToolContent(result.Reason, true)
-			if config.denied != nil {
-				config.denied[ToolArgsKey(toolName, args)] = reason
-			}
-			if err := s.journalToolOutcome(config.runID, callID, ToolJournalDenied, "", reason); err != nil {
-				return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
-			}
-			_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusDenied, callID, toolName, "", args, reason, reason))
-			return ToolResult{}, errors.New(reason)
-		}
-	}
-	_ = s.emit(newToolStarted(meta, callID, toolName, workingDir, args))
-	result, err := s.Tools.Execute(ctx, ToolContext{WorkingDir: workingDir, SupportsImages: s.SupportsImages, ToolCallID: callID}, api.ToolCall{
-		ID: callID,
-		Function: api.ToolCallFunction{
-			Name:      toolName,
-			Arguments: argsToToolCallArguments(args),
-		},
-	})
-	if err != nil {
-		if err := s.journalToolOutcome(config.runID, callID, ToolJournalFailed, "", err.Error()); err != nil {
-			return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
-		}
-		_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusFailed, callID, toolName, "", args, fmt.Sprintf("Error: %v", err), err.Error()))
-		return ToolResult{}, err
-	}
-	capped := capNestedResult(result.Content)
-	if err := s.journalToolOutcome(config.runID, callID, ToolJournalDone, capped, ""); err != nil {
-		return ToolResult{}, fmt.Errorf("journal nested tool outcome: %w", err)
-	}
-	_ = s.emitIgnoringCanceled(ctx, newToolFinished(meta, ToolStatusDone, callID, toolName, s.currentWorkingDir(), args, capped, ""))
-	result.Content = capped
-	return result, nil
-}
-
-// nestedResultMaxRunes bounds a nested call's result payload, both in the
-// journal and toward the calling script.
-const nestedResultMaxRunes = 16384
-
-// capNestedResult truncates a nested result to a bounded head+tail form.
-func capNestedResult(content string) string {
-	return Truncate(content, TruncateConfig{
-		MaxRunes: nestedResultMaxRunes,
-		HeadTail: true,
-		HeadPct:  75,
-		Label:    "tool output",
-	})
-}
-
-// argsToToolCallArguments converts a plain args map into the ordered
-// arguments struct tools receive, iterating keys sorted for determinism.
-func argsToToolCallArguments(args map[string]any) api.ToolCallFunctionArguments {
-	tc := api.NewToolCallFunctionArguments()
-	for _, key := range slices.Sorted(maps.Keys(args)) {
-		tc.Set(key, args[key])
-	}
-	return tc
 }

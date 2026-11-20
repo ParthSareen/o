@@ -69,6 +69,10 @@ const (
 	// EventApprovalDecided reports a persisted approval decision:
 	// approved, denied, or expired (disconnect/timeout never imply permission).
 	EventApprovalDecided EventType = "approval_decided"
+	// EventModelRetry is emitted before a model request that failed
+	// transiently is resent. Attempt counts retries within the model step,
+	// RetryDelayMs is the wait before the resend, and Error is the failure.
+	EventModelRetry EventType = "model_retry"
 )
 
 // ToolInfo is a UI-facing summary of one registered tool, carried on
@@ -155,8 +159,8 @@ type Event struct {
 	// System is the assembled system prompt; set on inspect events only.
 	System string `json:"system,omitempty"`
 	// Tools lists the registered tools; set on inspect events only.
-	Tools []ToolInfo     `json:"tools,omitempty"`
-	Args  map[string]any `json:"args,omitempty"`
+	Tools  []ToolInfo     `json:"tools,omitempty"`
+	Args   map[string]any `json:"args,omitempty"`
 	Tokens int            `json:"tokens,omitempty"`
 	// Metrics carries the completed chat POST's usage; set on metrics
 	// events only. PromptEvalCachedCount is nil when the server does not
@@ -177,6 +181,9 @@ type Event struct {
 	CommittedSeq int64 `json:"committedSeq,omitempty"`
 	// Recovered lists recovery findings, set on run_admitted events.
 	Recovered []string `json:"recovered,omitempty"`
+	// Attempt and RetryDelayMs are set on model_retry events.
+	Attempt      int   `json:"attempt,omitempty"`
+	RetryDelayMs int64 `json:"retryDelayMs,omitempty"`
 }
 
 type EventSink interface {
@@ -245,6 +252,10 @@ func newMetricsEvent(m eventMetadata, metrics *api.Metrics) Event {
 	return Event{Type: EventMetrics, RunID: m.runID, ChatID: m.chatID, Model: m.model, Metrics: &copy}
 }
 
+func newModelRetry(m eventMetadata, attempt int, delay time.Duration, errMsg string) Event {
+	return Event{Type: EventModelRetry, RunID: m.runID, ChatID: m.chatID, Model: m.model, Attempt: attempt, RetryDelayMs: delay.Milliseconds(), Error: errMsg}
+}
+
 func newErrorEvent(m eventMetadata, errMsg string) Event {
 	return Event{Type: EventError, RunID: m.runID, ChatID: m.chatID, Model: m.model, Error: errMsg}
 }
@@ -267,26 +278,6 @@ func newRunReplayed(m eventMetadata, status string) Event {
 
 func newRunCommitted(m eventMetadata, seq int64) Event {
 	return Event{Type: EventRunCommitted, RunID: m.runID, ChatID: m.chatID, Model: m.model, CommittedSeq: seq}
-}
-
-func newApprovalRequested(m eventMetadata, approvalID string, calls []ApprovalToolCall) Event {
-	return Event{Type: EventApprovalRequested, RunID: m.runID, ChatID: m.chatID, Model: m.model, ApprovalID: approvalID, ApprovalCalls: calls}
-}
-
-func newApprovalDecided(m eventMetadata, approvalID, decision string) Event {
-	return Event{Type: EventApprovalDecided, RunID: m.runID, ChatID: m.chatID, Model: m.model, ApprovalID: approvalID, Content: decision}
-}
-
-// approvalDecisionStatus is the wire status of a persisted approval decision.
-func approvalDecisionStatus(approved, expired bool) string {
-	switch {
-	case expired:
-		return "expired"
-	case approved:
-		return "approved"
-	default:
-		return "denied"
-	}
 }
 
 func newBackgroundTasks(m eventMetadata, content string) Event {

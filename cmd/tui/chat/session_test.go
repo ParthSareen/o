@@ -130,3 +130,43 @@ func TestMatchSessionRef(t *testing.T) {
 		}
 	}
 }
+
+// TestChatStoppedRunKeepsJournaledHistory pins that a run whose result never
+// reached the chat (canceled or dropped) reloads the journal-committed
+// history instead of syncing a stale in-memory copy over it.
+func TestChatStoppedRunKeepsJournaledHistory(t *testing.T) {
+	store := openChatTestStore(t)
+	sess := newTestSession(t, store, "model-a", "", "")
+	committed := []api.Message{
+		{Role: "user", Content: "edit the file"},
+		{Role: "assistant", ToolCalls: []api.ToolCall{{ID: "call_1", Function: api.ToolCallFunction{Name: "edit"}}}},
+		{Role: "tool", ToolCallID: "call_1", ToolName: "edit", Content: "edited"},
+		{Role: "assistant", Content: "done"},
+	}
+	if err := store.AppendMessages(sess.ID, committed); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &chatModel{
+		ctx:     context.Background(),
+		store:   store,
+		chatID:  sess.ID,
+		running: true,
+		// The live copy missed the tail events: it still has an unanswered
+		// tool call, and m.messages predates the run entirely.
+		liveMessages: committed[:2],
+	}
+	updated, _ := m.Update(chatEventsClosedMsg{})
+	fm := updated.(chatModel)
+
+	if len(fm.messages) != len(committed) {
+		t.Fatalf("messages = %d, want the %d committed messages", len(fm.messages), len(committed))
+	}
+	stored, err := store.LoadSession(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Messages) != len(committed) {
+		t.Fatalf("stored messages = %d, want %d (journaled history was truncated)", len(stored.Messages), len(committed))
+	}
+}

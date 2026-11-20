@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -22,10 +23,10 @@ type chatApprovalPromptMsg struct {
 }
 
 type chatRunDoneMsg struct {
-	result               *coreagent.RunResult
-	err                  error
-	newMessagesPersisted bool
-	persistedMessages    []api.Message
+	result            *coreagent.RunResult
+	err               error
+	runEmitted        bool
+	persistedMessages []api.Message
 }
 
 type chatCompactDoneMsg struct {
@@ -218,6 +219,8 @@ func (m *chatModel) applyAgentEvent(event coreagent.Event) {
 		if event.Metrics != nil {
 			m.lastTurnMetrics = event.Metrics
 		}
+	case coreagent.EventModelRetry:
+		m.entries = append(m.entries, newChatEntry(chatEntry{role: "system", content: fmt.Sprintf("Model request failed: %s — retry %d in %s.", event.Error, event.Attempt, time.Duration(event.RetryDelayMs)*time.Millisecond)}))
 	case coreagent.EventError:
 		m.resetRunState()
 		m.eventErrorRendered = true
@@ -322,14 +325,14 @@ func (m *chatModel) refreshLiveContextEstimate() {
 
 //nolint:containedctx // event sinks need the session context to unblock sends on cancellation.
 type chatEventSink struct {
-	ctx                  context.Context
-	ch                   chan<- tea.Msg
-	newMessagesPersisted *bool
+	ctx        context.Context
+	ch         chan<- tea.Msg
+	runEmitted *bool
 }
 
 func (s chatEventSink) Emit(event coreagent.Event) error {
-	if s.newMessagesPersisted != nil {
-		*s.newMessagesPersisted = true
+	if s.runEmitted != nil {
+		*s.runEmitted = true
 	}
 	select {
 	case s.ch <- chatAgentMsg{event: event}:

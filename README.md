@@ -82,7 +82,13 @@ It implies `--allow-all-tools` unless you set the flag explicitly; pass
   input is rejected as a request conflict.
 - Journaled runs emit `run_admitted` before work begins and `run_committed`
   after the terminal state and history are durably committed (always after
-  `run_finished`, which is the live completion event as before).
+  `run_finished`, which is the live completion event as before). A run that
+  fails on a model or tool error still commits (as failed) and its
+  `run_committed` follows the `error` event.
+- `model_retry` (`attempt`, `retryDelayMs`, `error`) precedes an automatic
+  resend of a model request that failed transiently (5xx, 408, 429, dropped
+  connection) before streaming any output. It is informational; the run
+  continues.
 - `--pipe-approvals` opens an approval channel: approval-needing tool calls
   emit `approval_requested` (`approvalId`, the correlated calls) and the
   frontend answers with `{"cmd":"approval","approvalId":...,"allow":...}`.

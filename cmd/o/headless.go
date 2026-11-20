@@ -31,25 +31,59 @@ func (p headlessPrompter) PromptApproval(context.Context, coreagent.ApprovalRequ
 // runs. With auto on (the CLI default), auto mode grades calls with the
 // review model and denies when grading fails; there is no human to fall
 // back on.
-func headlessApproval(client coreagent.ChatClient, opts *agentTUIOptions) (*coreagent.ApprovalState, coreagent.ApprovalPrompter) {
+// cliApproval sets up approvals for the non-interactive frontends. human,
+// when set, is a channel that can answer approval prompts (pipe approvals):
+// it replaces any blanket grant, and auto review hands it the calls it does
+// not allow. Without it, auto review denies on failure and anything needing
+// a human is refused.
+func cliApproval(client coreagent.ChatClient, opts *agentTUIOptions, human coreagent.ApprovalPrompter) (*coreagent.ApprovalState, coreagent.ApprovalPrompter) {
 	state := &coreagent.ApprovalState{}
-	if opts.AllowAllTools {
+	if opts.AllowAllTools && human == nil {
 		state.GrantAll()
 		return state, headlessPrompter{allowAll: true}
 	}
 	if opts.AutoReview {
 		state.SetMode(coreagent.ApprovalModeAuto)
-		reviewer := &coreagent.AutoReviewer{
-			Client: client,
-			Model:  coreagent.ResolveAutoReviewModel(opts.ReviewModel, opts.Model),
-		}
-		return state, coreagent.AutoReviewPrompter{
-			Reviewer:      reviewer,
+		return state, &coreagent.AutoReviewPrompter{
+			Reviewer: &coreagent.AutoReviewer{
+				Client: client,
+				Model:  coreagent.ResolveAutoReviewModel(opts.ReviewModel, opts.Model),
+			},
 			State:         state,
-			DenyOnFailure: true,
+			Next:          human,
+			DenyOnFailure: human == nil,
 		}
 	}
+	if human != nil {
+		return state, human
+	}
 	return state, headlessPrompter{allowAll: false}
+}
+
+// newCLISession builds the agent session headless and pipe mode share.
+func newCLISession(client coreagent.ChatClient, opts *agentTUIOptions, registry *coreagent.Registry, catalog *coreagent.SkillCatalog, workingDir string, sink coreagent.EventSink, state *coreagent.ApprovalState, prompter coreagent.ApprovalPrompter, journal coreagent.RunJournal) *coreagent.Session {
+	return coreagent.NewSession(coreagent.SessionConfig{
+		Client:              client,
+		EventSinks:          []coreagent.EventSink{sink},
+		Tools:               registry,
+		Skills:              catalog,
+		DisableTools:        opts.ToolsDisabled,
+		ApprovalPrompter:    prompter,
+		ApprovalState:       state,
+		WorkingDir:          workingDir,
+		SupportsImages:      opts.MultiModal,
+		Journal:             journal,
+		ContextWindowTokens: opts.ContextWindowTokens,
+	})
+}
+
+// storeJournal returns the store as a journal, or a nil interface (never a
+// typed nil) when there is no store.
+func storeJournal(store *sessionstore.Store) coreagent.RunJournal {
+	if store == nil {
+		return nil
+	}
+	return store
 }
 
 // headlessRenderer consumes agent events: assistant content goes to stdout
@@ -104,6 +138,9 @@ func (r *headlessRenderer) Emit(ev coreagent.Event) error {
 		// Content is pre-formatted (one line per task plus failure tails);
 		// print as-is like other lifecycle notes.
 		fmt.Fprintf(r.stderr, "%s\n", ev.Content)
+	case coreagent.EventModelRetry:
+		r.closeThinking()
+		fmt.Fprintf(r.stderr, "⟳ model request failed (%s); retry %d in %dms\n", oneLine(ev.Error), ev.Attempt, ev.RetryDelayMs)
 	case coreagent.EventError:
 		r.closeThinking()
 		r.sawError = true
@@ -175,26 +212,11 @@ func runHeadless(ctx context.Context, client *api.Client, opts *agentTUIOptions,
 func runHeadlessSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt, prompt, workingDir string, stdout, stderr io.Writer) int {
 	// Kill background tasks on exit so their processes cannot outlive the run.
 	defer func() { _ = registry.Close() }()
-	state, approvalPrompter := headlessApproval(client, opts)
+	state, approvalPrompter := cliApproval(client, opts, nil)
 
 	renderer := newHeadlessRenderer(stdout, stderr, true)
 	var journal coreagent.RunJournal
-	session := &coreagent.Session{
-		Client:           client,
-		EventSinks:       []coreagent.EventSink{coreagent.EventSinkFunc(renderer.Emit)},
-		Tools:            registry,
-		Skills:           catalog,
-		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: approvalPrompter,
-		ApprovalState:    state,
-		WorkingDir:       workingDir,
-		SupportsImages:   opts.MultiModal,
-		Compactor: &coreagent.SimpleCompactor{
-			Client:  client,
-			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
-		},
-		Background: registry.BackgroundSource(),
-	}
+	session := newCLISession(client, opts, registry, catalog, workingDir, coreagent.EventSinkFunc(renderer.Emit), state, approvalPrompter, nil)
 
 	// Create a session in the store for headless mode so the conversation
 	// is persisted and can be resumed later.
@@ -276,7 +298,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 		workingDir,
 	)
 
-	state, approvalPrompter := headlessApproval(client, opts)
+	state, approvalPrompter := cliApproval(client, opts, nil)
 
 	return runHeadlessResumeSession(ctx, client, opts, store, catalog, registry, systemPrompt, sess, prompt, workingDir, stdout, stderr, state, approvalPrompter)
 }
@@ -285,25 +307,7 @@ func runHeadlessResume(ctx context.Context, client *api.Client, opts *agentTUIOp
 // ChatClient; split out so tests can run without a real server.
 func runHeadlessResumeSession(ctx context.Context, client coreagent.ChatClient, opts *agentTUIOptions, store *sessionstore.Store, catalog *coreagent.SkillCatalog, registry *coreagent.Registry, systemPrompt string, sess *sessionstore.Session, prompt, workingDir string, stdout, stderr io.Writer, state *coreagent.ApprovalState, approvalPrompter coreagent.ApprovalPrompter) int {
 	renderer := newHeadlessRenderer(stdout, stderr, true)
-	session := &coreagent.Session{
-		Client:           client,
-		EventSinks:       []coreagent.EventSink{coreagent.EventSinkFunc(renderer.Emit)},
-		Tools:            registry,
-		Skills:           catalog,
-		DisableTools:     opts.ToolsDisabled,
-		ApprovalPrompter: approvalPrompter,
-		ApprovalState:    state,
-		WorkingDir:       workingDir,
-		SupportsImages:   opts.MultiModal,
-		Compactor: &coreagent.SimpleCompactor{
-			Client:  client,
-			Options: coreagent.CompactionOptions{ContextWindowTokens: opts.ContextWindowTokens},
-		},
-		Background: registry.BackgroundSource(),
-	}
-	if store != nil {
-		session.Journal = store
-	}
+	session := newCLISession(client, opts, registry, catalog, workingDir, coreagent.EventSinkFunc(renderer.Emit), state, approvalPrompter, storeJournal(store))
 
 	if store != nil {
 		if err := store.AddPrompt(sess.ID, prompt); err != nil {

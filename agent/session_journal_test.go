@@ -66,6 +66,7 @@ type recordingJournal struct {
 	replayQueued *RunAdmissionResult
 	blockOnAdmit []BlockedTool
 	commitErr    error
+	rawSegErr    error
 
 	intents      []ToolIntent
 	outcomes     []ToolOutcome
@@ -74,6 +75,7 @@ type recordingJournal struct {
 	approvalsReq []ApprovalRecord
 	approvalsDec []ApprovalDecision
 	commitCalls  int
+	terminals    []RunTerminal
 	commitSeq    int
 }
 
@@ -137,6 +139,9 @@ func (j *recordingJournal) RecordApprovalDecision(decision ApprovalDecision) err
 func (j *recordingJournal) RecordRawSegment(runID string, segment []api.Message) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.rawSegErr != nil {
+		return j.rawSegErr
+	}
 	j.rawSegs = append(j.rawSegs, segment)
 	return nil
 }
@@ -145,6 +150,7 @@ func (j *recordingJournal) CommitRun(terminal RunTerminal) (RunCommit, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.commitCalls++
+	j.terminals = append(j.terminals, terminal)
 	if j.commitErr != nil {
 		return RunCommit{}, j.commitErr
 	}
@@ -584,5 +590,32 @@ func TestJournalCompactionKeepsRawSegments(t *testing.T) {
 	// after it (final assistant text).
 	if len(journal.rawSegs) < 2 {
 		t.Fatalf("raw segments = %d, want >= 2", len(journal.rawSegs))
+	}
+}
+
+// TestJournalRawSegmentFailureFailsRun pins that a failed raw-segment write
+// at run end fails the run (releasing its lock with a failed terminal state)
+// instead of committing it as done with the segment lost.
+func TestJournalRawSegmentFailureFailsRun(t *testing.T) {
+	journal := &recordingJournal{rawSegErr: errors.New("disk full")}
+	session, sink := journalSessionForTest(t, journal, nil)
+	session.Client = &fakeClient{responses: [][]api.ChatResponse{journalText("done")}}
+
+	result, err := session.Run(context.Background(), RunOptions{
+		ChatID:      "chat-1",
+		Model:       "m",
+		NewMessages: []api.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("Run err = %v, want raw segment failure", err)
+	}
+	if result != nil && result.Committed {
+		t.Fatal("result must not report Committed")
+	}
+	if len(journal.terminals) != 1 || journal.terminals[0].Status != RunStatusFailed {
+		t.Fatalf("terminals = %+v, want one failed commit", journal.terminals)
+	}
+	if eventOrder(sink.events, EventRunFinished) != -1 {
+		t.Fatal("run_finished must not publish when the raw record failed")
 	}
 }

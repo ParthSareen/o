@@ -302,7 +302,7 @@ func TestHeadlessAutoReviewFailsClosed(t *testing.T) {
 }
 
 func TestHeadlessApprovalSetup(t *testing.T) {
-	state, prompter := headlessApproval(&fakeClient{}, &agentTUIOptions{})
+	state, prompter := cliApproval(&fakeClient{}, &agentTUIOptions{}, nil)
 	if state.Mode() != coreagent.ApprovalModeReview {
 		t.Fatalf("default mode = %v, want review", state.Mode())
 	}
@@ -311,7 +311,7 @@ func TestHeadlessApprovalSetup(t *testing.T) {
 		t.Fatalf("review mode should deny headlessly, got %+v, %v", result, err)
 	}
 
-	state, prompter = headlessApproval(&fakeClient{}, &agentTUIOptions{AllowAllTools: true})
+	state, prompter = cliApproval(&fakeClient{}, &agentTUIOptions{AllowAllTools: true}, nil)
 	if state.Mode() != coreagent.ApprovalModeFull {
 		t.Fatalf("allow-all mode = %v, want full", state.Mode())
 	}
@@ -320,7 +320,7 @@ func TestHeadlessApprovalSetup(t *testing.T) {
 		t.Fatalf("full access should allow, got %+v, %v", result, err)
 	}
 
-	state, prompter = headlessApproval(&fakeClient{}, &agentTUIOptions{AutoReview: true, Model: "m"})
+	state, prompter = cliApproval(&fakeClient{}, &agentTUIOptions{AutoReview: true, Model: "m"}, nil)
 	if state.Mode() != coreagent.ApprovalModeAuto {
 		t.Fatalf("auto mode = %v, want auto", state.Mode())
 	}
@@ -331,6 +331,36 @@ func TestHeadlessApprovalSetup(t *testing.T) {
 	if !strings.Contains(result.Reason, "Auto review failed") {
 		t.Fatalf("reason = %q", result.Reason)
 	}
+
+	// Pipe approvals: a human channel drops the blanket grant, and auto
+	// review hands what it cannot allow to the human instead of denying.
+	human := &countingPrompter{allow: true}
+	state, prompter = cliApproval(&fakeClient{}, &agentTUIOptions{AllowAllTools: true}, human)
+	if state.Mode() != coreagent.ApprovalModeReview {
+		t.Fatalf("pipe approvals mode = %v, want review", state.Mode())
+	}
+	if result, err = prompter.PromptApproval(context.Background(), testHeadlessRequest()); err != nil || !result.Allow || human.calls != 1 {
+		t.Fatalf("pipe approvals should ask the human, got %+v, %v, calls=%d", result, err, human.calls)
+	}
+
+	human = &countingPrompter{allow: true}
+	state, prompter = cliApproval(&fakeClient{}, &agentTUIOptions{AllowAllTools: true, AutoReview: true, Model: "m"}, human)
+	if state.Mode() != coreagent.ApprovalModeAuto {
+		t.Fatalf("pipe approvals + auto mode = %v, want auto", state.Mode())
+	}
+	if result, err = prompter.PromptApproval(context.Background(), testHeadlessRequest()); err != nil || !result.Allow || human.calls != 1 {
+		t.Fatalf("failed grading should fall back to the human, got %+v, %v, calls=%d", result, err, human.calls)
+	}
+}
+
+type countingPrompter struct {
+	allow bool
+	calls int
+}
+
+func (p *countingPrompter) PromptApproval(context.Context, coreagent.ApprovalRequest) (coreagent.Approval, error) {
+	p.calls++
+	return coreagent.Approval{Allow: p.allow}, nil
 }
 
 func testHeadlessRequest() coreagent.ApprovalRequest {
