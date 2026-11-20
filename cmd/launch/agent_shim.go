@@ -23,12 +23,6 @@ var ErrPlanVerificationUnavailable = errors.New("Could not verify Ollama plan. T
 
 type accountStateStatus int
 
-const (
-	accountStateUnknown accountStateStatus = iota
-	accountStateSignedOut
-	accountStateSignedIn
-)
-
 // AccountState is a minimal snapshot of the signed-in account.
 type AccountState struct {
 	Status accountStateStatus

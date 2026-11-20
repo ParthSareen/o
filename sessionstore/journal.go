@@ -804,13 +804,6 @@ func (s *Store) acquireRunLockTx(tx *sql.Tx, sessionID, owner string) error {
 	return nil
 }
 
-func (s *Store) releaseRunLockLocked(sessionID, owner string) error {
-	if _, err := s.db.Exec(`DELETE FROM run_locks WHERE session_id = ? AND owner = ?`, sessionID, owner); err != nil {
-		return fmt.Errorf("release run lock: %w", err)
-	}
-	return nil
-}
-
 // lockStale reports whether a lock's owner is gone. Same-host locks are
 // reclaimed when the PID is dead; other-host (or uncheckable) locks only
 // after the TTL.

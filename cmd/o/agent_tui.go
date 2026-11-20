@@ -186,19 +186,6 @@ func agentSkillSystemContext(catalog *coreagent.SkillCatalog, registry *coreagen
 	return catalog.SystemContext()
 }
 
-func agentSelectionItems(models []agentchat.ModelOption) []launch.SelectionItem {
-	items := make([]launch.SelectionItem, 0, len(models))
-	for _, model := range models {
-		items = append(items, launch.SelectionItem{
-			Name:              model.Name,
-			Description:       strings.TrimSpace(model.Description),
-			Recommended:       model.Recommended,
-			AvailabilityBadge: model.AvailabilityBadge,
-		})
-	}
-	return items
-}
-
 var agentGetwd = os.Getwd
 
 func agentWorkingDir() string {
