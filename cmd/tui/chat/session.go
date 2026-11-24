@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -34,7 +35,9 @@ func (m *chatModel) initSession() {
 		// passed messages via Options but no ChatID — shouldn't normally happen
 		// since resume passes the ChatID, but handle it just in case).
 		if len(m.messages) > 0 {
-			_ = m.store.AppendMessages(m.chatID, m.messages)
+			if err := m.store.AppendMessages(m.chatID, m.messages); err != nil {
+				slog.Warn("failed to persist pre-loaded session messages", "session", m.chatID, "error", err)
+			}
 		}
 	}
 
@@ -60,7 +63,9 @@ func (m *chatModel) persistRunResult(resultMessages []api.Message) {
 	if m.store == nil || m.chatID == "" {
 		return
 	}
-	_ = m.store.SyncMessages(m.chatID, resultMessages)
+	if err := m.store.SyncMessages(m.chatID, resultMessages); err != nil {
+		slog.Warn("failed to persist run result", "session", m.chatID, "error", err)
+	}
 }
 
 // persistPrompt saves the user's prompt to the store for history.
@@ -68,7 +73,9 @@ func (m *chatModel) persistPrompt(prompt string) {
 	if m.store == nil || m.chatID == "" {
 		return
 	}
-	_ = m.store.AddPrompt(m.chatID, prompt)
+	if err := m.store.AddPrompt(m.chatID, prompt); err != nil {
+		slog.Warn("failed to save prompt history entry", "session", m.chatID, "error", err)
+	}
 }
 
 // resetSession creates a fresh session for a new chat.

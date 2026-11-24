@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -102,7 +103,9 @@ func (m chatModel) finishManualCompaction(msg chatCompactDoneMsg) (tea.Model, te
 	// The compaction fact lands in the append-only record first, so the raw
 	// record keeps its watermark boundary; raw rows are never rewritten.
 	if m.store != nil && m.chatID != "" {
-		_ = m.store.RecordCompaction(coreagent.CompactionRecord{SessionID: m.chatID, Trigger: string(coreagent.CompactionTriggerForce), Summary: msg.result.Summary})
+		if err := m.store.RecordCompaction(coreagent.CompactionRecord{SessionID: m.chatID, Trigger: string(coreagent.CompactionTriggerForce), Summary: msg.result.Summary}); err != nil {
+			slog.Warn("failed to record compaction", "session", m.chatID, "error", err)
+		}
 	}
 	m.persistRunResult(m.messages)
 	m.entries = entriesFromMessages(m.messages)

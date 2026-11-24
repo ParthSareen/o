@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	coreagent "github.com/ParthSareen/o/agent"
@@ -61,6 +62,8 @@ func (m *chatModel) maybeNameSession(messages []api.Message) {
 			// treats the session as still unnamed.
 			return
 		}
-		_ = m.store.SetTitle(chatID, name)
+		if err := m.store.SetTitle(chatID, name); err != nil {
+			slog.Warn("failed to set session title", "session", chatID, "error", err)
+		}
 	}()
 }
