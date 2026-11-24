@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // fakeBackgroundSource pops one slice per DrainCompletions call; when repeat

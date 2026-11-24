@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 type EventType string

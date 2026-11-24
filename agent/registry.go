@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 type ToolContext struct {

@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 )
 
 // headlessPrompter answers approval prompts without a TTY. With allowAll it

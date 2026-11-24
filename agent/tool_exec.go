@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 const (

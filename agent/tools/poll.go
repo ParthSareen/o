@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 const (

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // modelRetryDelays is the backoff between resends of a model request that

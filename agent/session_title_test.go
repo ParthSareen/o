@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 type titleCaptureClient struct {

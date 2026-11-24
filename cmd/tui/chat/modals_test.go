@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	apptui "github.com/ParthSareen/o/cmd/tui"
+	"github.com/ollama/ollama/api"
 )
 
 func TestChatModelCommandOpensPicker(t *testing.T) {

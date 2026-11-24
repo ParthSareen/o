@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/launch"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ollama/ollama/api"
 )
 
 type signInTickMsg struct{}

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // journalCompactor always compacts on prompt_eval, with a bounded summary.

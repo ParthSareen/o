@@ -14,10 +14,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/internal/modelref"
 	"github.com/ParthSareen/o/logutil"
-	"github.com/ParthSareen/o/types/model"
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/types/model"
 	"github.com/spf13/cobra"
 )
 

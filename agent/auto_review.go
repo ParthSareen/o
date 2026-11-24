@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 	"mvdan.cc/sh/v3/syntax"
 )
 

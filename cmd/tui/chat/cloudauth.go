@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/launch"
 	"github.com/ParthSareen/o/internal/modelref"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ollama/ollama/api"
 )
 
 type cloudAuthKind string

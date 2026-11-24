@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/internal/filedata"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ollama/ollama/api"
 )
 
 func (m *chatModel) startRun(input string) (tea.Model, tea.Cmd) {

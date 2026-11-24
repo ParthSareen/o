@@ -16,7 +16,6 @@ import (
 
 	coreagent "github.com/ParthSareen/o/agent"
 	agenttools "github.com/ParthSareen/o/agent/tools"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/config"
 	"github.com/ParthSareen/o/cmd/launch"
 	agentchat "github.com/ParthSareen/o/cmd/tui/chat"
@@ -24,7 +23,8 @@ import (
 	internalcloud "github.com/ParthSareen/o/internal/cloud"
 	"github.com/ParthSareen/o/internal/modelref"
 	"github.com/ParthSareen/o/sessionstore"
-	"github.com/ParthSareen/o/types/model"
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/types/model"
 )
 
 type agentTUIOptions struct {

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 func TestPromptBudgetZeroValueDisablesSizing(t *testing.T) {

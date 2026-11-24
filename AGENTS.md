@@ -84,9 +84,12 @@ List current worktrees: `git worktree list`.
 | `cmd/config/`, `cmd/internal/` | Small support packages for the TUI |
 | `sessionstore/` | SQLite-backed session persistence. Only in o. |
 | `.agents/skills/` | Project skills (`update-o`). |
-| `api/`, `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages |
+| `auth/`, `envconfig/`, `format/`, `progress/`, `version/`, `logutil/` | Public support packages copied from ollama |
 | `internal/` | Internal support packages. These must be copies; you cannot import them across modules. |
-| `types/model/` | Model capabilities and names |
+
+The Ollama wire types (`api/`) and model names/capabilities (`types/model/`)
+come from the `github.com/ollama/ollama` module rather than local copies, so a
+schema change upstream lands with a `go get` bump instead of a hand-merge.
 
 ## Sessions
 
@@ -157,7 +160,8 @@ watchy stop o-ollama-11433
 
 ## Compared to ollama
 
-o adds on top of the ollama code: `sessionstore/`, `cmd/o/main.go` (new
+o depends on `github.com/ollama/ollama` for its API client and wire types
+(`api/`, `types/model/`). o adds on top: `sessionstore/`, `cmd/o/main.go` (new
 runner), `cmd/o/headless.go`, `cmd/o/model_helpers.go` (simplified copies),
 `cmd/launch/agent_shim.go` (hand-maintained types), `cmd/tui/chat/` (session
 names, nvim keys, extended markdown renderer), and

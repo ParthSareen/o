@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // Session naming: after a session accumulates a few user turns, a small LLM

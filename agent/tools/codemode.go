@@ -14,7 +14,7 @@ import (
 	"github.com/dop251/goja"
 
 	"github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // Failure modes for the codemode sandbox.

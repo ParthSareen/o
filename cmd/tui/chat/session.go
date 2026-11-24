@@ -4,8 +4,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ParthSareen/o/api"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ollama/ollama/api"
 
 	apptui "github.com/ParthSareen/o/cmd/tui"
 	"github.com/ParthSareen/o/sessionstore"

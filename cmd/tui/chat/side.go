@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // A side chat is a fork of the conversation: it inherits a snapshot of the

@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/ParthSareen/o/api"
+import "github.com/ollama/ollama/api"
 
 // BudgetCeiling selects which token limit a tool result is sized against.
 type BudgetCeiling int

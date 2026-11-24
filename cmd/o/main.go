@@ -11,9 +11,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/cmd/config"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 	"github.com/spf13/cobra"
 )
 

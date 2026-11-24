@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 func intPtr(v int) *int { return &v }

@@ -9,8 +9,8 @@ import (
 	"time"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ollama/ollama/api"
 )
 
 type chatEntry struct {
@@ -1035,11 +1035,21 @@ func (m chatModel) turnMetricsStatus() string {
 		return ""
 	}
 	status := "in " + formatContextTokenCount(input) + "  out " + formatContextTokenCount(output)
-	if cached, ok := metrics.CachedPromptTokens(); ok && input > 0 {
+	if cached, ok := cachedPromptTokens(metrics); ok && input > 0 {
 		hit := (cached*100 + input/2) / input
 		status += fmt.Sprintf("  ch %d%%", min(hit, 100))
 	}
 	return status
+}
+
+// cachedPromptTokens reports how many prompt tokens the server served from its
+// KV cache, and whether it reported a count at all. Older local servers and
+// Ollama Cloud leave the field unset.
+func cachedPromptTokens(metrics *api.Metrics) (int, bool) {
+	if metrics.PromptEvalCachedCount == nil {
+		return 0, false
+	}
+	return max(0, *metrics.PromptEvalCachedCount), true
 }
 
 func (m chatModel) contextStatus() string {

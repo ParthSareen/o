@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // openJournalStore opens an isolated store in HOME-overridden temp dir.

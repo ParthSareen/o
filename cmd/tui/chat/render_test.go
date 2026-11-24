@@ -14,7 +14,7 @@ import (
 	"github.com/muesli/termenv"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 func TestChatAssistantEntryHasNoLabel(t *testing.T) {

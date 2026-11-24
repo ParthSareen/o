@@ -5,8 +5,8 @@ import (
 	"time"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 )
 
 // LLM session naming. Sessions start with a cheap derived title (first user

@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // The journal tables implement o's durable-execution boundary: committed

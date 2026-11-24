@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 func cachedTokens(v int) *int { return &v }

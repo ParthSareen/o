@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // TestLiveMetricsEventsAgainstLocalServer proves the per-POST metrics
@@ -39,7 +39,7 @@ func TestLiveMetricsEventsAgainstLocalServer(t *testing.T) {
 
 	var metrics []*api.Metrics
 	session := &Session{
-		Client:     client,
+		Client: client,
 		EventSinks: []EventSink{EventSinkFunc(func(event Event) error {
 			if event.Type == EventMetrics && event.Metrics != nil {
 				metrics = append(metrics, event.Metrics)
@@ -81,10 +81,10 @@ func TestLiveMetricsEventsAgainstLocalServer(t *testing.T) {
 	if len(metrics) != 2 {
 		t.Fatalf("turn-2 metrics events total = %d, want 2", len(metrics))
 	}
-	cached, ok := metrics[1].CachedPromptTokens()
-	if !ok {
+	if metrics[1].PromptEvalCachedCount == nil {
 		t.Fatalf("turn-2 prompt_eval_cached_count missing: %#v (server may predate #16428)", metrics[1])
 	}
+	cached := *metrics[1].PromptEvalCachedCount
 	if cached <= 0 || cached > metrics[1].PromptEvalCount {
 		t.Fatalf("turn-2 cached tokens = %d, prompt = %d", cached, metrics[1].PromptEvalCount)
 	}

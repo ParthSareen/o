@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // TestLiveCompactionAgainstLocalServer proves compaction works end-to-end

@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 )
 
 // fakeClient plays scripted chat-response chunks.

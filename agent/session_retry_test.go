@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // scriptedClient plays one step per Chat call: stream the responses, then

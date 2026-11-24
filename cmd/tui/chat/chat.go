@@ -11,8 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 )
 
 var chatSpinnerFrames = []string{".", "..", "..."}

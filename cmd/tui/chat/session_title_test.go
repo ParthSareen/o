@@ -8,8 +8,8 @@ import (
 	"time"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 )
 
 // titleNamingClient answers every naming call with a canned title and records

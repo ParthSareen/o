@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/sessionstore"
+	"github.com/ollama/ollama/api"
 )
 
 func openChatTestStore(t *testing.T) *sessionstore.Store {

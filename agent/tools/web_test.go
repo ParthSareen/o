@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	coreagent "github.com/ParthSareen/o/agent"
-	"github.com/ParthSareen/o/api"
 	"github.com/ParthSareen/o/envconfig"
 	internalcloud "github.com/ParthSareen/o/internal/cloud"
+	"github.com/ollama/ollama/api"
 )
 
 func TestWebToolsRequireApproval(t *testing.T) {

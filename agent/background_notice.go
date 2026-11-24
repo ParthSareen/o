@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 // maxBackgroundContinuations caps how many times a single run can extend

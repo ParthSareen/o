@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 func toolMessageWithLimit(toolName, toolCallID, content string, maxRunes int) api.Message {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ParthSareen/o/api"
+	"github.com/ollama/ollama/api"
 )
 
 type ApprovalRequest struct {
